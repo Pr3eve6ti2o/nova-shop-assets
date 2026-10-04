@@ -279,16 +279,21 @@ class Database:
 
     async def deduct_balance(self, user_id: int, amount_cents: int,
                             order_id: int = None) -> int | None:
-        """Deduct from balance for purchase. Returns new balance or None if insufficient."""
+        """Deduct from balance for purchase. Returns new balance or None if insufficient.
+        Uses atomic UPDATE to prevent double-spend race conditions."""
+        if amount_cents <= 0:
+            raise ValueError("amount_cents must be positive")
         async with self._db() as db:
-            async with db.execute(
-                "SELECT balance_cents FROM users WHERE id=?", (user_id,)) as cur:
-                bal = (await cur.fetchone())["balance_cents"]
-            if bal < amount_cents:
+            # Atomic: only deduct if sufficient balance (prevents race)
+            cur = await db.execute(
+                "UPDATE users SET balance_cents = balance_cents - ? "
+                "WHERE id=? AND balance_cents >= ?",
+                (amount_cents, user_id, amount_cents))
+            if cur.rowcount == 0:
                 return None
-            new_bal = bal - amount_cents
-            await db.execute(
-                "UPDATE users SET balance_cents=? WHERE id=?", (new_bal, user_id))
+            async with db.execute(
+                "SELECT balance_cents FROM users WHERE id=?", (user_id,)) as cur2:
+                new_bal = (await cur2.fetchone())["balance_cents"]
             await db.execute(
                 "INSERT INTO balance_transactions"
                 "(user_id, type, amount_cents, balance_after_cents, order_id)"
