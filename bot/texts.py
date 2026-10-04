@@ -46,6 +46,25 @@ EMOJI LEXICON — use only these, always with the same meaning:
 
 # ---------------------------------------------------------------- buttons ---
 BTN_SHOP = "\U0001f6cd\ufe0f Shop"
+BTN_INFO = "\u2139\ufe0f Info"
+BTN_RENT = "\U0001f4e6 Rent"
+MSG_INFO = (
+    "\u2139\ufe0f <b>About</b>\n\n"
+    "Nova Shop — instant digital goods delivery.\n\n"
+    "<b>Team</b>\n"
+    "Built and operated by the Nova team.\n\n"
+    "<b>Support</b>\n"
+    "Use the Support button for help."
+)
+MSG_RENT = (
+    "\U0001f4e6 <b>Rent Bot Features</b>\n\n"
+    "Rent premium features monthly with API access.\n\n"
+    "<b>Plans</b>\n"
+    "• Starter — $9/mo\n"
+    "• Pro — $29/mo\n"
+    "• Enterprise — $99/mo\n\n"
+    "Contact support to activate."
+)
 BTN_SEARCH = "\U0001f50d Search"
 BTN_CART = "\U0001f6d2 Cart"
 BTN_ORDERS = "\U0001f4e6 Orders"
@@ -57,7 +76,7 @@ BTN_BACK = "\U0001f519 Back"
 BTN_PREV = "\u25c0\ufe0f Prev"
 BTN_NEXT = "Next \u25b6\ufe0f"
 BTN_ADD_CART = "\U0001f6d2 Add to cart \u00b7 {price}"
-BTN_BUY_NOW = "\u26a1 Buy now"
+BTN_BUY_NOW = "\u26a1 Buy now \u00b7 {price}"
 BTN_WISH_ADD = "\U0001f90d Add to Wishlist"
 BTN_WISH_IN = "\u2764\ufe0f In Wishlist"
 BTN_REVIEWS = "\u2b50 Reviews ({n})"
@@ -90,8 +109,14 @@ BTN_RATE_ITEMS = "\u2b50 Rate Items"
 BTN_PURCHASES = "\U0001f511 My Purchases"
 BTN_BALANCE = "\U0001f4b3 Balance"
 BTN_TOPUP = "\U0001f4b3 Top Up"
+BTN_CUSTOM_AMOUNT = "\u270f\ufe0f Custom Amount"
 BTN_PAY_BALANCE = "\U0001f4b3 Pay with Balance ({balance})"
 BTN_ORDER_LINK = "\U0001f517 Order Link"
+BTN_CRYPTO_PAYMENT = "\U0001f4b0 Crypto Payment"
+MSG_CRYPTO_MENU = (
+    "\U0001f4b0 <b>Crypto Payment</b>\n\n"
+    "Choose a cryptocurrency:"
+)
 BTN_WISHLIST = "\u2764\ufe0f Wishlist"
 BTN_REFERRAL = "\U0001f465 Referral Program"
 BTN_REDEEM = "\U0001f39f\ufe0f Redeem promo"
@@ -404,7 +429,8 @@ MSG_BALANCE = (
 )
 MSG_BALANCE_TOPUP = (
     "\U0001f4b3 <b>Top Up Balance</b>\n\n"
-    "Choose an amount:"
+    "Choose an amount:\n"
+    "\U0001f381 Get 5% bonus on every deposit!"
 )
 MSG_BALANCE_INVOICE_CREATING = "Creating invoice..."
 MSG_BALANCE_TOPUP_MANUAL = (

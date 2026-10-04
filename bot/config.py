@@ -59,28 +59,65 @@ ADMINS: list = _parse_id_list(os.getenv("ADMINS", ""))
 PAYMENTS_PROVIDER_TOKEN = os.getenv("PAYMENTS_PROVIDER_TOKEN") or None
 
 STARS_PER_USD: int = int(os.getenv("STARS_PER_USD", "60") or 60)
+if STARS_PER_USD <= 0:
+    raise RuntimeError("STARS_PER_USD must be > 0")
 CURRENCY: str = (os.getenv("CURRENCY", "USD") or "USD").upper()
 REFERRAL_PERCENT: int = int(os.getenv("REFERRAL_PERCENT", "5") or 5)
+if not (0 <= REFERRAL_PERCENT <= 100):
+    raise RuntimeError("REFERRAL_PERCENT must be between 0 and 100")
 DELIVERY_FEE_CENTS: int = int(os.getenv("DELIVERY_FEE_CENTS", "0") or 0)
+if DELIVERY_FEE_CENTS < 0:
+    raise RuntimeError("DELIVERY_FEE_CENTS must be >= 0")
 
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST") or None
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH") or None
-WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST and WEBHOOK_PATH else None
+if WEBHOOK_HOST and WEBHOOK_PATH:
+    WEBHOOK_URL = f"{WEBHOOK_HOST.rstrip('/')}/{WEBHOOK_PATH.lstrip('/')}"
+    if not WEBHOOK_URL.startswith("https://"):
+        raise RuntimeError("WEBHOOK_URL must use https://")
+else:
+    WEBHOOK_URL = None
 
 # --- Crypto payments (all optional) ---
 CRYPTOBOT_TOKEN = os.getenv("CRYPTOBOT_TOKEN") or None
 CRYPTOBOT_TESTNET = (os.getenv("CRYPTOBOT_TESTNET", "0") or "0").strip() == "1"
 CRYPTOBOT_FEE_PERCENT: int = int(os.getenv("CRYPTOBOT_FEE_PERCENT", "3") or 3)
+if CRYPTOBOT_FEE_PERCENT < 0:
+    raise RuntimeError("CRYPTOBOT_FEE_PERCENT must be >= 0")
 
 XPUB_BTC = os.getenv("XPUB_BTC") or None
 XPUB_ETH = os.getenv("XPUB_ETH") or None
 XPUB_TRX = os.getenv("XPUB_TRX") or None
 TON_DEPOSIT_ADDRESS = os.getenv("TON_DEPOSIT_ADDRESS") or None
 
+# M3: fail fast on misconfigured xpubs — a ypub/tpub/truncated key would
+# otherwise surface only at checkout time as a generic derivation failure.
+def _validate_xpubs():
+    expected = {
+        "XPUB_BTC": ("zpub", "xpub", "ypub"),  # BIP84/BIP49: zpub/ypub preferred, xpub tolerated
+        "XPUB_ETH": ("xpub",),
+        "XPUB_TRX": ("xpub",),
+    }
+    for env_key, prefixes in expected.items():
+        val = globals().get(env_key)
+        if not val:
+            continue  # chain disabled — enabled_chains() handles this
+        v = val.strip()
+        if not v.startswith(prefixes):
+            raise RuntimeError(
+                f"Misconfigured {env_key}: expected prefix {prefixes}, got {v[:8]!r}... — "
+                f"direct {env_key.split('_')[1].lower()} deposits will fail. Fix .env."
+            )
+_validate_xpubs()
+
 CRYPTO_TTL_MINUTES: int = int(os.getenv("CRYPTO_TTL_MINUTES", "45") or 45)
+if CRYPTO_TTL_MINUTES <= 0:
+    raise RuntimeError("CRYPTO_TTL_MINUTES must be > 0")
 
 # --- Mini App (optional) ---
 MINIAPP_URL = os.getenv("MINIAPP_URL") or None
+if MINIAPP_URL and not MINIAPP_URL.startswith("https://"):
+    raise RuntimeError("MINIAPP_URL must use https://")
 
 # Permission bits (bitmask RBAC)
 PERM_STATS = 1
@@ -101,3 +138,6 @@ PERM_NAMES = {
     PERM_PROMOS: "Promos",
     PERM_MAINTENANCE: "Maintenance",
 }
+
+# Deposit bonus: 5% extra on every top-up
+DEPOSIT_BONUS_PERCENT = 5

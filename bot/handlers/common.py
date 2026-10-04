@@ -14,8 +14,8 @@ from utils import fmt_money, stars_for_cents
 logger = logging.getLogger(__name__)
 
 NAV_BUTTONS = {
-    texts.BTN_SHOP, texts.BTN_ORDERS,
-    texts.BTN_PROFILE, texts.BTN_SUPPORT, texts.BTN_ADMIN,
+    texts.BTN_SHOP, texts.BTN_PROFILE,
+    texts.BTN_INFO, texts.BTN_RENT, texts.BTN_ADMIN,
 }
 
 
@@ -55,9 +55,7 @@ async def mask_of_tg(tg_id: int) -> int:
 
 
 async def main_reply_kb(tg_id: int):
-    user = await db.get_user_by_tg(tg_id)
-    count = await db.cart_count(user["id"]) if user else 0
-    return kb.reply_main_menu(count, is_admin=await is_admin_tg(tg_id))
+    return kb.reply_main_menu(is_admin=await is_admin_tg(tg_id))
 
 
 async def refresh_reply_kb(chat_id: int, tg_id: int):

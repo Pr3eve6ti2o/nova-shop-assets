@@ -59,7 +59,6 @@ async def nav_cart(message: types.Message, state: FSMContext):
     await render_cart(message, user["id"], state)
 
 
-@dp.message_handler(commands=["cart"])
 async def cmd_cart(message: types.Message, state: FSMContext):
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
     await render_cart(message, user["id"], state)

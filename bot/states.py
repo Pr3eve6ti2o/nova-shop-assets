@@ -3,8 +3,7 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 
 
 class Checkout(StatesGroup):
-    """Sleek 3-screen checkout: details -> payment -> confirm."""
-    details = State()   # delivery/pickup toggle + phone + address (one screen)
+    """Sleek 2-screen checkout: payment -> confirm. (Details removed for digital-only.)"""
     payment = State()   # payment method (chains listed directly)
     confirm = State()   # merged review & confirm; promo via reply
 

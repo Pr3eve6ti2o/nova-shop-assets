@@ -46,7 +46,6 @@ async def nav_profile(message: types.Message, state: FSMContext):
     await render_profile(message, user)
 
 
-@dp.message_handler(commands=["profile"])
 async def cmd_profile(message: types.Message, state: FSMContext):
     await state.finish()
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)

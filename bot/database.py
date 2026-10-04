@@ -255,11 +255,17 @@ class Database:
 
     async def add_balance(self, user_id: int, amount_cents: int,
                          tx_type: str = "topup", order_id: int = None) -> int:
-        """Add to balance (topup/refund). Returns new balance."""
+        """Add to balance (topup/refund). Applies 5% bonus on topups. Returns new balance."""
+        import config as cfg
+        # Apply deposit bonus on topups
+        bonus = 0
+        if tx_type == "topup":
+            bonus = amount_cents * cfg.DEPOSIT_BONUS_PERCENT // 100
+        total = amount_cents + bonus
         async with self._db() as db:
             await db.execute(
                 "UPDATE users SET balance_cents = balance_cents + ? WHERE id=?",
-                (amount_cents, user_id))
+                (total, user_id))
             async with db.execute(
                 "SELECT balance_cents FROM users WHERE id=?", (user_id,)) as cur:
                 new_bal = (await cur.fetchone())["balance_cents"]
@@ -267,7 +273,7 @@ class Database:
                 "INSERT INTO balance_transactions"
                 "(user_id, type, amount_cents, balance_after_cents, order_id)"
                 " VALUES (?, ?, ?, ?, ?)",
-                (user_id, tx_type, amount_cents, new_bal, order_id))
+                (user_id, tx_type, total, new_bal, order_id))
             await db.commit()
             return new_bal
 

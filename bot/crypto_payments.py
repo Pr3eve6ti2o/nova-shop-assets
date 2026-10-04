@@ -51,6 +51,8 @@ CHAINS = {
     },
 }
 
+TON_FINALITY_CONFIRMATIONS = 1
+
 COINGECKO_IDS = {"btc": "bitcoin", "eth": "tether",
                  "trx": "tether", "ton": "the-open-network"}
 
@@ -81,6 +83,8 @@ def chain_configured(chain: str) -> bool:
     """A chain is usable when its secret is configured (xpub or TON address)."""
     if chain == "ton":
         return bool(config.TON_DEPOSIT_ADDRESS)
+    if chain not in CHAINS:
+        return False
     env_key = CHAINS[chain]["xpub_env"]
     return bool(getattr(config, env_key, None))
 
@@ -91,8 +95,104 @@ def enabled_chains() -> list:
 
 
 # ------------------------------------------------------------ derivation ---
-_WALLET_CORE_DERIVE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "tools", "hdwallet-gen", "derive.js")
+# C2: the wallet-core WASM engine used to be recompiled on EVERY checkout
+# (~700ms per derivation). _DerivationEngine below keeps ONE persistent Node
+# process per bot lifetime and serves derivations over a JSON-line protocol,
+# so each checkout derivation costs a few milliseconds.
+_WALLET_CORE_DAEMON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "tools", "hdwallet-gen", "derive_daemon.js")
+
+import json as _json
+import select as _select
+import threading as _threading
+
+
+class _DerivationEngine:
+    """Session-cached wallet-core derivation engine.
+
+    Spawns `node derive_daemon.js` once and reuses it for every derivation.
+    Thread-safe: derive_address() is a sync function called from the bot's
+    event loop, so a lock serializes requests over the single stdio pipe.
+    If the daemon dies, it is restarted once and the request retried; a
+    second failure raises, same as the old one-shot path.
+    """
+
+    _READY_TIMEOUT = 60
+    _REQUEST_TIMEOUT = 30
+
+    def __init__(self):
+        self._lock = _threading.Lock()
+        self._proc = None
+
+    def _readline(self, stream, timeout):
+        r, _, _ = _select.select([stream], [], [], timeout)
+        if not r:
+            raise TimeoutError("derivation daemon response timeout")
+        line = stream.readline()
+        if not line:
+            raise ConnectionError("derivation daemon closed the pipe")
+        return line
+
+    def _spawn(self):
+        proc = subprocess.Popen(
+            ["node", _WALLET_CORE_DAEMON],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            cwd=os.path.dirname(_WALLET_CORE_DAEMON),
+            text=False,
+            bufsize=0,
+        )
+        try:
+            line = self._readline(proc.stdout, self._READY_TIMEOUT)
+            hello = _json.loads(line)
+            if not hello.get("ready"):
+                raise RuntimeError("daemon did not signal ready")
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            raise
+        return proc
+
+    def _ensure(self):
+        if self._proc is None or self._proc.poll() is not None:
+            self._proc = self._spawn()
+        return self._proc
+
+    def derive(self, chain: str, xpub: str, index: int) -> str:
+        payload = _json.dumps(
+            {"chain": chain, "xpub": xpub.strip(), "index": index}) + "\n"
+        last_err = None
+        for attempt in range(2):
+            try:
+                with self._lock:
+                    proc = self._ensure()
+                    proc.stdin.write(payload.encode())
+                    proc.stdin.flush()
+                    line = self._readline(proc.stdout, self._REQUEST_TIMEOUT)
+                resp = _json.loads(line)
+                if resp.get("ok"):
+                    return resp["address"]
+                raise ValueError(f"wallet-core derive failed for {chain}: "
+                                 f"{resp.get('error', 'unknown daemon error')}")
+            except (TimeoutError, ConnectionError, BrokenPipeError,
+                    _json.JSONDecodeError, RuntimeError) as e:
+                last_err = str(e)
+            # Transport failure: drop the dead daemon so the next attempt
+            # (or next call) spawns a fresh one.
+            try:
+                if self._proc is not None:
+                    self._proc.kill()
+            except Exception:
+                pass
+            self._proc = None
+        raise ValueError(f"wallet-core derive failed for {chain}: {last_err}")
+
+
+_ENGINE = _DerivationEngine()
+
 
 def derive_address(chain: str, xpub: str, index: int) -> str:
     """Derive the external-chain address at `index` from an account xpub.
@@ -105,28 +205,23 @@ def derive_address(chain: str, xpub: str, index: int) -> str:
     the server, so a breach can't steal funds, only see addresses.
 
     Derivation runs through the OFFICIAL trustwallet/wallet-core
-    (trustwallet/wallet-core on GitHub) via tools/hdwallet-gen/derive.js,
-    so the addresses users pay to come from Trust Wallet's own code.
-    Verified against canonical test vectors in the smoke suite.
+    (trustwallet/wallet-core on GitHub) via a persistent
+    tools/hdwallet-gen/derive_daemon.js engine (loaded once per bot
+    lifetime), so the addresses users pay to come from Trust Wallet's own
+    code. Verified against canonical test vectors in the smoke suite.
     """
     if chain not in ("btc", "eth", "trx"):
         raise ValueError(f"unsupported chain: {chain}")
     if not xpub or not xpub.strip():
         raise ValueError(f"missing xpub for {chain}")
-    if not isinstance(index, int) or index < 0:
+    if not isinstance(index, int) or index < 0 or index > 2147483647:
+        # C1: 2^31-1 is the BIP32 non-hardened max. Index 0 is cryptographically
+        # valid (test vectors use it); the bot reserves it via next_xpub_index
+        # which starts allocation at 1.
         raise ValueError(f"bad derivation index: {index}")
-    try:
-        proc = subprocess.run(
-            ["node", _WALLET_CORE_DERIVE, chain, xpub.strip(), str(index)],
-            capture_output=True, text=True, timeout=30, cwd=os.path.dirname(_WALLET_CORE_DERIVE),
-        )
-    except Exception as e:
-        raise ValueError(f"wallet-core derive failed for {chain}: {e}") from e
-    addr = (proc.stdout or "").strip().split()[0] if proc.stdout else ""
-    if proc.returncode != 0 or not addr:
-        err = (proc.stderr or "").strip().split("\n")[-1] if proc.stderr else "unknown"
-        raise ValueError(f"wallet-core derive failed for {chain}: {err}")
-    return addr
+    # H1: the xpub travels inside the daemon request body (stdin pipe),
+    # never in argv (/proc cmdline is world-readable).
+    return _ENGINE.derive(chain, xpub, index)
 
 
 async def next_deposit_address(db, chain: str):
@@ -138,12 +233,15 @@ async def next_deposit_address(db, chain: str):
         return config.TON_DEPOSIT_ADDRESS, 0, None  # memo set per order
     xpub = getattr(config, CHAINS[chain]["xpub_env"])
     index = await db.next_xpub_index(chain)
-    return derive_address(chain, xpub, index), index, None
+    address = await asyncio.to_thread(derive_address, chain, xpub, index)
+    return address, index, None
 
 
 # ------------------------------------------------------------------ money ---
 def format_crypto(base_units: int, chain: str) -> str:
     """Format integer base units as a human decimal string. No floats."""
+    if base_units < 0:
+        raise ValueError("base_units must be non-negative")
     dec = CHAINS[chain]["decimals"]
     sym = CHAINS[chain]["symbol"]
     whole, frac = divmod(int(base_units), 10 ** dec)
@@ -161,6 +259,8 @@ def usd_cents_to_base_units(usd_cents: int, price_usd: float, chain: str) -> int
         raise ValueError("bad price")
     dec = CHAINS[chain]["decimals"]
     price_cents = int(round(price_usd * 100))
+    if price_cents <= 0:
+        raise ValueError("bad price")
     # ceil(usd_cents * 10^dec / price_cents)
     num = int(usd_cents) * (10 ** dec)
     return (num + price_cents - 1) // price_cents
@@ -195,7 +295,7 @@ async def _fetch_coingecko() -> dict:
 
 async def _fetch_kraken() -> dict:
     """Fallback 1: Kraken public ticker (no key). Returns {chain: usd float}."""
-    pairs = ",".join(KRAKEN_PAIRS.values())
+    pairs = ",".join(dict.fromkeys(KRAKEN_PAIRS.values()))
     url = f"https://api.kraken.com/0/public/Ticker?pair={pairs}"
     async with aiohttp.ClientSession() as s:
         async with s.get(url, proxy=_proxy(),
@@ -265,14 +365,28 @@ async def get_rates(force: bool = False) -> dict:
             logger.warning("%s rates failed: %s", name, e)
             continue
         for c in missing:
-            if c in got and got[c] > 0:
-                rates[c] = got[c]
-                served_by[c] = name
+            if c not in got or got[c] <= 0:
+                continue
+            v = got[c]
+            if not (0.000001 < v < 100_000_000):
+                logger.warning("%s rate out of bounds for %s: %s", name, c, v)
+                continue
+            prev = _rates_cache["rates"].get(c)
+            if prev and (v > prev * 10 or v < prev / 10):
+                logger.warning("%s rate outlier for %s: %s (prev %s)",
+                               name, c, v, prev)
+                continue
+            rates[c] = v
+            served_by[c] = name
 
     if rates:
-        _rates_cache.update(ts=now, rates=rates)
-        logger.info("rates served: %s",
-                    {c: served_by.get(c, "?") for c in sorted(rates)})
+        if all(c in rates for c in COINGECKO_IDS):
+            _rates_cache.update(ts=now, rates=rates)
+            logger.info("rates served: %s",
+                        {c: served_by.get(c, "?") for c in sorted(rates)})
+        else:
+            logger.info("rates partial (not cached): %s",
+                        {c: served_by.get(c, "?") for c in sorted(rates)})
         return rates
 
     age = now - _rates_cache["ts"]
@@ -297,8 +411,9 @@ async def _cryptobot_call(method: str, params: dict) -> dict:
     url = f"{_cryptobot_base()}/{method}"
     headers = {"Crypto-Pay-API-Token": config.CRYPTOBOT_TOKEN}
     async with aiohttp.ClientSession() as s:
-        async with s.get(url, params=params, headers=headers, proxy=_proxy(),
+        async with s.post(url, json=params, headers=headers, proxy=_proxy(),
                          timeout=aiohttp.ClientTimeout(total=25)) as r:
+            r.raise_for_status()
             data = await r.json()
     if not data.get("ok"):
         raise RuntimeError(f"CryptoBot API error: {data}")
@@ -309,7 +424,12 @@ async def cryptobot_create_invoice(*, order_id: int, usd_cents: int,
                                    asset: str = "USDT") -> dict:
     """Create a CryptoBot invoice: USD total + fee%, rounded UP to cents."""
     fee_pct = config.CRYPTOBOT_FEE_PERCENT
-    gross_cents = (int(usd_cents) * (100 + fee_pct) + 99) // 100  # ceil
+    if not isinstance(fee_pct, int) or not (0 <= fee_pct < 100):
+        raise ValueError("CRYPTOBOT_FEE_PERCENT must be an integer in [0, 100)")
+    # Gross up: the fee is charged on the gross invoice amount, so
+    # gross = ceil(net * 100 / (100 - fee_pct)).
+    gross_cents = ((int(usd_cents) * 100 + (100 - fee_pct) - 1)
+                   // (100 - fee_pct))
     amount = f"{gross_cents // 100}.{gross_cents % 100:02d}"
     return await _cryptobot_call("createInvoice", {
         "asset": asset,
@@ -318,6 +438,14 @@ async def cryptobot_create_invoice(*, order_id: int, usd_cents: int,
         "payload": str(order_id),
         "expires_in": 1800,  # 30 min invoice window
     })
+
+
+async def cryptobot_delete_invoice(invoice_id: int) -> dict:
+    """Cancel a CryptoBot invoice (used to dedupe multiple invoices per order)."""
+    iid = int(invoice_id)
+    if iid <= 0:
+        raise ValueError("invoice_id must be positive")
+    return await _cryptobot_call("deleteInvoice", {"invoice_id": iid})
 
 
 async def cryptobot_get_invoices(invoice_ids=None, status: str = None) -> list:
@@ -355,22 +483,38 @@ async def _get_json(url: str, params: dict = None, timeout: int = 20):
 async def fetch_btc_txs(address: str) -> tuple:
     """Return (txs, tip_height). tx: {txid, to, sats, confirmations}."""
     try:
-        txs = await _get_json(f"https://mempool.space/api/address/{address}/txs")
+        txs = []
+        after = None
+        while True:
+            params = {"after_txid": after} if after else None
+            page = await _get_json(
+                f"https://mempool.space/api/address/{address}/txs",
+                params=params)
+            if not page:
+                break
+            txs.extend(page)
+            if len(page) < 50:
+                break
+            after = page[-1].get("txid")
+            if not after:
+                break
         tip = await _get_json("https://mempool.space/api/blocks/tip/height")
     except Exception as e:
         logger.warning("mempool.space failed (%s), trying blockchain.info", e)
         try:
+            tip_data = await _get_json("https://blockchain.info/latestblock")
+            tip = int(tip_data.get("height") or 0)
             data = await _get_json(f"https://blockchain.info/rawaddr/{address}",
                                    params={"limit": 50})
             out = []
             for tx in data.get("txs", []):
-                conf = tx.get("block_height")
-                conf = 999 if conf else 0
+                h = tx.get("block_height")
+                conf = (tip - h + 1) if h and tip else 0
                 for o in tx.get("out", []):
                     if o.get("addr") == address:
                         out.append({"txid": tx["hash"], "to": address,
                                     "sats": int(o["value"]), "confirmations": conf})
-            return out, 0
+            return out, tip
         except Exception as e2:
             logger.warning("blockchain.info fallback failed: %s", e2)
             return [], 0
@@ -390,18 +534,26 @@ async def fetch_eth_usdt_txs(address: str) -> list:
     """USDT-ERC20 transfers TO address. tx: {txid, to, base, confirmations}."""
     contract = CHAINS["eth"]["token_contract"]
     try:
-        data = await _get_json(
-            f"https://eth.blockscout.com/api/v2/addresses/{address}/token-transfers",
-            params={"type": "ERC-20"})
+        items = []
+        params = {"type": "ERC-20"}
+        while True:
+            data = await _get_json(
+                f"https://eth.blockscout.com/api/v2/addresses/{address}/token-transfers",
+                params=params)
+            items.extend(data.get("items", []))
+            next_params = data.get("next_page_params")
+            if not next_params:
+                break
+            params = {"type": "ERC-20", **next_params}
         stats = await _get_json("https://eth.blockscout.com/api/v2/stats")
         tip = int(stats.get("total_blocks", 0) or 0)
     except Exception as e:
         logger.warning("blockscout failed: %s", e)
         return []
     out = []
-    for it in data.get("items", []):
+    for it in items:
         to = (it.get("to") or {}).get("hash", "")
-        tok = (it.get("token") or {}).get("contract", "")
+        tok = (it.get("token") or {}).get("address", "")
         if to.lower() != address.lower() or tok.lower() != contract.lower():
             continue
         try:
@@ -420,10 +572,19 @@ async def fetch_trx_usdt_txs(address: str) -> list:
     """USDT-TRC20 transfers TO address via Tronscan."""
     contract = CHAINS["trx"]["token_contract"]
     try:
-        data = await _get_json(
-            "https://apilist.tronscanapi.com/api/token_trc20/transfers",
-            params={"contract_address": contract, "relatedAddress": address,
-                    "limit": 50, "sort": "-timestamp"})
+        items = []
+        start = 0
+        limit = 50
+        while True:
+            data = await _get_json(
+                "https://apilist.tronscanapi.com/api/token_trc20/transfers",
+                params={"contract_address": contract, "relatedAddress": address,
+                        "limit": limit, "start": start, "sort": "-timestamp"})
+            page = data.get("data") or []
+            items.extend(page)
+            if len(page) < limit:
+                break
+            start += limit
         tip_data = await _get_json("https://apilist.tronscanapi.com/api/block",
                                    params={"sort": "-number", "limit": 1})
         tip = int((tip_data.get("data") or [{}])[0].get("number", 0) or 0)
@@ -431,7 +592,9 @@ async def fetch_trx_usdt_txs(address: str) -> list:
         logger.warning("tronscan failed: %s", e)
         return []
     out = []
-    for it in (data.get("data") or []):
+    for it in items:
+        if (it.get("tokenAddress") or "") != contract:
+            continue
         if (it.get("toAddress") or "") != address:
             continue
         try:
@@ -440,43 +603,98 @@ async def fetch_trx_usdt_txs(address: str) -> list:
             continue
         blk = int(it.get("block") or 0)
         conf = (tip - blk + 1) if blk and tip else 0
-        out.append({"txid": it.get("transactionHash", ""), "to": address,
+        out.append({"txid": it.get("transactionHash", ""), "to": it.get("toAddress"),
                     "base": base, "confirmations": conf})
     await asyncio.sleep(1)
     return out
 
 
+def _ton_raw(address: str) -> str:
+    """Normalize a TON address to canonical raw 'workchain:hex' form; '' if unparseable."""
+    if not address:
+        return ""
+    addr = address.strip()
+    if not addr:
+        return ""
+    if ":" in addr:
+        wc, _, h = addr.partition(":")
+        try:
+            wc_i = int(wc)
+        except (TypeError, ValueError):
+            return ""
+        h = h.strip().lower()
+        if len(h) == 64 and all(c in "0123456789abcdef" for c in h):
+            return f"{wc_i}:{h}"
+        return ""
+    try:
+        raw = base64.urlsafe_b64decode(addr + "=" * (-len(addr) % 4))
+    except Exception:
+        return ""
+    if len(raw) != 36:
+        return ""
+    import binascii
+    if binascii.crc_hqx(raw[:34], 0) != int.from_bytes(raw[34:36], "big"):
+        return ""
+    wc = raw[1]
+    if wc >= 128:
+        wc -= 256
+    return f"{wc}:{raw[2:34].hex()}"
+
+
 async def fetch_ton_txs(address: str) -> list:
     """TON transfers TO address via toncenter.
     tx: {txid, to, source, base, memo, utime}."""
-    try:
-        data = await _get_json("https://toncenter.com/api/v2/getTransactions",
-                               params={"address": address, "limit": 20})
-    except Exception as e:
-        logger.warning("toncenter failed: %s", e)
-        return []
     out = []
-    for tx in (data.get("result") or []):
-        in_msg = tx.get("in_msg") or {}
-        if (in_msg.get("destination") or "") != address:
-            continue
+    seen = set()
+    limit = 100
+    lt = None
+    tx_hash = None
+    for _ in range(100):
+        params = {"address": address, "limit": limit}
+        if lt is not None and tx_hash is not None:
+            params["lt"] = lt
+            params["hash"] = tx_hash
         try:
-            base = int(str(in_msg.get("value", "0")))
-        except (TypeError, ValueError):
-            continue
-        memo = _decode_ton_comment(in_msg.get("message"))
-        txid = tx.get("transaction_id", {}) or {}
-        # SECURITY (audit): capture sender + timestamp so callers can verify
-        # the claimed sender and enforce a recency window (prevents replay).
-        try:
-            utime = int(tx.get("utime") or 0)
-        except (TypeError, ValueError):
-            utime = 0
-        out.append({"txid": f"{txid.get('hash', '')}:{txid.get('lt', '')}",
-                    "to": address,
-                    "source": str(in_msg.get("source") or ""),
-                    "base": base, "memo": memo, "utime": utime,
-                    "confirmations": 999})  # TON: seen in block == final
+            data = await _get_json(
+                "https://toncenter.com/api/v2/getTransactions",
+                params=params)
+        except Exception as e:
+            logger.warning("toncenter failed: %s", e)
+            break
+        page = data.get("result") or []
+        for tx in page:
+            in_msg = tx.get("in_msg") or {}
+            if _ton_raw(in_msg.get("destination") or "") != _ton_raw(address):
+                continue
+            try:
+                base = int(str(in_msg.get("value", "0")))
+            except (TypeError, ValueError):
+                continue
+            memo = _decode_ton_comment(in_msg.get("message"))
+            txid = tx.get("transaction_id", {}) or {}
+            tx_key = f"{txid.get('hash', '')}:{txid.get('lt', '')}"
+            if tx_key in seen:
+                continue
+            seen.add(tx_key)
+            # SECURITY (audit): capture sender + timestamp so callers can verify
+            # the claimed sender and enforce a recency window (prevents replay).
+            try:
+                utime = int(tx.get("utime") or 0)
+            except (TypeError, ValueError):
+                utime = 0
+            out.append({"txid": tx_key,
+                        "to": address,
+                        "source": str(in_msg.get("source") or ""),
+                        "base": base, "memo": memo, "utime": utime,
+                        "confirmations": TON_FINALITY_CONFIRMATIONS})  # TON: seen in block == final
+        if len(page) < limit:
+            break
+        last_id = (page[-1].get("transaction_id", {}) or {})
+        lt = last_id.get("lt")
+        tx_hash = last_id.get("hash")
+        if not lt or not tx_hash:
+            break
+        await asyncio.sleep(1)
     await asyncio.sleep(1)
     return out
 
@@ -505,8 +723,18 @@ def matching_txs(chain: str, txs: list, address: str,
     match when a memo is given, amount > 0. Pure and unit-testable."""
     out = []
     for tx in txs:
-        if (tx.get("to") or "").lower() != address.lower():
-            continue
+        if chain == "ton":
+            if _ton_raw(tx.get("to") or "") != _ton_raw(address):
+                continue
+        elif chain == "trx":
+            if (tx.get("to") or "") != address:
+                continue
+        elif chain == "eth":
+            if (tx.get("to") or "").lower() != address.lower():
+                continue
+        else:
+            if (tx.get("to") or "").lower() != address.lower():
+                continue
         if chain == "ton" and memo:
             if (tx.get("memo") or "") != memo:
                 continue
@@ -549,11 +777,15 @@ async def payment_rails(db, total_cents: int):
     stars_n = stars_for_cents(int(total_cents), config.STARS_PER_USD)
     rails.append(("stars", texts.BTN_STARS.format(n=stars_n)))
     if config.CRYPTOBOT_TOKEN:
-        fee = (int(total_cents) * config.CRYPTOBOT_FEE_PERCENT + 99) // 100
-        gross = int(total_cents) + fee
+        fee_pct = config.CRYPTOBOT_FEE_PERCENT
+        if not isinstance(fee_pct, int) or not (0 <= fee_pct < 100):
+            raise ValueError("CRYPTOBOT_FEE_PERCENT must be an integer in [0, 100)")
+        # Gross up: fee is a percentage of the gross invoice amount.
+        gross = ((int(total_cents) * 100 + (100 - fee_pct) - 1)
+                 // (100 - fee_pct))
         rails.append(("cryptobot", texts.BTN_CRYPTOBOT_RAIL.format(
             total=fmt_money(gross, config.CURRENCY),
-            fee_pct=config.CRYPTOBOT_FEE_PERCENT)))
+            fee_pct=fee_pct)))
     if config.PAYMENTS_PROVIDER_TOKEN:
         rails.append(("card", texts.BTN_CARD.format(
             total=fmt_money(total_cents, config.CURRENCY))))
@@ -561,5 +793,5 @@ async def payment_rails(db, total_cents: int):
                      if db is None or await db.crypto_chain_enabled(c)]
     if direct_chains:
         rails.append(("direct", texts.BTN_DIRECT_CRYPTO))
-    rails.append(("cod", None))  # label chosen by caller (COD vs pickup)
+    # COD removed: digital-only bot, no cash on delivery
     return rails

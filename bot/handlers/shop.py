@@ -35,20 +35,6 @@ async def nav_shop(message: types.Message, state: FSMContext):
     await message.answer(texts.MSG_CATEGORIES, reply_markup=kb.categories_kb(cats))
 
 
-@dp.message_handler(commands=["catalog"])
-async def cmd_catalog(message: types.Message, state: FSMContext):
-    """Direct product list, skipping categories."""
-    await state.finish()
-    await get_or_register(message.from_user.id, message.from_user.full_name)
-    products = await db.list_all_active_products(limit=50, offset=0)
-    if not products:
-        await message.answer(texts.MSG_CATEGORY_EMPTY.format(name="Catalog"))
-        return
-    await message.answer(
-        texts.MSG_CATALOG_TITLE,
-        reply_markup=kb.catalog_kb(products))
-
-
 @dp.callback_query_handler(text="shop")
 async def cb_shop(query: types.CallbackQuery, state: FSMContext):
     await query.answer()

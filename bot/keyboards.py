@@ -39,16 +39,10 @@ def main_menu_inline():
     return kb
 
 
-def reply_main_menu(cart_count: int, is_admin: bool = False):
+def reply_main_menu(is_admin: bool = False):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    if config.MINIAPP_URL:
-        # Most prominent slot: full-width first row. Opens the Mini App store.
-        kb.row(KeyboardButton(texts.BTN_OPEN_STORE,
-                              web_app=WebAppInfo(url=config.MINIAPP_URL)))
-    # Slim 3-button layout: Shop, Orders, Support
-    # Cart is accessible via product pages; Profile via /profile command
-    kb.row(KeyboardButton(texts.BTN_SHOP))
-    kb.row(KeyboardButton(texts.BTN_ORDERS), KeyboardButton(texts.BTN_SUPPORT))
+    kb.row(KeyboardButton(texts.BTN_PROFILE), KeyboardButton(texts.BTN_SHOP))
+    kb.row(KeyboardButton(texts.BTN_INFO), KeyboardButton(texts.BTN_RENT))
     if is_admin:
         kb.row(KeyboardButton(texts.BTN_ADMIN))
     return kb
@@ -140,14 +134,8 @@ def product_kb(p, qty: int, in_wishlist: bool, rating_avg: float, rating_count: 
         InlineKeyboardButton("\u2795", callback_data=cb("pa", p["id"], "+1")),
     )
     kb.add(InlineKeyboardButton(
-        texts.BTN_ADD_CART.format(price=fmt_money(p["price_cents"] * qty, config.CURRENCY)),
-        callback_data=cb("a", p["id"]),
-    ))
-    kb.row(
-        InlineKeyboardButton(texts.BTN_BUY_NOW, callback_data=cb("pb", p["id"])),
-        InlineKeyboardButton(texts.BTN_WISH_IN if in_wishlist else texts.BTN_WISH_ADD,
-                             callback_data=cb("w", p["id"])),
-    )
+        texts.BTN_BUY_NOW.format(price=fmt_money(p["price_cents"] * qty, config.CURRENCY)),
+        callback_data=cb("pb", p["id"])))
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data=cb("cat", p["category_id"], 0)))
     kb.row(BTN_MENU)
     return kb
@@ -246,16 +234,35 @@ def payment_kb(rails, cod: bool):
     `rails`: list of (method_id, label); direct-crypto chains arrive
     pre-expanded as `direct_<chain>` (no sub-menu hop). The "cod" entry
     carries label None and is rendered as COD/pickup here.
+    Crypto chains are hidden behind a single 'Crypto payment' submenu.
     """
+    CRYPTO_METHODS = {"cryptobot", "direct_ton", "direct_eth", "direct_usdt",
+                      "direct_trx", "direct_btc"}
     kb = InlineKeyboardMarkup()
+    has_crypto = False
     for method, label in rails:
+        if method in CRYPTO_METHODS:
+            has_crypto = True
+            continue
         if method == "cod":
             kb.add(InlineKeyboardButton(
                 texts.BTN_COD if cod else texts.BTN_PAY_PICKUP,
                 callback_data=cb("cop", "cod")))
         else:
             kb.add(InlineKeyboardButton(label, callback_data=cb("cop", method)))
+    if has_crypto:
+        kb.add(InlineKeyboardButton(
+            texts.BTN_CRYPTO_PAYMENT, callback_data="cop:crypto_menu"))
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="co4"))
+    return kb
+
+
+def crypto_menu_kb(crypto_rails):
+    """Submenu for crypto payment options."""
+    kb = InlineKeyboardMarkup()
+    for method, label in crypto_rails:
+        kb.add(InlineKeyboardButton(label, callback_data=cb("cop", method)))
+    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="cop:back_to_payment"))
     return kb
 
 
@@ -267,7 +274,6 @@ def confirm_kb(total_cents: int):
         callback_data="cok"))
     kb.row(
         InlineKeyboardButton(f"{texts.BTN_EDIT} Items", callback_data=cb("coe", "items")),
-        InlineKeyboardButton(f"{texts.BTN_EDIT} Details", callback_data=cb("coe", "details")),
         InlineKeyboardButton(f"{texts.BTN_EDIT} Payment", callback_data=cb("coe", "payment")),
     )
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="cob"))
@@ -353,11 +359,24 @@ def balance_kb():
     return kb
 
 
+def info_kb():
+    kb = InlineKeyboardMarkup()
+    kb.row(BTN_MENU)
+    return kb
+
+
+def rent_kb():
+    kb = InlineKeyboardMarkup()
+    kb.row(BTN_MENU)
+    return kb
+
+
 def balance_topup_kb():
     kb = InlineKeyboardMarkup(row_width=2)
-    for cents in [500, 1000, 2500, 5000, 10000]:
+    for cents in [500, 1000, 2500, 5000]:
         label = fmt_money(cents, config.CURRENCY)
         kb.insert(InlineKeyboardButton(label, callback_data=f"bal:amt:{cents}"))
+    kb.add(InlineKeyboardButton(texts.BTN_CUSTOM_AMOUNT, callback_data="bal:custom"))
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="bal:back"))
     return kb
 
