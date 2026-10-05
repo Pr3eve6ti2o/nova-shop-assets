@@ -14,9 +14,11 @@ Expected order dict keys:
     paymentMethod (one of stars/card/cryptobot/crypto_self),
     status (default "pending"), rawPayload (dict, debug info)
 """
+import functools
 import json
 import logging
 import os
+import urllib.error
 import urllib.request
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,12 @@ _ADMIN_ENV = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "admin", ".env")
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+@functools.lru_cache(maxsize=1)
 def _config():
     """(PAYLOAD_URL, PAYLOAD_API_KEY) from env, falling back to admin/.env."""
     url = os.environ.get("PAYLOAD_URL", "").strip().rstrip("/")
@@ -75,11 +83,13 @@ def push_order_to_payload(order: dict) -> bool:
             url + "/api/orders", data=body, method="POST",
             headers={"Content-Type": "application/json",
                      "Authorization": f"users API-Key {key}"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            ok = 200 <= resp.status < 300
-        if not ok:
-            logger.warning("payload order push returned HTTP %s", resp.status)
-        return ok
+        opener = urllib.request.build_opener(_NoRedirect())
+        with opener.open(req, timeout=10) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+        logger.warning("payload order push returned HTTP %s: %s", e.code, body)
+        return False
     except Exception as e:  # noqa: BLE001 - best effort by design
         logger.warning("payload order push failed: %s", e)
         return False

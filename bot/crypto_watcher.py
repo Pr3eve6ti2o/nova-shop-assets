@@ -33,24 +33,33 @@ def _parse_iso(s: str):
         dt = datetime.fromisoformat(s)
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except Exception:
-        return _now()
+        return None
 
 
 async def finalize_crypto_order(order_id: int, *, provider: str, external_id: str,
                                 amount_cents: int, currency: str):
-    """Shared finalize path: idempotent payment record -> fulfill -> notify."""
+    """Shared finalize path: processing payment -> fulfill -> paid -> notify.
+
+    Payment is recorded as 'processing' BEFORE fulfillment. Only after
+    fulfill_order succeeds is it marked 'paid'. This ensures failed
+    fulfillments can be retried (payment stays 'processing').
+    """
     from handlers.common import (fulfill_order, maybe_credit_referral,
                                  notify_admins, render_roadmap)
     order = await db.get_order(order_id)
     if not order:
         logger.error("finalize: unknown order %s", order_id)
         return False
+    # Idempotency: if order already confirmed, we're done.
+    if order["status"] == "confirmed":
+        logger.info("finalize: order %s already confirmed; ignoring duplicate %s/%s",
+                    order_id, provider, external_id)
+        return True
     # C7: never finalize a cancelled order (e.g. user changed payment method
     # after the deposit was created, then paid the old address).
     if order["status"] == "cancelled":
         logger.warning("finalize: order %s is cancelled, refusing to resurrect",
                        order_id)
-        from handlers.common import notify_admins
         await notify_admins(
             f"⚠️ <b>Payment received for cancelled order #{order_id}</b> "
             f"({provider}/{external_id}). Manual review needed — do not auto-fulfill.",
@@ -60,23 +69,32 @@ async def finalize_crypto_order(order_id: int, *, provider: str, external_id: st
     if not user:
         return False
 
+    # Record as 'processing' first. If this is a duplicate (retry), that's fine.
     is_new = await db.record_payment(
         provider=provider, external_id=str(external_id), user_id=user["id"],
         order_id=order_id, amount_cents=amount_cents, currency=currency,
-        status="paid")
+        status="processing")
     if not is_new:
-        logger.info("duplicate crypto payment ignored: %s/%s", provider, external_id)
-        return True
+        logger.info("duplicate crypto payment seen: %s/%s", provider, external_id)
+        # Re-check order status in case it was confirmed while we were here.
+        order = await db.get_order(order_id)
+        if order and order["status"] == "confirmed":
+            return True
+        logger.warning("retrying unfulfilled crypto payment: %s/%s",
+                       provider, external_id)
 
     ok, note = await fulfill_order(order_id)
     # C6: only mark confirmed when fulfillment actually succeeded.
     if not ok:
         logger.error("crypto fulfillment failed order %s: %s", order_id, note)
         await notify_admins(
-            f"\u274c <b>Fulfillment failed</b> for paid crypto order #{order_id}:"
+            f"\u274c <b>Fulfillment failed</b> for order #{order_id}:"
             f" {note}\nManual refund/replacement may be needed.",
             min_bit=config.PERM_ORDERS)
+        # Leave payment as 'processing' so it can be retried.
         return False
+    # Fulfillment succeeded: mark payment paid, then order confirmed.
+    await db.update_payment_status(provider, str(external_id), "paid")
     await db.set_order_status(order_id, "confirmed")
 
     await db.audit(user["tg_id"], "crypto_payment",
@@ -133,9 +151,11 @@ def _tx_amount(tx: dict) -> int:
 async def _sweep_direct_deposits():
     deposits = await db.pending_crypto_deposits()
     # include underpaid: still watching until TTL
-    underpaid = await db.list_crypto_deposits(status="underpaid", limit=200)
+    underpaid = await db.list_crypto_deposits(status="underpaid", limit=10000)
+    # include claimed: stale claims from crashes need finalize retry
+    claimed = await db.list_crypto_deposits(status="claimed", limit=10000)
     seen_ids = {d["id"] for d in deposits}
-    for d in underpaid:
+    for d in underpaid + claimed:
         if d["id"] not in seen_ids:
             deposits.append(d)
     now = _now()
@@ -144,12 +164,12 @@ async def _sweep_direct_deposits():
             await _process_deposit(dep, now)
         except Exception as e:
             logger.warning("deposit %s sweep error: %s", dep["id"], e)
-        await asyncio.sleep(2)  # be polite to free APIs
+        await asyncio.sleep(0.1)  # yield while reducing cadence drift
 
 
 async def _process_deposit(dep, now):
     expires = _parse_iso(dep["expires_at"])
-    if now > expires:
+    if expires is None or now > expires:
         await db.update_crypto_deposit(dep["id"], status="expired")
         await _notify_expired(dep)
         await db.audit(0, "crypto_expired", f"deposit={dep['id']}")
@@ -189,8 +209,12 @@ async def _process_deposit(dep, now):
         return
 
     needed = cp.CHAINS[chain]["confirmations"]
-    # Conservative: every contributing payment must be confirmed.
-    conf = min(int(t.get("confirmations", 0) or 0) for t in matches)
+    # Conservative: every *material* payment must be confirmed. Sub-dust
+    # matches (e.g. a 1-satoshi 0-conf grief tx) are ignored so an attacker
+    # can't drag the confirmation floor to 0 and block finalization.
+    dust = cp.DUST_BASE_UNITS.get(chain, 0)
+    material = [t for t in matches if _tx_amount(t) >= dust] or matches
+    conf = min(int(t.get("confirmations", 0) or 0) for t in material)
     if conf < needed:
         await db.update_crypto_deposit(dep["id"], confirmations=conf,
                                        seen_amount_crypto=str(total))
@@ -198,15 +222,33 @@ async def _process_deposit(dep, now):
 
     claimed = await db.claim_crypto_deposit(dep["id"], best["txid"], str(total), conf)
     if not claimed:
-        return  # another worker claimed it
-    await db.update_crypto_deposit(dep["id"], status="paid")
+        if dep["status"] != "claimed":
+            logger.info("deposit %s already claimed by another worker; skipping", dep["id"])
+            return
+        # Stale claimed: retry finalization in case a previous attempt failed
+        # after recording the payment but before fulfillment succeeded.
+        logger.info("deposit %s already claimed; retrying finalize", dep["id"])
     order = await db.get_order(dep["order_id"])
-    await finalize_crypto_order(
+    ok = await finalize_crypto_order(
         dep["order_id"], provider=f"direct_{chain}", external_id=best["txid"],
         amount_cents=order["total_cents"] if order else 0,
         currency=cp.CHAINS[chain]["symbol"])
-    logger.info("deposit %s paid via %s (%d txs, ref %s)",
-                dep["id"], chain, len(matches), best["txid"][:16])
+    if ok:
+        await db.update_crypto_deposit(dep["id"], status="paid")
+        logger.info("deposit %s paid via %s (%d txs, ref %s)",
+                    dep["id"], chain, len(matches), best["txid"][:16])
+    elif order and order["status"] == "cancelled":
+        # finalize_crypto_order already alerted admins; do not retry forever.
+        await db.update_crypto_deposit(dep["id"], status="manual_review")
+        logger.warning("deposit %s for cancelled order %s held for manual review"
+                       " (chain=%s ref=%s)",
+                       dep["id"], dep["order_id"], chain, best["txid"][:16])
+    else:
+        # Keep the deposit retryable; the claim is re-entrant above.
+        await db.update_crypto_deposit(dep["id"], status="underpaid")
+        logger.warning("deposit %s finalize failed; leaving underpaid for retry"
+                       " (chain=%s txs=%d ref=%s)",
+                       dep["id"], chain, len(matches), best["txid"][:16])
 
 
 async def _notify_expired(dep):
@@ -239,17 +281,21 @@ async def _notify_underpaid(dep, seen: int, expected: int, chain: str):
                 seen=cp.format_crypto(seen, chain),
                 expected=cp.format_crypto(expected, chain),
                 remaining=cp.format_crypto(remaining, chain),
-                address=dep["address"]))
+                address=dep["address"]),
+            disable_web_page_preview=True)
     except Exception as e:
         logger.warning("underpaid notify failed: %s", e)
 
 
 async def _sweep_late_deposits():
     """Expired <24h without txid: one more scan -> 'late' bucket for manual review."""
-    cutoff = (_now() - timedelta(hours=24)).isoformat()
+    cutoff = _now() - timedelta(hours=24)
     expired = await db.list_crypto_deposits(status="expired", limit=100)
     for dep in expired:
-        if dep["txid"] or (dep["created_at"] or "") < cutoff:
+        if dep["txid"]:
+            continue
+        created = _parse_iso(dep["created_at"]) if dep["created_at"] else None
+        if created is None or created < cutoff:
             continue
         try:
             txs = await _fetch_chain_txs(dep["chain"], dep["address"])
@@ -259,20 +305,28 @@ async def _sweep_late_deposits():
                                       dep["memo"])
             if matches:
                 total = sum(_tx_amount(t) for t in matches)
-                best = max(matches, key=_tx_amount)
-                await db.update_crypto_deposit(dep["id"], status="late",
-                                               txid=best["txid"],
-                                               seen_amount_crypto=str(total))
-                from handlers.common import notify_admins
-                await notify_admins(
-                    texts.MSG_CRYPTO_ADMIN_LATE.format(
-                        oid=dep["order_id"], chain=dep["chain"],
-                        tx=best["txid"][:24]),
-                    min_bit=config.PERM_ORDERS)
-                await db.audit(0, "crypto_late", f"deposit={dep['id']}")
+                expected = int(dep["expected_crypto"])
+                if not cp.meets_tolerance(total, expected):
+                    dust = cp.DUST_BASE_UNITS.get(dep["chain"], 0)
+                    if total < dust:
+                        logger.info(
+                            "late deposit %s: dust %d base units (< %d); no notice",
+                            dep["id"], total, dust)
+                else:
+                    best = max(matches, key=_tx_amount)
+                    await db.update_crypto_deposit(dep["id"], status="late",
+                                                   txid=best["txid"],
+                                                   seen_amount_crypto=str(total))
+                    from handlers.common import notify_admins
+                    await notify_admins(
+                        texts.MSG_CRYPTO_ADMIN_LATE.format(
+                            oid=dep["order_id"], chain=dep["chain"],
+                            tx=best["txid"][:24]),
+                        min_bit=config.PERM_ORDERS)
+                    await db.audit(0, "crypto_late", f"deposit={dep['id']}")
         except Exception as e:
             logger.warning("late scan %s error: %s", dep["id"], e)
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.1)
 
 
 async def _sweep_cryptobot():
@@ -296,13 +350,27 @@ async def _sweep_cryptobot():
         paid_ids = {int(p.get("invoice_id")) for p in paid if p.get("invoice_id")}
         for inv in invoices:
             if int(inv["invoice_id"]) in paid_ids:
-                await db.set_cryptobot_status(int(inv["invoice_id"]), "paid")
                 order = await db.get_order(inv["order_id"])
-                await finalize_crypto_order(
+                if order and order["status"] == "confirmed":
+                    await db.set_cryptobot_status(int(inv["invoice_id"]), "paid")
+                    logger.info(
+                        "cryptobot invoice %s already fulfilled; marked paid",
+                        inv["invoice_id"])
+                    continue
+                ok = await finalize_crypto_order(
                     inv["order_id"], provider="cryptobot",
                     external_id=f"cb_{inv['invoice_id']}",
                     amount_cents=order["total_cents"] if order else 0,
                     currency="USDT")
+                # F1: only mark the invoice 'paid' once the order is
+                # finalized. If finalize fails, leave it active so the next
+                # sweep retries it instead of stranding the user's payment.
+                if not ok:
+                    logger.warning(
+                        "cryptobot invoice %s paid but finalize failed; "
+                        "keeping active for retry", inv["invoice_id"])
+                    continue
+                await db.set_cryptobot_status(int(inv["invoice_id"]), "paid")
                 logger.info("cryptobot invoice %s recovered as paid",
                             inv["invoice_id"])
     except Exception as e:
@@ -336,6 +404,15 @@ async def _sweep_tonconnect_pending():
             order_id, ok = await create_tonconnect_order(
                 user, p["sender"], p["amount_nano"], clean,
                 p.get("promo_code"), matched)
+            if order_id is None or not ok:
+                # Blocked (e.g. txid already claimed by another user) or
+                # partial/inconsistent state — drop the pending without
+                # sending a bogus confirmation.
+                logger.warning(
+                    "tonconnect slow-path blocked for pending %s (order_id=%s ok=%s)",
+                    p["id"], order_id, ok)
+                await db.tonconnect_pending_remove(p["id"])
+                continue
             await db.tonconnect_pending_remove(p["id"])
             try:
                 from keyboards import order_success_kb
@@ -356,6 +433,7 @@ async def crypto_watcher_loop():
     logger.info("crypto watcher started (60s interval)")
     await asyncio.sleep(10)  # let startup settle
     while True:
+        started = _now()
         try:
             await _sweep_direct_deposits()
         except Exception as e:
@@ -372,4 +450,5 @@ async def crypto_watcher_loop():
             await _sweep_tonconnect_pending()
         except Exception as e:
             logger.warning("tonconnect pending sweep error: %s", e)
-        await asyncio.sleep(SWEEP_INTERVAL)
+        elapsed = (_now() - started).total_seconds()
+        await asyncio.sleep(max(0, SWEEP_INTERVAL - elapsed))

@@ -25,6 +25,9 @@ async def _try_delete(message):
 
 @dp.message_handler(text=texts.BTN_ORDERS)
 async def nav_orders(message: types.Message, state: FSMContext):
+    if message.chat.type != "private":
+        await message.answer("Your orders are private — please open me in a private chat.")
+        return
     await _try_delete(message)
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
     await render_orders(message, user["id"], 0)

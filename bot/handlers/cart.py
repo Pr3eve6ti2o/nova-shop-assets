@@ -51,6 +51,9 @@ async def render_cart(target, user_id: int, state: FSMContext, dropped: list = N
 
 @dp.message_handler(lambda m: (m.text or "").startswith(texts.BTN_CART))
 async def nav_cart(message: types.Message, state: FSMContext):
+    if message.chat.type != "private":
+        await message.answer("Your cart is private — please open me in a private chat.")
+        return
     try:
         await message.delete()
     except TelegramAPIError:
@@ -97,18 +100,17 @@ async def cb_cart_qty(query: types.CallbackQuery, state: FSMContext):
         return
     delta = 1 if delta_s == "+1" else -1
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
-    items = await db.cart_items(user["id"])
-    cur = next((i["qty"] for i in items if i["product_id"] == pid), 0)
-    new_qty = cur + delta
+    # Atomic adjust prevents read-modify-write race on rapid taps
+    new_qty = await db.cart_adjust(user["id"], pid, delta)
     if new_qty <= 0:
-        await db.cart_remove(user["id"], pid)
         await query.answer(texts.TOAST_REMOVED)
     else:
         p = await db.get_product(pid)
         if not product_available(p, new_qty):
+            # Roll back the increment if stock exceeded
+            await db.cart_adjust(user["id"], pid, -delta)
             await query.answer(texts.ERR_OUT_OF_STOCK, show_alert=True)
             return
-        await db.cart_set_qty(user["id"], pid, new_qty)
         await query.answer()
     await render_cart(query, user["id"], state)
 

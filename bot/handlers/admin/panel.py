@@ -8,7 +8,7 @@ import texts
 from loader import db, dp
 from utils import fmt_money
 from ..common import get_or_register, edit_text_safe, main_reply_kb
-from . import IsAdmin, mask_of
+from . import mask_of
 
 
 async def render_console(query_or_msg, tg_id: int):
@@ -41,10 +41,10 @@ async def btn_admin(message: types.Message):
 
 @dp.callback_query_handler(text="adm")
 async def cb_admin(query: types.CallbackQuery):
-    await query.answer()
     if not await mask_of(query.from_user.id):
         await query.answer(texts.MSG_ADMIN_DENIED, show_alert=True)
         return
+    await query.answer()
     await render_console(query, query.from_user.id)
 
 
@@ -59,7 +59,7 @@ async def cb_stats(query: types.CallbackQuery):
     avg = await db.avg_check()
     counts = await db.orders_by_status_counts()
     by_status = "\n".join(
-        f"{texts.STATUS_EMOJI[s]} {texts.STATUS_LABEL[s]}: <b>{counts.get(s, 0)}</b>"
+        f"{texts.STATUS_EMOJI.get(s, '')} {texts.STATUS_LABEL.get(s, s)}: <b>{counts.get(s, 0)}</b>"
         for s in texts.ORDER_STATUSES)
     top = await db.top_products(5)
     top_lines = "\n".join(

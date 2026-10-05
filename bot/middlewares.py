@@ -20,13 +20,26 @@ logger = logging.getLogger(__name__)
 RATE_WINDOW = 60          # seconds
 RATE_GLOBAL = 30          # actions per window per user
 RATE_PAYMENT = 5          # payment attempts per window per user
+_ADMIN_CACHE = {}
+_ADMIN_CACHE_TTL = 5      # seconds
 
 
-async def _is_admin(db, tg_id: int) -> bool:
+async def _is_admin(db, tg_id: int, perm: int = None) -> bool:
     if tg_id in config.ADMINS:
         return True
+    if perm is None:
+        perm = config.PERM_ALL
+    now = time.monotonic()
+    cached = _ADMIN_CACHE.get((tg_id, perm))
+    if cached and now - cached[0] < _ADMIN_CACHE_TTL:
+        return cached[1]
     user = await db.get_user_by_tg(tg_id)
-    return bool(user and user["role_mask"])
+    if not user:
+        result = False
+    else:
+        result = bool((user["role_mask"] or 0) & perm)
+    _ADMIN_CACHE[(tg_id, perm)] = (now, result)
+    return result
 
 
 class RateLimitMiddleware(BaseMiddleware):
@@ -43,9 +56,12 @@ class RateLimitMiddleware(BaseMiddleware):
         dq = bucket.setdefault(user_id, deque())
         while dq and now - dq[0] > RATE_WINDOW:
             dq.popleft()
+        if not dq:
+            bucket.pop(user_id, None)
         if len(dq) >= limit:
             return False
         dq.append(now)
+        bucket[user_id] = dq
         return True
 
     async def on_pre_process_message(self, message, data):
@@ -65,7 +81,7 @@ class RateLimitMiddleware(BaseMiddleware):
         if not self._allowed(self._hits, uid, RATE_GLOBAL):
             await query.answer(texts.ERR_RATE_LIMITED, show_alert=True)
             raise CancelHandler()
-        if (query.data or "") == "cok":
+        if (query.data or "").startswith(("pay", "cok", "crypto")) or data.get("state"):
             if not self._allowed(self._pay_hits, uid, RATE_PAYMENT):
                 await query.answer(texts.ERR_PAY_RATE_LIMITED, show_alert=True)
                 raise CancelHandler()
@@ -81,14 +97,14 @@ class MaintenanceMiddleware(BaseMiddleware):
     async def on_pre_process_message(self, message, data):
         if not message.from_user:
             return
-        if await self.db.maintenance_on() and not await _is_admin(self.db,
-                                                                  message.from_user.id):
+        if await self.db.maintenance_on() and not await _is_admin(
+                self.db, message.from_user.id, config.PERM_MAINTENANCE):
             await message.answer(texts.ERR_MAINTENANCE)
             raise CancelHandler()
 
     async def on_pre_process_callback_query(self, query, data):
-        if await self.db.maintenance_on() and not await _is_admin(self.db,
-                                                                  query.from_user.id):
+        if await self.db.maintenance_on() and not await _is_admin(
+                self.db, query.from_user.id, config.PERM_MAINTENANCE):
             await query.answer(texts.ERR_MAINTENANCE, show_alert=True)
             raise CancelHandler()
 
@@ -102,8 +118,17 @@ class CallbackSafetyMiddleware(BaseMiddleware):
     we swallow.
     """
 
+    async def on_pre_process_callback_query(self, query, data):
+        query._answered = False
+        original_answer = query.answer
+        async def tracked_answer(*args, **kwargs):
+            query._answered = True
+            return await original_answer(*args, **kwargs)
+        query.answer = tracked_answer
+
     async def on_post_process_callback_query(self, query, results, data):
-        try:
-            await query.answer()
-        except Exception:
-            pass  # already answered by the handler
+        if not getattr(query, "_answered", False):
+            try:
+                await query.answer()
+            except Exception:
+                logger.debug("fallback callback answer failed", exc_info=True)

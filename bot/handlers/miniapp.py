@@ -7,6 +7,7 @@ always come from the DB — never from the payload.
 """
 import json
 import logging
+import math
 
 from aiogram import types
 from aiogram.dispatcher import FSMContext
@@ -16,7 +17,7 @@ import keyboards as kb
 import texts
 from loader import db, dp
 from utils import fmt_money
-from .checkout import _cart_is_digital_only, render_details, render_payment
+from .checkout import _cart_is_digital_only, render_payment
 from .common import (get_or_register, main_reply_kb, product_available,
                      render_lines, totals)
 
@@ -39,10 +40,21 @@ async def find_tonconnect_tx(merchant: str, sender: str, amount_nano: int):
     for tx in txs:
         if not tx.get("source") or tx["source"] != sender:
             continue
-        if tx["base"] < amount_nano:
+        try:
+            base = int(tx.get("base", 0))
+        except (TypeError, ValueError):
+            continue
+        if base < amount_nano:
             continue
         utime = tx.get("utime") or 0
-        if utime and (now - utime) > 15 * 60:
+        if not utime or (now - utime) > 15 * 60:
+            continue
+        txid = str(tx.get("txid") or "")
+        if not txid:
+            continue
+        # Skip txs already claimed (by anyone) — prevents double-matching.
+        existing = await db.get_payment_by_external_id("tonconnect", txid)
+        if existing:
             continue
         return tx
     return None
@@ -55,6 +67,17 @@ async def create_tonconnect_order(user: dict, sender: str, amount_nano: int,
     Shared by the fast path and the watcher slow path. Idempotent on the
     txid via record_payment's UNIQUE(provider, external_id).
     """
+    # SECURITY: bind the claim to the paying user. If this txid was already
+    # recorded under a different user, refuse (front-running attempt).
+    txid = str(matched.get("txid") or "")
+    if txid:
+        existing = await db.get_payment_by_external_id("tonconnect", txid)
+        if existing and existing["user_id"] != user["id"]:
+            logger.warning("tonconnect order creation blocked: txid=%s existing_user=%s claiming_user=%s",
+                           txid, existing["user_id"], user["id"])
+            from handlers.common import notify_admins
+            await notify_admins(f"⚠️ TON Connect claim blocked: txid {txid} already claimed by user {existing['user_id']}, attempted by user {user['id']}")
+            return None, False
     subtotal = sum(it["qty"] * it["price"] for it in clean)
     discount_cents = 0
     promo_row = None
@@ -67,6 +90,16 @@ async def create_tonconnect_order(user: dict, sender: str, amount_nano: int,
             promo_code = None
             promo_row = None
     total = subtotal - discount_cents
+    # SECURITY (audit C3): verify the on-chain tx covers the server-side total.
+    import crypto_payments as cp
+    rates = await cp.get_rates()
+    ton_usd = rates.get("ton")
+    if not ton_usd or ton_usd <= 0:
+        # Fail closed: cannot verify amount without a rate.
+        return None, False
+    expected_nano = math.ceil(total / 100 / ton_usd * 1e9)
+    if matched.get("base", 0) < expected_nano * 0.98:
+        return None, False
     order_id = await db.create_order(
         user_id=user["id"], subtotal_cents=subtotal, discount_cents=discount_cents,
         total_cents=total, payment_method="tonconnect",
@@ -75,6 +108,8 @@ async def create_tonconnect_order(user: dict, sender: str, amount_nano: int,
     for it in clean:
         await db.add_order_item(order_id, it["pid"], it["name"],
                                 it["qty"], it["price"])
+    # NOTE: stock is decremented exactly once, atomically, in
+    # handlers/common.py::fulfill_order after payment. Do NOT decrement here.
     claimed = await db.record_payment(provider="tonconnect",
                                       external_id=matched["txid"],
                                       user_id=user["id"], order_id=order_id,
@@ -83,17 +118,21 @@ async def create_tonconnect_order(user: dict, sender: str, amount_nano: int,
     if not claimed:
         await db.set_order_status(order_id, "cancelled")
         return order_id, False
-    from handlers.common import fulfill_order
+    from handlers.common import fulfill_order, maybe_credit_referral, notify_admins
     ok, note = await fulfill_order(order_id)
     if ok:
         await db.set_order_status(order_id, "confirmed")
         if promo_row:
             await db.record_promo_usage(promo_row["id"], user["id"])
         try:
-            from handlers.referrals import maybe_credit_referral
-            await maybe_credit_referral(user["id"], order_id, total)
-        except Exception:
-            pass
+            order_dict = await db.get_order(order_id)
+            if order_dict:
+                await maybe_credit_referral(order_dict)
+        except (KeyError, ValueError, TypeError) as e:
+            logger.warning("referral credit skipped for order %s: %s", order_id, e)
+        except Exception as e:
+            logger.warning("referral credit failed for order %s: %s", order_id, e)
+            await notify_admins(f"Referral credit failed for order {order_id}: {e}")
     await db.audit(user["tg_id"], "tonconnect_paid",
                    f"order={order_id} tx={matched['txid'][:16]}… ok={ok}")
     return order_id, ok
@@ -138,8 +177,13 @@ async def webapp_data(message: types.Message, state: FSMContext):
     if payload.get("type") == "get_referral":
         user, _ = await get_or_register(message.from_user.id,
                                         message.from_user.full_name)
-        ref_code = user.get("ref_code") or ""
-        link = f"https://t.me/testssscbot?start=ref_{ref_code}"
+        ref_code = user["ref_code"] or ""
+        try:
+            me = await message.bot.get_me()
+            bot_username = me.username or ""
+        except Exception:
+            bot_username = ""
+        link = f"https://t.me/{bot_username}?start=ref_{ref_code}"
         pct = await db.referral_percent()
         await message.answer(
             f"🎁 <b>Your referral link:</b>\n\n<code>{link}</code>\n\n"
@@ -259,13 +303,9 @@ async def webapp_data(message: types.Message, state: FSMContext):
             lines=render_lines(t["items"]),
             total=fmt_money(t["total"], config.CURRENCY)),
         reply_markup=await main_reply_kb(message.from_user.id))
-    # Drop into the sleek checkout flow (details, or straight to payment for
-    # digital-only carts).
-    if await _cart_is_digital_only(user["id"]):
-        await state.update_data(details_skipped=True)
-        await render_payment(message, state, user["id"])
-    else:
-        await render_details(message, state, user)
+    # Drop into the sleek checkout flow (straight to payment - digital-only).
+    await state.update_data(details_skipped=True)
+    await render_payment(message, state, user["id"])
     await db.audit(user["tg_id"], "miniapp_import",
                    f"items={len(clean)} promo={promo_code}")
 
@@ -342,8 +382,25 @@ async def handle_tonconnect_paid(message: types.Message, user: dict,
         return
 
     # Matched! Create + fulfill via the shared helper (audit C2/C3).
+    # SECURITY: bind the claim to the paying user (front-running guard).
+    existing = await db.get_payment_by_external_id("tonconnect", matched["txid"])
+    if existing and existing["user_id"] != user["id"]:
+        from handlers.common import notify_admins
+        txid = matched["txid"]
+        logger.warning("tonconnect fast-path claim blocked: txid=%s existing_user=%s claiming_user=%s",
+                       txid, existing["user_id"], user["id"])
+        await notify_admins(f"⚠️ TON Connect claim blocked: txid {txid} already claimed by user {existing['user_id']}, attempted by user {user['id']}")
+        await message.answer("❌ This payment was already claimed.",
+                             reply_markup=await main_reply_kb(message.from_user.id))
+        return
+
     order_id, ok = await create_tonconnect_order(
         user, sender, amount_nano, clean, promo_code, matched)
+    if order_id is None:
+        await message.answer(
+            "⚠️ Payment amount did not cover the order total. Please contact support.",
+            reply_markup=await main_reply_kb(message.from_user.id))
+        return
     if not ok and (await db.get_order(order_id))["status"] == "cancelled":
         # The tx was already claimed by another order — don't fulfill twice.
         await message.answer(

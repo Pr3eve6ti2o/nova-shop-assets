@@ -240,7 +240,7 @@ def test_db_roundtrip():
         await db.kv_set("maintenance_mode", "1")
         assert await db.maintenance_on() is True
         await db.kv_set("maintenance_mode", "0")
-        await db.update_user(user["id"], is_blocked=1)
+        await db.update_user_admin(user["id"], is_blocked=1)
         assert (await db.get_user(user["id"]))["is_blocked"] == 1
         assert await db.count_blocked_users() == 1
 
@@ -437,14 +437,14 @@ def test_payment_rails():
 def _payment_rails_body(cp, cfg, importlib):
     async def run():
         os.environ["BOT_TOKEN"] = "test-token"
-        # Case 1: nothing configured -> stars + cod only
+        # Case 1: nothing configured -> stars only (COD removed for digital-only)
         for k in ("CRYPTOBOT_TOKEN", "PAYMENTS_PROVIDER_TOKEN", "XPUB_BTC",
                   "XPUB_ETH", "XPUB_TRX", "TON_DEPOSIT_ADDRESS"):
             os.environ.pop(k, None)
         importlib.reload(cfg)
         importlib.reload(cp)
         rails = await cp.payment_rails(None, 1000)
-        assert [m for m, _ in rails] == ["stars", "cod"], rails
+        assert [m for m, _ in rails] == ["stars"], rails
         assert rails[0][1].startswith("\u2b50")
 
         # Case 2: everything on -> stars, cryptobot, card, direct, cod
@@ -456,10 +456,12 @@ def _payment_rails_body(cp, cfg, importlib):
         importlib.reload(cp)
         rails = await cp.payment_rails(None, 1000)
         methods = [m for m, _ in rails]
-        assert methods == ["stars", "cryptobot", "card", "direct", "cod"], methods
-        # CryptoBot button shows +3% fee on $10.00 -> $10.30
+        assert methods == ["stars", "cryptobot", "card", "direct"], methods
+        # CryptoBot button shows +3% fee on $10.00 -> $10.31
+        # (gross-up: ceil(1000 * 100 / 97) = 1031, so the shop nets $10.00
+        # after CryptoBot deducts 3% from the gross invoice).
         cb_label = rails[1][1]
-        assert "3%" in cb_label and "$10.30" in cb_label, cb_label
+        assert "3%" in cb_label and "$10.31" in cb_label, cb_label
 
         # restore
         for k in ("CRYPTOBOT_TOKEN", "PAYMENTS_PROVIDER_TOKEN", "XPUB_BTC",

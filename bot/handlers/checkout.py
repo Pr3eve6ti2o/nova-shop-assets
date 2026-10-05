@@ -110,96 +110,6 @@ def _details_prompt(kind, phone, address) -> str:
     return "Please share " + " and ".join(need) + "."
 
 
-async def render_details(target, state: FSMContext, user):
-    """Merged delivery-details step.
-
-    Edits the message in place (or sends it fresh); (re)sends the
-    share-buttons prompt. Adopts saved profile phone/address on first render.
-    """
-    await Checkout.details.set()
-    data = await state.get_data()
-    updates = {}
-    if not data.get("delivery_kind"):
-        updates["delivery_kind"] = "delivery"
-    # user is sqlite3.Row: use [] access, not .get()
-    user_phone = user["phone"] if "phone" in user.keys() else None
-    user_address = user["address"] if "address" in user.keys() else None
-    if not data.get("phone") and user_phone:
-        updates["phone"] = user_phone
-    if not data.get("address") and user_address:
-        updates["address"] = user_address
-    if updates:
-        await state.update_data(**updates)
-        data = await state.get_data()
-    kind, phone, address, phone_saved, address_saved = _details_snapshot(data, user)
-    text = _details_text(kind, phone, address, phone_saved, address_saved)
-
-    if isinstance(target, types.CallbackQuery):
-        chat_id = target.message.chat.id
-        await edit_text_safe(target, text, kb.details_kb(kind))
-        await state.update_data(details_mid=target.message.message_id)
-        prompt_sender = target.message.answer
-    else:
-        chat_id = target.chat.id
-        msg = await target.answer(text, reply_markup=kb.details_kb(kind),
-                                  parse_mode="HTML")
-        await state.update_data(details_mid=msg.message_id)
-        prompt_sender = target.answer
-
-    # (Re)send the share-buttons prompt; drop the previous one.
-    old_rkb = data.get("details_rkb_mid")
-    if old_rkb:
-        try:
-            await bot.delete_message(chat_id, old_rkb)
-        except Exception:
-            pass
-    prompt = await prompt_sender(_details_prompt(kind, phone, address),
-                                 reply_markup=kb.details_reply_kb(kind))
-    await state.update_data(details_rkb_mid=prompt.message_id)
-
-
-async def _refresh_details(chat_id: int, state: FSMContext, user: dict):
-    """Re-render the details message in place after a share/type update."""
-    data = await state.get_data()
-    kind, phone, address, phone_saved, address_saved = _details_snapshot(data, user)
-    text = _details_text(kind, phone, address, phone_saved, address_saved)
-    mid = data.get("details_mid")
-    try:
-        await bot.edit_message_text(text, chat_id, mid,
-                                    reply_markup=kb.details_kb(kind),
-                                    parse_mode="HTML",
-                                    disable_web_page_preview=True)
-    except Exception:
-        msg = await bot.send_message(chat_id, text,
-                                     reply_markup=kb.details_kb(kind),
-                                     parse_mode="HTML",
-                                     disable_web_page_preview=True)
-        await state.update_data(details_mid=msg.message_id)
-    rkb_mid = data.get("details_rkb_mid")
-    if rkb_mid:
-        try:
-            await bot.edit_message_text(_details_prompt(kind, phone, address),
-                                        chat_id, rkb_mid,
-                                        reply_markup=kb.details_reply_kb(kind))
-        except Exception:
-            pass
-
-
-async def _clear_details_prompt(chat_id: int, rkb_mid):
-    """Delete the share-buttons prompt and drop the reply keyboard."""
-    if rkb_mid:
-        try:
-            await bot.delete_message(chat_id, rkb_mid)
-        except Exception:
-            pass
-    try:
-        rm = await bot.send_message(chat_id, "\u200b",
-                                    reply_markup=ReplyKeyboardRemove())
-        await bot.delete_message(chat_id, rm.message_id)
-    except Exception:
-        pass
-
-
 @dp.callback_query_handler(text="co", state="*")
 async def start_checkout(query: types.CallbackQuery, state: FSMContext):
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
@@ -221,7 +131,6 @@ async def start_checkout(query: types.CallbackQuery, state: FSMContext):
     await render_payment(query, state, user["id"])
 
 
-@dp.callback_query_handler(text_startswith="cod:", state=Checkout.details)
 async def cb_delivery_kind(query: types.CallbackQuery, state: FSMContext):
     kind = query.data.split(":")[1]
     if kind not in ("delivery", "pickup"):
@@ -235,7 +144,6 @@ async def cb_delivery_kind(query: types.CallbackQuery, state: FSMContext):
     await render_details(query, state, user)
 
 
-@dp.callback_query_handler(text="co3", state=Checkout.details)
 async def cb_details_continue(query: types.CallbackQuery, state: FSMContext):
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     u = dict(user)
@@ -263,8 +171,6 @@ async def cb_details_continue(query: types.CallbackQuery, state: FSMContext):
     await render_payment(query, state, user["id"])
 
 
-@dp.message_handler(content_types=types.ContentType.CONTACT,
-                     state=Checkout.details)
 async def details_contact_shared(message: types.Message, state: FSMContext):
     user, _ = await get_or_register(message.from_user.id,
                                     message.from_user.full_name)
@@ -281,8 +187,6 @@ async def details_contact_shared(message: types.Message, state: FSMContext):
     await _refresh_details(message.chat.id, state, user)
 
 
-@dp.message_handler(content_types=types.ContentType.LOCATION,
-                     state=Checkout.details)
 async def details_location_shared(message: types.Message, state: FSMContext):
     user, _ = await get_or_register(message.from_user.id,
                                     message.from_user.full_name)
@@ -304,7 +208,6 @@ async def details_location_shared(message: types.Message, state: FSMContext):
     await _refresh_details(message.chat.id, state, user)
 
 
-@dp.message_handler(state=Checkout.details)
 async def details_typed(message: types.Message, state: FSMContext):
     data = await state.get_data()
     if await handle_escape(message, state):

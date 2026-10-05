@@ -20,4 +20,7 @@ class IsAdmin(BoundFilter):
         if tg_id in config.ADMINS:
             return True
         user = await db.get_user_by_tg(tg_id)
-        return bool(user and (user["role_mask"] & self.bit))
+        if not user:
+            return False
+        mask = user["role_mask"] or 0
+        return bool(mask & self.bit)

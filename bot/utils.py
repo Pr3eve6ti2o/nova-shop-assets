@@ -1,5 +1,5 @@
-import html
 """Shared helpers: money formatting, pagination, ids, time."""
+import html
 import secrets
 import string
 from datetime import datetime, timezone
@@ -21,8 +21,10 @@ def fmt_money(cents: int, currency: str = "USD") -> str:
     return f"{sign}{amount} {(currency or 'USD').upper()}"
 
 
-def stars_for_cents(cents: int, stars_per_usd: int) -> int:
+def stars_for_cents(cents: int, stars_per_usd: int, currency: str = "USD") -> int:
     """Convert fiat cents to whole Telegram Stars (XTR smallest unit = 1 star)."""
+    if (currency or "USD").upper() != "USD":
+        raise ValueError("stars_for_cents requires USD; convert order total to USD first")
     if cents <= 0 or stars_per_usd <= 0:
         return 0
     # ceil(cents / 100 * stars_per_usd)
@@ -31,6 +33,8 @@ def stars_for_cents(cents: int, stars_per_usd: int) -> int:
 
 def paginate(total: int, page: int, per_page: int):
     """Clamp page into range; return (page, total_pages)."""
+    if per_page < 1:
+        raise ValueError("per_page must be >= 1")
     total_pages = max(1, -(-max(0, total) // per_page))
     page = max(0, min(page, total_pages - 1))
     return page, total_pages
@@ -41,13 +45,16 @@ def utcnow_iso() -> str:
 
 
 def new_ref_code(length: int = 8) -> str:
-    alphabet = string.ascii_uppercase + string.digits
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 def cb(*parts) -> str:
     """Build short callback data from integer ids. Never put names/prices here."""
-    return ":".join(str(p) for p in parts)
+    data = ":".join(str(p) for p in parts)
+    if len(data.encode("utf-8")) > 64:
+        raise ValueError("callback_data exceeds 64 bytes")
+    return data
 
 
 def truncate(text: str, limit: int) -> str:
@@ -61,4 +68,4 @@ def h(s) -> str:
     Prevents stored-HTML phishing via product names/descriptions edited
     in the Payload CMS (security audit #6).
     """
-    return html.escape(str(s or ""), quote=True)
+    return html.escape("" if s is None else str(s), quote=True)

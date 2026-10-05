@@ -1,9 +1,13 @@
 """Crypto payments: CryptoBot rail + self-custody direct deposits + admin panel.
+import asyncio
+import re
 
 Wired into checkout: payment step lists rails via crypto_payments.payment_rails();
 place-order branches here for 'cryptobot' and 'direct_<chain>'.
 """
+import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -23,6 +27,119 @@ logger = logging.getLogger(__name__)
 
 # Manual "Check My Deposit" rate limit: 1 per 30s per user.
 _last_deposit_check: dict = {}
+_order_locks: dict = {}
+
+
+def _order_lock(order_id: int) -> asyncio.Lock:
+    lock = _order_locks.get(order_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _order_locks[order_id] = lock
+    return lock
+
+
+def _valid_deposit_address(chain: str, address) -> bool:
+    """Chain-appropriate format check for a derived deposit address (H5).
+
+    A blank/None/malformed address must never be persisted or shown to the
+    user as a deposit target.
+    """
+    if not isinstance(address, str) or not address.strip():
+        return False
+    addr = address.strip()
+    if chain == "btc":
+        return _valid_btc_bech32(addr)
+    if chain == "eth":
+        return bool(re.fullmatch(r"0x[0-9a-fA-F]{40}", addr))
+    if chain == "trx":
+        return bool(re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}", addr))
+    if chain == "ton":
+        return bool(re.fullmatch(r"(?:UQ|EQ)[A-Za-z0-9_\-]{46}", addr))
+    return False
+
+
+BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+
+def _bech32_polymod(values):
+    generator = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
+    chk = 1
+    for value in values:
+        top = chk >> 25
+        chk = (chk & 0x1ffffff) << 5 ^ value
+        for i in range(5):
+            chk ^= generator[i] if ((top >> i) & 1) else 0
+    return chk
+
+
+def _bech32_hrp_expand(hrp):
+    return [ord(x) >> 5 for x in hrp] + [0] + [ord(x) & 31 for x in hrp]
+
+
+def _bech32_convertbits(data, frombits, tobits, pad=True):
+    acc = 0
+    bits = 0
+    ret = []
+    maxv = (1 << tobits) - 1
+    max_acc = (1 << (frombits + tobits - 1)) - 1
+    for value in data:
+        if value < 0 or (value >> frombits):
+            return None
+        acc = ((acc << frombits) | value) & max_acc
+        bits += frombits
+        while bits >= tobits:
+            bits -= tobits
+            ret.append((acc >> bits) & maxv)
+    if pad:
+        if bits:
+            ret.append((acc << (tobits - bits)) & maxv)
+    elif bits >= frombits or ((acc << (tobits - bits)) & maxv):
+        return None
+    return ret
+
+
+def _valid_btc_bech32(address: str) -> bool:
+    """Full bech32/bech32m checksum validation for BTC addresses."""
+    if address != address.lower() and address != address.upper():
+        return False
+    addr = address.lower()
+    if len(addr) > 90:
+        return False
+    pos = addr.rfind("1")
+    if pos < 1 or pos + 7 > len(addr):
+        return False
+    hrp = addr[:pos]
+    if hrp != "bc":
+        return False
+    data_part = addr[pos + 1:]
+    if any(c not in BECH32_CHARSET for c in data_part):
+        return False
+    values = [BECH32_CHARSET.index(c) for c in data_part]
+    polymod = _bech32_polymod(_bech32_hrp_expand(hrp) + values)
+    if polymod == 1:
+        spec = "bech32"
+    elif polymod == 0x2bc830a3:
+        spec = "bech32m"
+    else:
+        return False
+    data = values[:-6]
+    if not data:
+        return False
+    witver = data[0]
+    if witver > 16:
+        return False
+    decoded = _bech32_convertbits(data[1:], 5, 8, False)
+    if decoded is None:
+        return False
+    program = bytes(decoded)
+    if len(program) < 2 or len(program) > 40:
+        return False
+    if witver == 0:
+        if spec != "bech32" or len(program) not in (20, 32):
+            return False
+    elif spec != "bech32m":
+        return False
+    return True
 
 
 def _ttl_line(expires_iso: str) -> str:
@@ -41,27 +158,66 @@ def _ttl_line(expires_iso: str) -> str:
 async def start_cryptobot_payment(query: types.CallbackQuery, state: FSMContext,
                                   user, order_id: int, total_cents: int):
     """Create the CryptoBot invoice and show pay + check buttons."""
-    fee_pct = config.CRYPTOBOT_FEE_PERCENT
-    fee_cents = (int(total_cents) * fee_pct + 99) // 100
-    gross_cents = int(total_cents) + fee_cents
-    try:
-        inv = await cp.cryptobot_create_invoice(order_id=order_id,
-                                                usd_cents=total_cents)
-        invoice_id = int(inv["invoice_id"])
-        pay_url = inv["bot_invoice_url"]
-    except Exception as e:
-        logger.warning("cryptobot createInvoice failed: %s", e)
-        # Don't orphan the order: cancel it and drop the stale wizard state.
-        await db.set_order_status(order_id, "cancelled")
-        await db.release_order_promo(order_id)  # M2: don't burn promo on unpaid cancel
-        await state.finish()
-        await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
-                             kb.crypto_other_methods_kb())
-        await db.audit(user["tg_id"], "cryptobot_error", f"order={order_id}: {e}")
-        return
-    await db.create_cryptobot_invoice(order_id=order_id, invoice_id=invoice_id,
-                                      asset=inv.get("asset", "USDT"),
-                                      amount=str(inv.get("amount", "")))
+    fee_pct = int(config.CRYPTOBOT_FEE_PERCENT)
+    # Displayed gross uses the same gross-up as cryptobot_create_invoice:
+    # gross = ceil(net * 100 / (100 - fee_pct)), since CryptoBot deducts its
+    # fee from the gross invoice amount.
+    gross_cents = ((int(total_cents) * 100 + (100 - fee_pct) - 1)
+                   // (100 - fee_pct))
+    fee_cents = gross_cents - int(total_cents)
+    # Single active CryptoBot invoice per order: cancel any prior open
+    # invoices before creating a new one; otherwise two distinct invoice_ids
+    # can both be paid and both pass record_payment's uniqueness check,
+    # double-fulfilling the order.
+    lock = _order_lock(order_id)
+    async with lock:
+        try:
+            priors = await db.active_cryptobot_invoices() or []
+        except Exception as e:
+            logger.warning("list cryptobot invoices failed: %s", e)
+            priors = []
+        for prior in priors:
+            if prior["order_id"] != order_id:
+                continue
+            await db.set_cryptobot_status(prior["invoice_id"], "cancelled")
+            try:
+                await cp.cryptobot_delete_invoice(prior["invoice_id"])
+            except Exception as e:
+                logger.warning("cryptobot deleteInvoice %s failed: %s",
+                               prior["invoice_id"], e)
+        try:
+            inv = await cp.cryptobot_create_invoice(order_id=order_id,
+                                                    usd_cents=int(total_cents))
+            invoice_id = int(inv["invoice_id"])
+            pay_url = inv["bot_invoice_url"]
+        except Exception as e:
+            logger.warning("cryptobot createInvoice failed: %s", e)
+            # Don't orphan the order: cancel it and drop the stale wizard state.
+            await db.set_order_status(order_id, "cancelled")
+            await db.release_order_promo(order_id)  # M2: don't burn promo on unpaid cancel
+            await state.finish()
+            await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
+                                 kb.crypto_other_methods_kb())
+            await db.audit(user["tg_id"], "cryptobot_error", f"order={order_id}: {e}")
+            return
+        try:
+            await db.create_cryptobot_invoice(order_id=order_id, invoice_id=invoice_id,
+                                              asset=inv.get("asset", "USDT"),
+                                              amount=str(inv.get("amount", "")))
+        except Exception as e:
+            logger.error("cryptobot db insert failed: %s", e)
+            try:
+                await cp.cryptobot_delete_invoice(invoice_id)
+            except Exception as de:
+                logger.warning("cryptobot deleteInvoice %s failed after db error: %s",
+                               invoice_id, de)
+            await db.set_order_status(order_id, "cancelled")
+            await db.release_order_promo(order_id)  # M2: don't burn promo on unpaid cancel
+            await state.finish()
+            await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
+                                 kb.crypto_other_methods_kb())
+            await db.audit(user["tg_id"], "cryptobot_error", f"order={order_id}: {e}")
+            return
     await db.audit(user["tg_id"], "cryptobot_invoice",
                    f"order={order_id} invoice={invoice_id}")
     await state.finish()
@@ -90,7 +246,18 @@ async def cb_cryptobot_check(query: types.CallbackQuery):
     if not inv:
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
         return
+    order = await db.get_order(inv["order_id"])
+    user = await db.get_user_by_tg(query.from_user.id)
+    if not order or not user or order["user_id"] != user["id"]:
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     if inv["status"] == "paid":
+        # Idempotent finalization: a prior crash may have marked the invoice
+        # paid without finalizing the order.
+        await finalize_crypto_order(inv["order_id"], provider="cryptobot",
+                                    external_id=f"cb_{invoice_id}",
+                                    amount_cents=order["total_cents"],
+                                    currency="USDT")
         await query.answer(texts.TOAST_CRYPTO_ALREADY)
         return
     try:
@@ -109,10 +276,11 @@ async def cb_cryptobot_check(query: types.CallbackQuery):
         await query.message.answer(texts.MSG_CRYPTO_STILL_UNPAID)
         return
     await db.set_cryptobot_status(invoice_id, "paid")
-    order = await db.get_order(inv["order_id"])
+    # M5: order was already loaded + ownership-checked above; never finalize
+    # with amount 0 on a failed fetch.
     await finalize_crypto_order(inv["order_id"], provider="cryptobot",
                                 external_id=f"cb_{invoice_id}",
-                                amount_cents=order["total_cents"] if order else 0,
+                                amount_cents=order["total_cents"],
                                 currency="USDT")
     await query.answer()  # dismiss loading before removing the message
     try:
@@ -125,10 +293,11 @@ async def cb_cryptobot_check(query: types.CallbackQuery):
 async def start_direct_deposit(query: types.CallbackQuery, state: FSMContext,
                                user, order_id: int, total_cents: int, chain: str):
     """Allocate a fresh address, store the deposit, show the deposit screen."""
-    rates = await cp.get_rates()
-    price = rates.get(chain)
-    if not price:
-        logger.warning("no %s rate — hiding direct crypto", chain)
+    try:
+        rates = await cp.get_rates()
+        price = rates.get(chain)
+    except Exception as e:
+        logger.warning("get %s rate failed: %s", chain, e)
         # Don't orphan the order: cancel it and drop the stale wizard state.
         await db.set_order_status(order_id, "cancelled")
         await db.release_order_promo(order_id)  # M2: don't burn promo on unpaid cancel
@@ -136,10 +305,8 @@ async def start_direct_deposit(query: types.CallbackQuery, state: FSMContext,
         await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
                              kb.crypto_other_methods_kb())
         return
-    try:
-        address, index, _ = await cp.next_deposit_address(db, chain)
-    except Exception as e:
-        logger.error("address derivation failed for %s: %s", chain, e)
+    if not price:
+        logger.warning("no %s rate — hiding direct crypto", chain)
         # Don't orphan the order: cancel it and drop the stale wizard state.
         await db.set_order_status(order_id, "cancelled")
         await db.release_order_promo(order_id)  # M2: don't burn promo on unpaid cancel
@@ -151,10 +318,51 @@ async def start_direct_deposit(query: types.CallbackQuery, state: FSMContext,
     memo = f"NOVA-{order_id}" if chain == "ton" else None
     ttl_min = config.CRYPTO_TTL_MINUTES
     expires = (datetime.now(timezone.utc) + timedelta(minutes=ttl_min)).isoformat()
-    dep_id = await db.create_crypto_deposit(
-        order_id=order_id, chain=chain, address=address,
-        derivation_index=index, memo=memo, expected_crypto=str(expected),
-        expected_usd_cents=int(total_cents), expires_at=expires)
+    lock = _order_lock(order_id)
+    async with lock:
+        try:
+            # If a prior deposit already has seen funds, reuse it instead of
+            # cancelling it and stranding those funds on an unmonitored address.
+            existing = None
+            for _st in ("pending", "underpaid"):
+                for _old in await db.list_crypto_deposits(status=_st, limit=1000):
+                    if _old["order_id"] != order_id:
+                        continue
+                    if int(_old.get("seen_amount_crypto") or 0) > 0:
+                        if existing is None:
+                            existing = _old
+                    else:
+                        await db.update_crypto_deposit(_old["id"], status="cancelled")
+            if existing:
+                await state.finish()
+                memo_line = texts.MSG_DEPOSIT_MEMO_LINE.format(memo=existing["memo"]) if existing["memo"] else ""
+                await edit_text_safe(
+                    query,
+                    texts.MSG_DEPOSIT_SCREEN.format(
+                        amount=cp.format_crypto(int(existing["expected_crypto"]), existing["chain"]),
+                        address=existing["address"],
+                        memo_line=memo_line,
+                        total=fmt_money(int(existing["expected_usd_cents"]), config.CURRENCY),
+                        confs=cp.CHAINS[existing["chain"]]["confirmations"],
+                        ttl=_ttl_line(existing["expires_at"])),
+                    kb.deposit_kb(existing["id"]))
+                return
+            address, index, _ = await cp.next_deposit_address(db, chain)
+            if not _valid_deposit_address(chain, address):
+                raise ValueError(f"invalid {chain} address derived: {address!r}")
+            dep_id = await db.create_crypto_deposit(
+                order_id=order_id, chain=chain, address=address,
+                derivation_index=index, memo=memo, expected_crypto=str(expected),
+                expected_usd_cents=int(total_cents), expires_at=expires)
+        except Exception as e:
+            logger.error("direct deposit setup failed for %s: %s", chain, e)
+            # Don't orphan the order: cancel it and drop the stale wizard state.
+            await db.set_order_status(order_id, "cancelled")
+            await db.release_order_promo(order_id)  # M2: don't burn promo on unpaid cancel
+            await state.finish()
+            await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
+                                 kb.crypto_other_methods_kb())
+            return
     await db.audit(user["tg_id"], "crypto_deposit",
                    f"order={order_id} chain={chain} addr={address[:12]}…")
     await notify_admins(
@@ -179,8 +387,14 @@ async def _manual_deposit_scan(deposit_id: int) -> str:
     """One manual re-scan. Returns 'paid' | 'underpaid' | 'unpaid' | 'expired'."""
     from crypto_watcher import _fetch_chain_txs, _tx_amount, _process_deposit, _now
     dep = await db.get_crypto_deposit(deposit_id)
-    if not dep or dep["status"] not in ("pending", "underpaid"):
-        return "expired" if dep and dep["status"] == "expired" else "unpaid"
+    if not dep:
+        return "unpaid"
+    if dep["status"] == "paid":
+        return "paid"
+    if dep["status"] in ("expired", "cancelled"):
+        return "expired"
+    if dep["status"] not in ("pending", "underpaid"):
+        return "unpaid"
     await _process_deposit(dep, _now())
     dep = await db.get_crypto_deposit(deposit_id)
     return {"paid": "paid", "underpaid": "underpaid"}.get(dep["status"], "unpaid")
@@ -324,14 +538,22 @@ async def cb_crypto_confirm(query: types.CallbackQuery):
     if claimed:
         await db.update_crypto_deposit(dep_id, status="paid")
         order = await db.get_order(dep["order_id"])
-        await finalize_crypto_order(
-            dep["order_id"], provider=f"direct_{dep['chain']}",
-            external_id=f"manual_{dep_id}",
-            amount_cents=order["total_cents"] if order else 0,
-            currency=cp.CHAINS[dep["chain"]]["symbol"])
-        await db.audit(query.from_user.id, "crypto_manual_confirm",
-                       f"deposit={dep_id}")
-        await query.answer(texts.TOAST_CRYPTO_CONFIRMED)
+        if not order:
+            # M5: never finalize with amount 0 — log loudly and alert instead.
+            logger.error("CRITICAL: manual crypto confirm deposit %s paid but order %s missing",
+                         dep_id, dep["order_id"])
+            await notify_admins(
+                f"CRITICAL: manual crypto confirm deposit {dep_id} paid but order {dep['order_id']} missing")
+            await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        else:
+            await finalize_crypto_order(
+                dep["order_id"], provider=f"direct_{dep['chain']}",
+                external_id=f"manual_{dep_id}",
+                amount_cents=order["total_cents"],
+                currency=cp.CHAINS[dep["chain"]]["symbol"])
+            await db.audit(query.from_user.id, "crypto_manual_confirm",
+                           f"deposit={dep_id}")
+            await query.answer(texts.TOAST_CRYPTO_CONFIRMED)
     else:
         # Lost the race (worker or another admin claimed it first) — do NOT
         # show the confirmed toast.
@@ -350,10 +572,19 @@ async def cb_crypto_reject(query: types.CallbackQuery):
     except (ValueError, IndexError):
         await query.answer()
         return
+    dep = await db.get_crypto_deposit(dep_id)
+    if not dep:
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
+    if dep["status"] == "paid":
+        await query.answer(texts.TOAST_CRYPTO_ALREADY, show_alert=True)
+        return
+    order = await db.get_order(dep["order_id"])
+    if order and order["status"] == "paid":
+        await query.answer(texts.TOAST_CRYPTO_ALREADY, show_alert=True)
+        return
     await db.update_crypto_deposit(dep_id, status="cancelled")
     await db.audit(query.from_user.id, "crypto_manual_reject", f"deposit={dep_id}")
-    dep = await db.get_crypto_deposit(dep_id)
-    order = await db.get_order(dep["order_id"]) if dep else None
     if order:
         await db.set_order_status(order["id"], "cancelled")
         await db.release_order_promo(order["id"])  # M2

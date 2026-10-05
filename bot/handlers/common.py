@@ -35,7 +35,7 @@ async def get_or_register(tg_id: int, name: str, referred_by=None):
     else:
         is_new = False
     if tg_id in config.ADMINS and not user["role_mask"]:
-        await db.update_user(user["id"], role_mask=config.PERM_ALL)
+        await db.update_user_admin(user["id"], role_mask=config.PERM_ALL)
         user = await db.get_user_by_tg(tg_id)
     return user, is_new
 

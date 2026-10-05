@@ -1,5 +1,7 @@
 """Admin promos: list, create wizard, toggle, delete."""
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from html import escape as html_escape
 
 from aiogram import types
 from aiogram.dispatcher import FSMContext
@@ -11,7 +13,6 @@ import texts
 from loader import db, dp
 from states import PromoWizard
 from ..common import edit_text_safe, handle_escape
-from . import IsAdmin
 
 
 @dp.callback_query_handler(text="ad:pro", is_admin=config.PERM_PROMOS)
@@ -33,7 +34,7 @@ async def cb_promo_detail(query: types.CallbackQuery):
         return
     desc = (f"{pr['value']}% off" if pr["kind"] == "percent"
             else f"fixed {pr['value']} cents off")
-    text = (f"\U0001f39f\ufe0f <code>{pr['code']}</code>\n{desc}\n"
+    text = (f"\U0001f39f\ufe0f <code>{html_escape(pr['code'])}</code>\n{desc}\n"
             f"Uses: {pr['used_count']}/{pr['max_uses'] or '\u221e'}\n"
             f"Expires: {pr['expires_at'] or '\u2014'}")
     await edit_text_safe(query, text, kb.admin_promo_kb(pr))
@@ -51,7 +52,8 @@ async def cb_promo_toggle(query: types.CallbackQuery):
     await db.set_promo_active(pid, not pr["is_active"])
     await db.audit(query.from_user.id, "promo_toggle", f"id={pid}")
     await query.answer(texts.TOAST_SAVED)
-    await cb_promo_list(query)
+    promos = await db.list_promos()
+    await edit_text_safe(query, texts.MSG_PROMO_LIST, kb.admin_promos_kb(promos))
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:prd:"),
@@ -73,10 +75,21 @@ async def cb_promo_del_ask(query: types.CallbackQuery):
                            is_admin=config.PERM_PROMOS)
 async def cb_promo_del_yes(query: types.CallbackQuery):
     pid = int(query.data.split(":")[2])
-    await db.delete_promo(pid)
-    await db.audit(query.from_user.id, "promo_delete", f"id={pid}")
-    await query.answer(texts.MSG_PROMO_DELETED)
-    await cb_promo_list(query)
+    promos = {p["id"]: p for p in await db.list_promos()}
+    pr = promos.get(pid)
+    if not pr:
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
+    if pr["used_count"]:
+        await db.set_promo_active(pid, False)
+        await db.audit(query.from_user.id, "promo_deactivate", f"id={pid}")
+        await query.answer(texts.TOAST_SAVED)
+    else:
+        await db.delete_promo(pid)
+        await db.audit(query.from_user.id, "promo_delete", f"id={pid}")
+        await query.answer(texts.MSG_PROMO_DELETED)
+    promos = await db.list_promos()
+    await edit_text_safe(query, texts.MSG_PROMO_LIST, kb.admin_promos_kb(promos))
 
 
 # ---------------------------------------------------------------- wizard ---
@@ -87,12 +100,12 @@ async def cb_promo_add(query: types.CallbackQuery, state: FSMContext):
     await query.message.answer(texts.MSG_PROMO_WIZ_CODE, reply_markup=kb.force_reply())
 
 
-@dp.message_handler(state=PromoWizard.code)
+@dp.message_handler(state=PromoWizard.code, is_admin=config.PERM_PROMOS)
 async def pw_code(message: types.Message, state: FSMContext):
     if await handle_escape(message, state):
         return
     code = (message.text or "").strip().upper()
-    if not code or len(code) > 24:
+    if not code or len(code) > 24 or not code.isascii() or not code.isalnum():
         await message.answer(texts.ERR_INVALID_QTY)
         return
     if await db.get_promo(code):
@@ -108,7 +121,7 @@ async def pw_code(message: types.Message, state: FSMContext):
     await message.answer(texts.MSG_PROMO_WIZ_KIND, reply_markup=kbd)
 
 
-@dp.callback_query_handler(text=["prw:percent", "prw:fixed"], state=PromoWizard.kind)
+@dp.callback_query_handler(text=["prw:percent", "prw:fixed"], state=PromoWizard.kind, is_admin=config.PERM_PROMOS)
 async def pw_kind(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     kind = query.data.split(":")[1]
@@ -120,7 +133,7 @@ async def pw_kind(query: types.CallbackQuery, state: FSMContext):
                                reply_markup=kb.force_reply())
 
 
-@dp.message_handler(state=PromoWizard.value)
+@dp.message_handler(state=PromoWizard.value, is_admin=config.PERM_PROMOS)
 async def pw_value(message: types.Message, state: FSMContext):
     if await handle_escape(message, state):
         return
@@ -132,7 +145,11 @@ async def pw_value(message: types.Message, state: FSMContext):
             if not 1 <= value <= 90:
                 raise ValueError
         else:
-            value = round(float(raw) * 100)
+            try:
+                value = int((Decimal(raw) * 100).to_integral_value(
+                    rounding=ROUND_HALF_UP))
+            except (InvalidOperation, OverflowError, ValueError):
+                raise ValueError
             if value <= 0:
                 raise ValueError
     except ValueError:
@@ -143,7 +160,7 @@ async def pw_value(message: types.Message, state: FSMContext):
     await message.answer(texts.MSG_PROMO_WIZ_MAXUSES, reply_markup=kb.force_reply())
 
 
-@dp.message_handler(state=PromoWizard.max_uses)
+@dp.message_handler(state=PromoWizard.max_uses, is_admin=config.PERM_PROMOS)
 async def pw_max_uses(message: types.Message, state: FSMContext):
     if await handle_escape(message, state):
         return
@@ -159,7 +176,7 @@ async def pw_max_uses(message: types.Message, state: FSMContext):
     await message.answer(texts.MSG_PROMO_WIZ_EXPIRY, reply_markup=kb.force_reply())
 
 
-@dp.message_handler(state=PromoWizard.expiry)
+@dp.message_handler(state=PromoWizard.expiry, is_admin=config.PERM_PROMOS)
 async def pw_expiry(message: types.Message, state: FSMContext):
     if await handle_escape(message, state):
         return
@@ -184,13 +201,13 @@ async def pw_expiry(message: types.Message, state: FSMContext):
         InlineKeyboardButton(texts.BTN_CONFIRM, callback_data="prw:yes"),
     )
     await message.answer(
-        f"\U0001f39f\ufe0f <code>{data['pr_code']}</code> \u2014 {desc}\n"
+        f"\U0001f39f\ufe0f <code>{html_escape(data['pr_code'])}</code> \u2014 {desc}\n"
         f"Max uses: {data['pr_max_uses'] or '\u221e'} \u00b7 "
         f"Expires: {data['pr_expiry'] or '\u2014'}",
         reply_markup=kbd)
 
 
-@dp.callback_query_handler(text=["prw:yes", "prw:no"], state=PromoWizard.confirm)
+@dp.callback_query_handler(text=["prw:yes", "prw:no"], state=PromoWizard.confirm, is_admin=config.PERM_PROMOS)
 async def pw_confirm(query: types.CallbackQuery, state: FSMContext):
     if query.data == "prw:no":
         await state.finish()
@@ -198,10 +215,15 @@ async def pw_confirm(query: types.CallbackQuery, state: FSMContext):
         await query.message.answer(texts.MSG_WIZARD_CANCELLED)
         return
     data = await state.get_data()
-    pid = await db.add_promo(code=data["pr_code"], kind=data["pr_kind"],
-                             value=data["pr_value"], max_uses=data["pr_max_uses"],
-                             expires_at=data["pr_expiry"])
+    try:
+        pid = await db.add_promo(code=data["pr_code"], kind=data["pr_kind"],
+                                 value=data["pr_value"], max_uses=data["pr_max_uses"],
+                                 expires_at=data["pr_expiry"])
+    except Exception:
+        await state.finish()
+        await query.answer(texts.MSG_PROMO_INVALID, show_alert=True)
+        return
     await db.audit(query.from_user.id, "promo_add", f"id={pid} code={data['pr_code']}")
     await state.finish()
     await query.answer()
-    await query.message.answer(texts.MSG_PROMO_CREATED.format(code=data["pr_code"]))
+    await query.message.answer(texts.MSG_PROMO_CREATED.format(code=html_escape(data["pr_code"])))
