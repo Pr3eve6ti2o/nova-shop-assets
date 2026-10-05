@@ -1,5 +1,5 @@
 import type { CollectionConfig } from 'payload'
-import { isAdmin, isAdminOrService, isAuthenticated, isStaff } from '../access/roles'
+import { isAdmin, isAdminOrService, isStaff } from '../access/roles'
 
 /**
  * Orders are created by the Telegram bot via its API key (POST /api/orders).
