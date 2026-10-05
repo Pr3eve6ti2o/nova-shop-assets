@@ -1,35 +1,72 @@
-# Deployment
+# Nova Shop Deployment
 
-## Bot (systemd)
+## Development
 
-```bash
-# Install the unit (canonical copy in bot/nova-shop.service)
-sudo cp bot/nova-shop.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now nova-shop
-```
+### Bot
 
-The unit loads env from `.env` (+ `.proxy.env` for the sandbox egress proxy, refreshed minutely by cron).
+~~~bash
+cd bot
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python app.py
+~~~
 
-## Admin panel (systemd)
+### Admin
 
-```bash
-cd admin && npm install && npm run build
-sudo cp admin/nova-shop-admin.service /etc/systemd/system/  # if present
-sudo systemctl enable --now nova-shop-admin   # → http://localhost:3001/admin
-```
+The admin application tracks package-lock.json, so use npm consistently:
 
-## Mini App
+~~~bash
+cd admin
+npm ci
+npm run dev
+~~~
 
-1. Rebuild: `python tools/export_catalog.py && python tools/build_miniapp_bundle.py`
-2. Publish `miniapp/dist/index.html` as the bot's Mini App (BotFather `/newapp`).
-3. TON Connect manifest is served via jsDelivr from this repo's `tonconnect/` dir.
+### Mini App
 
-## VM replacement note
+~~~bash
+python tools/export_catalog.py
+python tools/export_policies.py
+python tools/build_miniapp_bundle.py
+~~~
 
-`/etc/systemd/system` is ephemeral on this host — after a VM replacement, reinstall both units from the repo copies and `daemon-reload`.
+Publish the generated dist/index.html only after the bundle checks pass.
+
+## Production process split
+
+Prefer separate process identities for:
+
+- bot API/polling;
+- crypto/reconciliation worker;
+- Payload admin;
+- reverse proxy/TLS.
+
+The current code can run the watcher inside the bot process, but horizontal deployments must introduce a worker lease/queue to prevent duplicate sweeps.
+
+## Database
+
+The current bot and Payload deployments use SQLite separately. This is acceptable for a small deployment only when the consistency boundary is understood.
+
+For growth, shared Postgres is the preferred direction where cross-process transactions matter. Payload supports Postgres through its Drizzle adapter.
+
+Reference: https://payloadcms.com/docs/database/postgres
+
+## Migrations
+
+Do not rely on startup ALTER TABLE statements that silently ignore errors. Use numbered bot migrations.
+
+Use Payload's formal migration workflow in production.
+
+Reference: https://payloadcms.com/docs/database/migrations
+
+## Telegram webhooks
+
+Configure Telegram secret_token and verify X-Telegram-Bot-Api-Secret-Token at the ingress boundary.
+
+Reference: https://core.telegram.org/bots/api#setwebhook
 
 ## Backups
 
-- Seed: AES-256-GCM encrypted (`tools/decrypt_seed.py` to recover).
-- DB: `data/*.db` — back up regularly; never commit.
+Back up databases, media and operational configuration. Keep wallet recovery material on a separate recovery path.
+
+A backup is proven only after a restore drill.
