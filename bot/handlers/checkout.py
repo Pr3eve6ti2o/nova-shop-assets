@@ -282,9 +282,9 @@ async def render_payment(target, state: FSMContext, user_id: int):
 
 @dp.callback_query_handler(text="co4", state=Checkout.payment)
 async def cb_payment_back(query: types.CallbackQuery, state: FSMContext):
+    await query.answer()
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     data = await state.get_data()
-    await query.answer()
     if data.get("details_skipped"):
         # Digital-only: back goes to the cart.
         await state.finish()
@@ -299,6 +299,7 @@ async def cb_payment_back(query: types.CallbackQuery, state: FSMContext):
 # stranded mid-payment with a hanging spinner. Route back to the payment step.
 @dp.callback_query_handler(text="copb", state="*")
 async def cb_crypto_back(query: types.CallbackQuery, state: FSMContext):
+    await query.answer()
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     data = await state.get_data()
     oid = data.get("order_id")
@@ -320,7 +321,6 @@ async def cb_crypto_back(query: types.CallbackQuery, state: FSMContext):
         query.data = f"copc:{oid}"
         await cb_change_payment(query, state)
         return
-    await query.answer()
     if data.get("details_skipped"):
         await state.finish()
         from .cart import render_cart
@@ -489,9 +489,9 @@ async def confirm_promo_reply(message: types.Message, state: FSMContext):
 
 @dp.callback_query_handler(text_startswith="coe:", state=Checkout.confirm)
 async def cb_confirm_edit(query: types.CallbackQuery, state: FSMContext):
+    await query.answer()
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     step = query.data.split(":")[1]
-    await query.answer()
     if step == "items":
         await state.finish()
         from .cart import render_cart
@@ -504,8 +504,8 @@ async def cb_confirm_edit(query: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query_handler(text="cob", state=Checkout.confirm)
 async def cb_confirm_back(query: types.CallbackQuery, state: FSMContext):
-    user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     await query.answer()
+    user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     await render_payment(query, state, user["id"])
 
 
@@ -789,4 +789,3 @@ async def cb_change_payment(query: types.CallbackQuery, state: FSMContext):
         address=order["address"], payment_method=None, promo_code=None,
         details_skipped=digital_only)
     await render_payment(query, state, user["id"])
-

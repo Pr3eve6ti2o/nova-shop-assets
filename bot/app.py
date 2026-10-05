@@ -111,4 +111,6 @@ if __name__ == "__main__":
     else:
         executor.start_polling(
             dp, on_startup=on_startup, on_shutdown=on_shutdown, skip_updates=True,
+            allowed_updates=["message", "callback_query", "pre_checkout_query"],
+            timeout=20, relax=0.1,
         )

@@ -236,6 +236,7 @@ async def start_topup_cryptobot(query: types.CallbackQuery, state: FSMContext,
     invoice is tagged purpose="topup" and credited to the user's balance once
     paid (see cb_topup_cryptobot_check).
     """
+    await query.answer()
     fee_pct = int(config.CRYPTOBOT_FEE_PERCENT)
     # Same gross-up as start_cryptobot_payment / cryptobot_create_invoice:
     # gross = ceil(net * 100 / (100 - fee_pct)); CryptoBot deducts its fee
@@ -519,6 +520,7 @@ async def start_topup_deposit(query: types.CallbackQuery, state: FSMContext,
     Allocates a fresh deposit address tagged purpose="topup"; funds are
     credited to the user's balance by the watcher once confirmed.
     """
+    await query.answer()
     try:
         rates = await cp.get_rates()
         price = rates.get(chain)
