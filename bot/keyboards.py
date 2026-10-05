@@ -228,37 +228,40 @@ def details_reply_kb(kind: str):
     return kb
 
 
-def payment_kb(rails, cod: bool):
+def payment_kb(rails, cod: bool, prefix: str = "cop", back_cbd: str = "co4"):
     """Payment rail buttons in SPEC2 §1 order.
 
     `rails`: list of (method_id, label); direct-crypto chains arrive
     pre-expanded as `direct_<chain>` (no sub-menu hop). The "cod" entry
     carries label None and is rendered as COD/pickup here.
     Crypto chains are hidden behind a single 'Crypto payment' submenu.
+
+    `prefix`/`back_cbd` allow reusing this builder outside the checkout
+    flow; the defaults keep every existing call site unchanged.
     """
     kb = InlineKeyboardMarkup()
     for method, label in rails:
         if method == "crypto":
             kb.add(InlineKeyboardButton(
-                texts.BTN_CRYPTO_PAYMENT, callback_data="cop:crypto_menu"))
+                texts.BTN_CRYPTO_PAYMENT, callback_data=f"{prefix}:crypto_menu"))
         elif method == "cod":
             kb.add(InlineKeyboardButton(
                 texts.BTN_COD if cod else texts.BTN_PAY_PICKUP,
-                callback_data=cb("cop", "cod")))
+                callback_data=f"{prefix}:cod"))
         else:
-            kb.add(InlineKeyboardButton(label, callback_data=cb("cop", method)))
-    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="co4"))
+            kb.add(InlineKeyboardButton(label, callback_data=f"{prefix}:{method}"))
+    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data=back_cbd))
     return kb
 
 
-def crypto_menu_kb():
+def crypto_menu_kb(prefix: str = "cop"):
     """Submenu for crypto payment options."""
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("\u20bf BTC", callback_data="cop:direct_btc"))
-    kb.add(InlineKeyboardButton(texts.BTN_USDT_MENU, callback_data="cop:usdt_menu"))
-    kb.add(InlineKeyboardButton(texts.BTN_USDC_MENU, callback_data="cop:usdc_menu"))
-    kb.add(InlineKeyboardButton("TON", callback_data="cop:direct_ton"))
-    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="cop:back_to_payment"))
+    kb.add(InlineKeyboardButton("\u20bf BTC", callback_data=f"{prefix}:direct_btc"))
+    kb.add(InlineKeyboardButton(texts.BTN_USDT_MENU, callback_data=f"{prefix}:usdt_menu"))
+    kb.add(InlineKeyboardButton(texts.BTN_USDC_MENU, callback_data=f"{prefix}:usdc_menu"))
+    kb.add(InlineKeyboardButton("TON", callback_data=f"{prefix}:direct_ton"))
+    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data=f"{prefix}:back_to_payment"))
     return kb
 
 
@@ -390,18 +393,6 @@ def balance_topup_kb():
         kb.insert(InlineKeyboardButton(label, callback_data=f"bal:amt:{cents}"))
     kb.add(InlineKeyboardButton(texts.BTN_CUSTOM_AMOUNT, callback_data="bal:custom"))
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="bal:back"))
-    return kb
-
-
-def topup_method_kb(amount_cents: int):
-    """Deposit-method picker for balance top-ups (caller supplies the header)."""
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.insert(InlineKeyboardButton(texts.BTN_CRYPTOBOT, callback_data="tup:cryptobot"))
-    kb.insert(InlineKeyboardButton("\u20bf BTC", callback_data="tup:btc"))
-    kb.insert(InlineKeyboardButton(texts.BTN_USDT_MENU, callback_data="tup:usdt"))
-    kb.insert(InlineKeyboardButton(texts.BTN_USDC_MENU, callback_data="tup:usdc"))
-    kb.add(InlineKeyboardButton("TON", callback_data="tup:ton"))
-    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="tup:back"))
     return kb
 
 

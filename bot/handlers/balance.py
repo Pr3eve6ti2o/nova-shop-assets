@@ -33,6 +33,19 @@ async def cb_balance_topup(query: types.CallbackQuery):
         kb.balance_topup_kb())
 
 
+async def render_topup_payment(target, amount_cents: int):
+    """Show the unified Step-1-style payment panel for a top-up.
+
+    target is a CallbackQuery (edit in place) or a Message (send new)."""
+    rails = [("cryptobot", texts.BTN_CRYPTOBOT), ("crypto", texts.BTN_CRYPTO_PAYMENT)]
+    text = texts.MSG_TOPUP_STEP1.format(amount=fmt_money(amount_cents, config.CURRENCY))
+    markup = kb.payment_kb(rails, cod=False, prefix="tup", back_cbd="tup:back")
+    if isinstance(target, types.CallbackQuery):
+        await edit_text_safe(target, text, markup)
+    else:
+        await target.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("bal:amt:"))
 async def cb_balance_amount(query: types.CallbackQuery, state: FSMContext):
     """User picked a top-up amount - create CryptoBot invoice."""
@@ -43,11 +56,7 @@ async def cb_balance_amount(query: types.CallbackQuery, state: FSMContext):
         await query.answer(texts.ERR_INVALID_AMOUNT, show_alert=True)
         return
     await state.update_data(topup_cents=amount_cents)
-    await edit_text_safe(
-        query,
-        texts.MSG_TOPUP_METHOD.format(
-            amount=fmt_money(amount_cents, config.CURRENCY)),
-        kb.topup_method_kb(amount_cents))
+    await render_topup_payment(query, amount_cents)
 
 
 @dp.callback_query_handler(text="bal:custom")
@@ -93,50 +102,48 @@ async def cb_balance_custom_amount(message: types.Message, state: FSMContext):
     else:
         await state.finish()
     await state.update_data(topup_cents=cents)
-    await message.answer(
-        texts.MSG_TOPUP_METHOD.format(
-            amount=fmt_money(cents, config.CURRENCY)),
-        reply_markup=kb.topup_method_kb(cents), parse_mode="HTML")
+    await render_topup_payment(message, cents)
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("tup:"))
 async def cb_topup_method(query: types.CallbackQuery, state: FSMContext):
     from .crypto import start_topup_cryptobot, start_topup_deposit  # local import
-    data = await state.get_data()
-    amount = data.get("topup_cents")
     action = query.data.split(":")[1]
-    user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     if action == "back":
         await query.answer()
         await edit_text_safe(query, texts.MSG_BALANCE_TOPUP, kb.balance_topup_kb())
         return
-    if not amount or amount <= 0:
+    data = await state.get_data()
+    amount = data.get("topup_cents")
+    if not amount or int(amount) <= 0:
         await query.answer(texts.ERR_INVALID_AMOUNT, show_alert=True)
         return
+    amount = int(amount)
+    user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     if action == "cryptobot":
-        await start_topup_cryptobot(query, state, user, int(amount))
+        await start_topup_cryptobot(query, state, user, amount)
         return
-    if action == "usdt":
+    if action == "crypto_menu":
         await query.answer()
-        await edit_text_safe(
-            query,
-            texts.MSG_TOPUP_METHOD.format(
-                amount=fmt_money(int(amount), config.CURRENCY)),
-            kb.usdt_menu_kb(prefix="tupc"))
+        await edit_text_safe(query, texts.MSG_CRYPTO_MENU, kb.crypto_menu_kb(prefix="tup"))
         return
-    if action == "usdc":
+    if action == "direct_btc":
+        await start_topup_deposit(query, state, user, amount, "btc")
+        return
+    if action == "direct_ton":
+        await start_topup_deposit(query, state, user, amount, "ton")
+        return
+    if action == "usdt_menu":
         await query.answer()
-        await edit_text_safe(
-            query,
-            texts.MSG_TOPUP_METHOD.format(
-                amount=fmt_money(int(amount), config.CURRENCY)),
-            kb.usdc_menu_kb(prefix="tupc"))
+        await edit_text_safe(query, texts.MSG_CRYPTO_MENU, kb.usdt_menu_kb(prefix="tupc"))
         return
-    if action == "btc":
-        await start_topup_deposit(query, state, user, int(amount), "btc")
+    if action == "usdc_menu":
+        await query.answer()
+        await edit_text_safe(query, texts.MSG_CRYPTO_MENU, kb.usdc_menu_kb(prefix="tupc"))
         return
-    if action == "ton":
-        await start_topup_deposit(query, state, user, int(amount), "ton")
+    if action == "back_to_payment":
+        await query.answer()
+        await render_topup_payment(query, amount)
         return
     await query.answer()
 
@@ -152,4 +159,3 @@ async def cb_topup_chain(query: types.CallbackQuery, state: FSMContext):
         return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     await start_topup_deposit(query, state, user, int(amount), chain)
-

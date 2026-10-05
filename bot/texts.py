@@ -470,6 +470,8 @@ MSG_BALANCE_ORDER_PLACED = (
     "{fulfillment}"
 )
 MSG_TOPUP_METHOD = "\U0001f4b3 <b>Top Up {amount}</b>\n\nHow would you like to pay?"
+MSG_TOPUP_STEP1 = ("\U0001f4b3 <b>Top Up {amount} \u2014 Payment method</b>\n\n"
+                   "Choose how you'd like to pay.")
 MSG_TOPUP_CREDITED = ("\u2705 <b>Balance topped up!</b>\n\nAdded: <b>{amount}</b>{bonus_line}\n"
                       "New balance: <b>{balance}</b>")
 MSG_TOPUP_INVOICE_CREATING = "Creating your invoice\u2026"
