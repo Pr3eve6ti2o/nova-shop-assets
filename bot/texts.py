@@ -196,6 +196,7 @@ ERR_NOT_FOUND = "\u26a0\ufe0f Not found \u2014 it may have been removed."
 ERR_OUT_OF_STOCK = "\u26a0\ufe0f Sorry, this item just went out of stock."
 ERR_PAY_DECLINED = "\u274c Payment couldn't be completed: {reason}"
 ERR_INVALID_QTY = "\u26a0\ufe0f Please enter a positive number."
+ERR_INVALID_AMOUNT = "\u26a0\ufe0f That amount isn't valid. Please pick a positive amount."
 
 # ------------------------------------------------------------- start/menu ---
 MSG_WELCOME = (

@@ -110,11 +110,25 @@ async def cb_order_set_status(query: types.CallbackQuery):
         return
     # COD orders: fulfill stock/keys when first confirmed by admin.
     # Other rails: never confirm an unpaid order — that releases goods free.
-    if status == "confirmed" and order["status"] == "pending":
+    if status == "confirmed" and order["status"] in ("pending", "processing"):
         if (order["payment_method"] or "") != "cod" \
                 and not await _order_is_paid(order):
             await query.answer(texts.MSG_ADMIN_CONFIRM_UNPAID, show_alert=True)
             return
+        # Atomic claim pending -> processing so two concurrent admin confirms
+        # cannot both fulfill the same order (double keys/stock/referral).
+        # If already "processing", a previous attempt died mid-fulfillment --
+        # retry it now rather than leaving a paid order undelivered.
+        claimed = await db.set_order_status(oid, "processing",
+                                            only_if_status="pending")
+        if not claimed:
+            order = await db.get_order(oid)
+            if not order or order["status"] != "processing":
+                await query.answer("Order status changed \u2014 please refresh.",
+                                   show_alert=True)
+                return
+            logger.warning("admin confirm retrying fulfillment of stuck "
+                           "processing order %s", oid)
         ok, note = await fulfill_order(oid)
         if not ok:
             await query.answer(f"\u26a0\ufe0f {note}", show_alert=True)

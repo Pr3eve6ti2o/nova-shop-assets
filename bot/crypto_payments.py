@@ -1,5 +1,6 @@
 """Crypto payments for Nova Shop Bot: CryptoBot rail + self-custody direct deposits.
 
+import os
 Money rule: crypto amounts are ALWAYS Python ints in the chain's base unit
 (sats / wei-base / sun / nanotons). No floats for money — floats appear only
 in the CoinGecko rate feed, converted to int math immediately.

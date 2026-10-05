@@ -69,6 +69,45 @@ async def payment_success(message: types.Message, state: FSMContext):
         logger.error("payment for unknown/foreign order: %s", sp.invoice_payload)
         return
 
+    # Record payment FIRST (before status checks) so cancelled/duplicate
+    # payments stay on file for manual refund. Idempotent via UNIQUE(provider, external_id).
+    # Fall back to the invoice payload if Telegram ever sends an empty charge
+    # ID (e.g. some Stars flows) -- otherwise every such payment would collide
+    # on UNIQUE(provider, "") and only the first would be recorded.
+    charge_id = sp.telegram_payment_charge_id or sp.invoice_payload or ""
+    is_new = await db.record_payment(
+        provider=provider, external_id=charge_id,
+        user_id=user["id"], order_id=oid,
+        amount_cents=order["total_cents"], currency=config.CURRENCY, status="processing")
+    if not is_new:
+        logger.info("duplicate successful_payment ignored: %s",
+                    sp.telegram_payment_charge_id)
+        # Crash-recovery: the first attempt may have died after recording the
+        # payment but before fulfilling. If the order is still pending, try to
+        # claim and fulfill it now (the claim is atomic, so concurrent retries
+        # cannot double-fulfill). If it is stuck in "processing", never retry
+        # automatically -- alert instead, since fulfill_order is not idempotent.
+        order = await db.get_order(oid)
+        if order and order["status"] == "pending":
+            claimed = await db.set_order_status(oid, "processing",
+                                                only_if_status="pending")
+            if claimed:
+                ok, note = await fulfill_order(oid)
+                if not ok:
+                    logger.error("recovery fulfillment failed for order %s: %s",
+                                 oid, note)
+                    await notify_admins(
+                        f"Recovery fulfillment failed for order {oid}: {note}",
+                        min_bit=config.PERM_ORDERS)
+        elif order and order["status"] == "processing":
+            logger.warning("payment %s recorded but order %s stuck in processing",
+                           sp.telegram_payment_charge_id, oid)
+            await notify_admins(
+                f"Order {oid} is stuck in processing after payment "
+                f"{sp.telegram_payment_charge_id} -- manual check needed",
+                min_bit=config.PERM_ORDERS)
+        return
+
     if order["status"] == "cancelled":
         # Paid after the user cancelled: do NOT deliver goods. The payment
         # is already recorded above, so it stays on file for a manual refund.
@@ -79,22 +118,18 @@ async def payment_success(message: types.Message, state: FSMContext):
             min_bit=config.PERM_ORDERS)
         return
 
-    if order["status"] != "pending":
+    # Atomic claim: transition pending -> processing so that two concurrent
+    # payment webhooks (different charge IDs) cannot both fulfill the same
+    # order. Only the winner proceeds to fulfill_order.
+    claimed = await db.set_order_status(oid, "processing", only_if_status="pending")
+    if not claimed:
+        order = await db.get_order(oid)
+        status = order["status"] if order else "unknown"
         logger.warning("payment %s arrived for non-pending order %s (status=%s)",
-                       sp.telegram_payment_charge_id, oid, order["status"])
+                       sp.telegram_payment_charge_id, oid, status)
         await notify_admins(
-            f"Double payment attempt for order {oid} (status={order['status']})",
+            f"Double payment attempt for order {oid} (status={status})",
             min_bit=config.PERM_ORDERS)
-        return
-
-    # Idempotency: UNIQUE(provider, external_id).
-    is_new = await db.record_payment(
-        provider=provider, external_id=sp.telegram_payment_charge_id,
-        user_id=user["id"], order_id=oid,
-        amount_cents=order["total_cents"], currency=config.CURRENCY, status="processing")
-    if not is_new:
-        logger.info("duplicate successful_payment ignored: %s",
-                    sp.telegram_payment_charge_id)
         return
 
     ok, note = await fulfill_order(oid)
@@ -106,7 +141,7 @@ async def payment_success(message: types.Message, state: FSMContext):
         await message.answer(texts.MSG_PAY_PENDING)
         return
     await db.set_order_status(oid, "confirmed")
-    await db.update_payment_status(provider, sp.telegram_payment_charge_id, "paid")
+    await db.update_payment_status(provider, charge_id, "paid")
 
     if order["promo_code"]:
         try:

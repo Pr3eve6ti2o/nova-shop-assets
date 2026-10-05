@@ -41,6 +41,9 @@ async def render_profile(target, user):
 @dp.message_handler(text=texts.BTN_PROFILE)
 async def nav_profile(message: types.Message, state: FSMContext):
     await state.finish()
+    if message.chat.type != "private":
+        await message.answer("Your profile is private — please open me in a private chat.")
+        return
     await _try_delete(message)
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
     await render_profile(message, user)
@@ -48,6 +51,9 @@ async def nav_profile(message: types.Message, state: FSMContext):
 
 async def cmd_profile(message: types.Message, state: FSMContext):
     await state.finish()
+    if message.chat.type != "private":
+        await message.answer("Your profile is private — please open me in a private chat.")
+        return
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
     await render_profile(message, user)
 
@@ -55,6 +61,13 @@ async def cmd_profile(message: types.Message, state: FSMContext):
 @dp.callback_query_handler(text="prof")
 async def cb_profile(query: types.CallbackQuery):
     await query.answer()
+    # Fail closed: refuse if there's no message context (e.g. inline mode).
+    chat_type = query.message.chat.type if query.message else None
+    if chat_type != "private":
+        await query.answer(
+            "Your profile is private — please open me in a private chat.",
+            show_alert=True)
+        return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     await render_profile(query, user)
 
@@ -62,6 +75,13 @@ async def cb_profile(query: types.CallbackQuery):
 @dp.callback_query_handler(text="wl")
 async def cb_wishlist(query: types.CallbackQuery):
     await query.answer()
+    # Wishlist contents are personal; don't render them in groups.
+    chat_type = query.message.chat.type if query.message else None
+    if chat_type != "private":
+        await query.answer(
+            "Your wishlist is private — please open me in a private chat.",
+            show_alert=True)
+        return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     items = await db.wishlist_list(user["id"])
     if not items:
@@ -73,6 +93,15 @@ async def cb_wishlist(query: types.CallbackQuery):
 @dp.callback_query_handler(text="pur")
 async def cb_purchases(query: types.CallbackQuery):
     await query.answer()
+    # Never render delivered keys outside a private chat: in a group,
+    # anyone present could read and steal the user's license keys.
+    # Fail closed: if there's no message context (e.g. inline), refuse.
+    chat_type = query.message.chat.type if query.message else None
+    if chat_type != "private":
+        await query.answer(
+            "Your purchases contain secret keys — please open me in a private chat to view them.",
+            show_alert=True)
+        return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     orders = await db.list_user_orders(user["id"], 50, 0)
     items_list = await asyncio.gather(*(db.get_order_items(o["id"]) for o in orders))

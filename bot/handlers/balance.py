@@ -12,6 +12,9 @@ from .common import get_or_register, edit_text_safe
 
 async def cmd_balance(message: types.Message, state: FSMContext):
     await state.finish()
+    if message.chat.type != "private":
+        await message.answer("Your balance is private — please open me in a private chat.")
+        return
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
     balance = await db.get_balance(user["id"])
     await message.answer(
@@ -31,6 +34,11 @@ async def cb_balance_topup(query: types.CallbackQuery):
 async def cb_balance_amount(query: types.CallbackQuery, state: FSMContext):
     """User picked a top-up amount - create CryptoBot invoice."""
     amount_cents = int(query.data.split(":")[2])
+    if amount_cents <= 0:
+        # Never create invoices for zero/negative amounts, even once the
+        # CryptoBot integration below is implemented.
+        await query.answer(texts.ERR_INVALID_AMOUNT, show_alert=True)
+        return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     # Create a top-up order (no product, just balance credit)
     # This reuses the CryptoBot flow via a special order

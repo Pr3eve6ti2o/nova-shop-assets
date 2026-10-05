@@ -3,6 +3,7 @@
 Money is always integer cents. Rows are dict-like (aiosqlite.Row).
 """
 import os
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -113,10 +114,21 @@ CREATE INDEX IF NOT EXISTS idx_promos_code ON promos(code);
 """
 
 
+def _dict_factory(cursor, row):
+    """Row factory returning plain dicts instead of sqlite3.Row.
+    Eliminates Row-vs-dict confusion (.get() works, JSON serializable)."""
+    return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
+
+
 class Database:
     def __init__(self, path: str):
         self._memory = path == ":memory:"
         self._keepalive = None
+        # Serializes conditional-write ("claim") operations. aiosqlite cursors
+        # can report stale rowcounts when operations interleave across its
+        # worker threads; holding this lock makes the write+check atomic at
+        # the asyncio level (the SQL WHERE clause remains the DB-level guard).
+        self._claim_lock = asyncio.Lock()
         if self._memory:
             self.path = f"file:nova_shop_{id(self)}?mode=memory&cache=shared"
         else:
@@ -127,13 +139,13 @@ class Database:
 
     @asynccontextmanager
     async def _db(self):
-        """Per-operation connection: row factory + FK pragmas, auto-closed."""
+        """Per-operation connection: dict row factory + FK pragmas, auto-closed."""
         if self._memory and self._keepalive is None:
             self._keepalive = await aiosqlite.connect(self.path, uri=True)
-            self._keepalive.row_factory = aiosqlite.Row
+            self._keepalive.row_factory = _dict_factory
             await self._keepalive.execute("PRAGMA foreign_keys = ON")
         async with aiosqlite.connect(self.path, uri=self._memory) as db:
-            db.row_factory = aiosqlite.Row
+            db.row_factory = _dict_factory
             await db.execute("PRAGMA foreign_keys = ON")
             yield db
 
@@ -233,7 +245,22 @@ class Database:
         return await self.get_user_by_tg(tg_id)
 
     async def update_user(self, user_id: int, **fields):
-        allowed = {"name", "phone", "address", "is_blocked", "role_mask"}
+        # Profile fields only — role_mask/is_blocked require update_user_admin
+        allowed = {"name", "phone", "address"}
+        sets = [f"{k}=?" for k in fields if k in allowed]
+        if not sets:
+            return
+        vals = [fields[k] for k in fields if k in allowed]
+        async with self._db() as db:
+            await db.execute(
+                f"UPDATE users SET {', '.join(sets)} WHERE id=?",
+                (*vals, user_id),
+            )
+            await db.commit()
+
+    async def update_user_admin(self, user_id: int, **fields):
+        """Admin-only: can set role_mask, is_blocked. Callers must verify admin."""
+        allowed = {"role_mask", "is_blocked", "name", "phone", "address"}
         sets = [f"{k}=?" for k in fields if k in allowed]
         if not sets:
             return
@@ -283,24 +310,25 @@ class Database:
         Uses atomic UPDATE to prevent double-spend race conditions."""
         if amount_cents <= 0:
             raise ValueError("amount_cents must be positive")
-        async with self._db() as db:
-            # Atomic: only deduct if sufficient balance (prevents race)
-            cur = await db.execute(
-                "UPDATE users SET balance_cents = balance_cents - ? "
-                "WHERE id=? AND balance_cents >= ?",
-                (amount_cents, user_id, amount_cents))
-            if cur.rowcount == 0:
-                return None
-            async with db.execute(
-                "SELECT balance_cents FROM users WHERE id=?", (user_id,)) as cur2:
-                new_bal = (await cur2.fetchone())["balance_cents"]
-            await db.execute(
-                "INSERT INTO balance_transactions"
-                "(user_id, type, amount_cents, balance_after_cents, order_id)"
-                " VALUES (?, 'purchase', ?, ?, ?)",
-                (user_id, -amount_cents, new_bal, order_id))
-            await db.commit()
-            return new_bal
+        async with self._claim_lock:
+            async with self._db() as db:
+                # Atomic: only deduct if sufficient balance (prevents race)
+                cur = await db.execute(
+                    "UPDATE users SET balance_cents = balance_cents - ? "
+                    "WHERE id=? AND balance_cents >= ?",
+                    (amount_cents, user_id, amount_cents))
+                if cur.rowcount == 0:
+                    return None
+                async with db.execute(
+                    "SELECT balance_cents FROM users WHERE id=?", (user_id,)) as cur2:
+                    new_bal = (await cur2.fetchone())["balance_cents"]
+                await db.execute(
+                    "INSERT INTO balance_transactions"
+                    "(user_id, type, amount_cents, balance_after_cents, order_id)"
+                    " VALUES (?, 'purchase', ?, ?, ?)",
+                    (user_id, -amount_cents, new_bal, order_id))
+                await db.commit()
+                return new_bal
 
     async def count_users(self) -> int:
         async with self._db() as db:
@@ -477,15 +505,18 @@ class Database:
         """
         if qty <= 0:
             raise ValueError("qty must be positive")
-        async with self._db() as db:
-            cur = await db.execute(
-                "UPDATE products SET stock = CASE WHEN stock = -1"
-                " THEN -1 ELSE stock - ? END"
-                " WHERE id=? AND (stock = -1 OR stock >= ?)",
-                (qty, product_id, qty),
-            )
-            await db.commit()
-            return cur.rowcount
+        async with self._claim_lock:
+            async with self._db() as db:
+                cur = await db.execute(
+                    "UPDATE products SET stock = CASE WHEN stock = -1"
+                    " THEN -1 ELSE stock - ? END"
+                    " WHERE id=? AND (stock = -1 OR stock >= ?)",
+                    (qty, product_id, qty),
+                )
+                # Capture rowcount before commit (see set_order_status note).
+                n = cur.rowcount
+                await db.commit()
+                return n
 
     async def increment_stock(self, product_id: int, qty: int) -> int:
         """Atomically increment physical stock by qty.
@@ -502,8 +533,9 @@ class Database:
                 " WHERE id=?",
                 (qty, product_id),
             )
+            n = cur.rowcount
             await db.commit()
-            return cur.rowcount
+            return n
 
     async def top_products(self, limit: int = 5):
         async with self._db() as db:
@@ -572,6 +604,30 @@ class Database:
                 (user_id, product_id, qty),
             )
             await db.commit()
+
+    async def cart_adjust(self, user_id: int, product_id: int, delta: int,
+                         min_qty: int = 0, max_qty: int = 99) -> int:
+        """Atomically adjust cart qty by delta. Returns new qty (0 if removed).
+        Prevents read-modify-write race on rapid taps."""
+        async with self._db() as db:
+            await db.execute(
+                "INSERT INTO cart_items(user_id, product_id, qty) VALUES (?, ?, ?)"
+                " ON CONFLICT(user_id, product_id) DO UPDATE SET"
+                " qty = max(?, min(?, qty + excluded.qty))",
+                (user_id, product_id, max(min_qty, delta), min_qty, max_qty),
+            )
+            async with db.execute(
+                "SELECT qty FROM cart_items WHERE user_id=? AND product_id=?",
+                (user_id, product_id)) as cur:
+                row = await cur.fetchone()
+                new_qty = row["qty"] if row else 0
+            if new_qty <= 0:
+                await db.execute(
+                    "DELETE FROM cart_items WHERE user_id=? AND product_id=?",
+                    (user_id, product_id))
+                new_qty = 0
+            await db.commit()
+            return new_qty
 
     async def cart_set_qty(self, user_id: int, product_id: int, qty: int):
         async with self._db() as db:
@@ -758,29 +814,30 @@ class Database:
         a race (the usage row is rolled back). Callers should treat False as
         "do not apply the discount".
         """
-        async with self._db() as db:
-            cur = await db.execute(
-                "INSERT OR IGNORE INTO promo_usages(promo_id, user_id, used_at)"
-                " VALUES (?, ?, ?)",
-                (promo_id, user_id, utcnow_iso()),
-            )
-            if cur.rowcount == 0:
-                return False  # this user already consumed it
-            cur = await db.execute(
-                "UPDATE promos SET used_count = used_count + 1"
-                " WHERE id=? AND (max_uses = 0 OR used_count < max_uses)",
-                (promo_id,),
-            )
-            if cur.rowcount == 0:
-                # Lost the race for the last slot: roll back our usage row.
-                await db.execute(
-                    "DELETE FROM promo_usages WHERE promo_id=? AND user_id=?",
-                    (promo_id, user_id),
+        async with self._claim_lock:
+            async with self._db() as db:
+                cur = await db.execute(
+                    "INSERT OR IGNORE INTO promo_usages(promo_id, user_id, used_at)"
+                    " VALUES (?, ?, ?)",
+                    (promo_id, user_id, utcnow_iso()),
                 )
+                if cur.rowcount == 0:
+                    return False  # this user already consumed it
+                cur = await db.execute(
+                    "UPDATE promos SET used_count = used_count + 1"
+                    " WHERE id=? AND (max_uses = 0 OR used_count < max_uses)",
+                    (promo_id,),
+                )
+                if cur.rowcount == 0:
+                    # Lost the race for the last slot: roll back our usage row.
+                    await db.execute(
+                        "DELETE FROM promo_usages WHERE promo_id=? AND user_id=?",
+                        (promo_id, user_id),
+                    )
+                    await db.commit()
+                    return False
                 await db.commit()
-                return False
-            await db.commit()
-            return True
+                return True
 
     async def release_promo_usage(self, promo_id: int, user_id: int,
                                   order_id: int = None) -> bool:
@@ -791,29 +848,30 @@ class Database:
         if another active order for the same user still uses this promo.
         Returns True if a claim was released.
         """
-        async with self._db() as db:
-            q = ("SELECT 1 FROM orders o JOIN promos p ON p.code = o.promo_code"
-                 " WHERE p.id=? AND o.user_id=? AND o.status != 'cancelled'")
-            args = [promo_id, user_id]
-            if order_id is not None:
-                q += " AND o.id != ?"
-                args.append(order_id)
-            async with db.execute(q, args) as cur:
-                if await cur.fetchone():
-                    return False
-            cur = await db.execute(
-                "DELETE FROM promo_usages WHERE promo_id=? AND user_id=?",
-                (promo_id, user_id),
-            )
-            released = cur.rowcount > 0
-            if released:
-                await db.execute(
-                    "UPDATE promos SET used_count = MAX(0, used_count - 1)"
-                    " WHERE id=?",
-                    (promo_id,),
+        async with self._claim_lock:
+            async with self._db() as db:
+                q = ("SELECT 1 FROM orders o JOIN promos p ON p.code = o.promo_code"
+                     " WHERE p.id=? AND o.user_id=? AND o.status != 'cancelled'")
+                args = [promo_id, user_id]
+                if order_id is not None:
+                    q += " AND o.id != ?"
+                    args.append(order_id)
+                async with db.execute(q, args) as cur:
+                    if await cur.fetchone():
+                        return False
+                cur = await db.execute(
+                    "DELETE FROM promo_usages WHERE promo_id=? AND user_id=?",
+                    (promo_id, user_id),
                 )
-            await db.commit()
-            return released
+                released = cur.rowcount > 0
+                if released:
+                    await db.execute(
+                        "UPDATE promos SET used_count = MAX(0, used_count - 1)"
+                        " WHERE id=?",
+                        (promo_id,),
+                    )
+                await db.commit()
+                return released
 
     async def release_order_promo(self, order_id: int) -> bool:
         """Release the promo claimed for an order, if any."""
@@ -893,66 +951,67 @@ class Database:
             if qty <= 0 or price_cents < 0:
                 return None, "invalid_item"
         now = utcnow_iso()
-        async with self._db() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                cur = await db.execute(
-                    "INSERT INTO orders(user_id, status, subtotal_cents,"
-                    " discount_cents, total_cents, payment_method, delivery_kind,"
-                    " address, phone, promo_code, created_at, updated_at)"
-                    " VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (user_id, subtotal_cents, discount_cents, total_cents,
-                     payment_method, delivery_kind, address, phone, promo_code,
-                     now, now),
-                )
-                order_id = cur.lastrowid
-
-                for product_id, name, qty, price_cents in items:
-                    await db.execute(
-                        "INSERT INTO order_items(order_id, product_id, name, qty,"
-                        " price_cents) VALUES (?, ?, ?, ?, ?)",
-                        (order_id, product_id, name, qty, price_cents),
-                    )
+        async with self._claim_lock:
+            async with self._db() as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
                     cur = await db.execute(
-                        "UPDATE products SET stock = CASE WHEN stock = -1"
-                        " THEN -1 ELSE stock - ? END"
-                        " WHERE id=? AND (stock = -1 OR stock >= ?)",
-                        (qty, product_id, qty),
+                        "INSERT INTO orders(user_id, status, subtotal_cents,"
+                        " discount_cents, total_cents, payment_method, delivery_kind,"
+                        " address, phone, promo_code, created_at, updated_at)"
+                        " VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (user_id, subtotal_cents, discount_cents, total_cents,
+                         payment_method, delivery_kind, address, phone, promo_code,
+                         now, now),
                     )
-                    if cur.rowcount == 0:
-                        await db.execute("ROLLBACK")
-                        return None, "out_of_stock"
+                    order_id = cur.lastrowid
 
-                if promo_id is not None:
-                    async with db.execute(
-                            "SELECT 1 FROM promos WHERE id=?",
-                            (promo_id,)) as sel:
-                        if await sel.fetchone() is None:
+                    for product_id, name, qty, price_cents in items:
+                        await db.execute(
+                            "INSERT INTO order_items(order_id, product_id, name, qty,"
+                            " price_cents) VALUES (?, ?, ?, ?, ?)",
+                            (order_id, product_id, name, qty, price_cents),
+                        )
+                        cur = await db.execute(
+                            "UPDATE products SET stock = CASE WHEN stock = -1"
+                            " THEN -1 ELSE stock - ? END"
+                            " WHERE id=? AND (stock = -1 OR stock >= ?)",
+                            (qty, product_id, qty),
+                        )
+                        if cur.rowcount == 0:
+                            await db.execute("ROLLBACK")
+                            return None, "out_of_stock"
+
+                    if promo_id is not None:
+                        async with db.execute(
+                                "SELECT 1 FROM promos WHERE id=?",
+                                (promo_id,)) as sel:
+                            if await sel.fetchone() is None:
+                                await db.execute("ROLLBACK")
+                                return None, "promo_used"
+                        cur = await db.execute(
+                            "INSERT INTO promo_usages(promo_id, user_id,"
+                            " used_at) VALUES (?, ?, ?)"
+                            " ON CONFLICT(promo_id, user_id) DO NOTHING",
+                            (promo_id, user_id, now),
+                        )
+                        if cur.rowcount == 0:
                             await db.execute("ROLLBACK")
                             return None, "promo_used"
-                    cur = await db.execute(
-                        "INSERT INTO promo_usages(promo_id, user_id,"
-                        " used_at) VALUES (?, ?, ?)"
-                        " ON CONFLICT(promo_id, user_id) DO NOTHING",
-                        (promo_id, user_id, now),
-                    )
-                    if cur.rowcount == 0:
-                        await db.execute("ROLLBACK")
-                        return None, "promo_used"
-                    cur = await db.execute(
-                        "UPDATE promos SET used_count = used_count + 1"
-                        " WHERE id=? AND (max_uses = 0 OR used_count < max_uses)",
-                        (promo_id,),
-                    )
-                    if cur.rowcount == 0:
-                        await db.execute("ROLLBACK")
-                        return None, "promo_exhausted"
+                        cur = await db.execute(
+                            "UPDATE promos SET used_count = used_count + 1"
+                            " WHERE id=? AND (max_uses = 0 OR used_count < max_uses)",
+                            (promo_id,),
+                        )
+                        if cur.rowcount == 0:
+                            await db.execute("ROLLBACK")
+                            return None, "promo_exhausted"
 
-                await db.execute("COMMIT")
-                return order_id, None
-            except Exception:
-                await db.execute("ROLLBACK")
-                raise
+                    await db.execute("COMMIT")
+                    return order_id, None
+                except Exception:
+                    await db.execute("ROLLBACK")
+                    raise
 
     async def add_order_item(self, order_id: int, product_id: int, name: str,
                              qty: int, price_cents: int):
@@ -1041,20 +1100,27 @@ class Database:
                                only_if_status: str = None) -> bool:
         """Set order status. With only_if_status, the update is conditional
         (atomic compare-and-set); returns True if a row was updated."""
-        async with self._db() as db:
-            if only_if_status is None:
-                cur = await db.execute(
-                    "UPDATE orders SET status=?, updated_at=? WHERE id=?",
-                    (status, utcnow_iso(), order_id),
-                )
-            else:
-                cur = await db.execute(
-                    "UPDATE orders SET status=?, updated_at=?"
-                    " WHERE id=? AND status=?",
-                    (status, utcnow_iso(), order_id, only_if_status),
-                )
-            await db.commit()
-            return cur.rowcount > 0
+        async with self._claim_lock:
+            async with self._db() as db:
+                if only_if_status is None:
+                    cur = await db.execute(
+                        "UPDATE orders SET status=?, updated_at=? WHERE id=?",
+                        (status, utcnow_iso(), order_id),
+                    )
+                else:
+                    cur = await db.execute(
+                        "UPDATE orders SET status=?, updated_at=?"
+                        " WHERE id=? AND status=?",
+                        (status, utcnow_iso(), order_id, only_if_status),
+                    )
+                # Capture rowcount BEFORE commit: reading cur.rowcount after an
+                # await (e.g. commit) can return a stale/wrong value under
+                # concurrent load (aiosqlite cursor proxy), which would break
+                # the atomic-claim guarantee and allow double fulfillment.
+                # The _claim_lock above serializes claims so the read is safe.
+                won = cur.rowcount > 0
+                await db.commit()
+                return won
 
     async def revenue(self, days: int = None) -> tuple:
         """Returns (revenue_cents, order_count) for paid orders."""
@@ -1122,8 +1188,9 @@ class Database:
                 "UPDATE payments SET status=? WHERE provider=? AND external_id=?",
                 (status, provider, external_id),
             )
+            won = cur.rowcount > 0
             await db.commit()
-            return cur.rowcount > 0
+            return won
 
     # -------------------------------------------------------- reviews ---
     async def has_purchased(self, user_id: int, product_id: int) -> bool:
@@ -1198,35 +1265,38 @@ class Database:
         `if not await db.try_claim_first_referral_credit(user["id"]): return 0`.
         """
         try:
+            async with self._claim_lock:
+                async with self._db() as db:
+                    cur = await db.execute(
+                        "INSERT OR IGNORE INTO referral_claims(referee_id, claimed_at)"
+                        " VALUES (?, ?)",
+                        (referee_id, utcnow_iso()),
+                    )
+                    won = cur.rowcount > 0
+                    await db.commit()
+                    return won
+        except Exception:
+            return False
+
+    async def claim_and_record_referral_credit(self, referee_id: int, referrer_id: int,
+                                               order_id: int, amount_cents: int) -> bool:
+        async with self._claim_lock:
             async with self._db() as db:
                 cur = await db.execute(
                     "INSERT OR IGNORE INTO referral_claims(referee_id, claimed_at)"
                     " VALUES (?, ?)",
                     (referee_id, utcnow_iso()),
                 )
+                won = cur.rowcount > 0
+                if won:
+                    await db.execute(
+                        "INSERT OR IGNORE INTO referral_earnings"
+                        "(referrer_id, referee_id, order_id, amount_cents, created_at)"
+                        " VALUES (?, ?, ?, ?, ?)",
+                        (referrer_id, referee_id, order_id, amount_cents, utcnow_iso()),
+                    )
                 await db.commit()
-                return cur.rowcount > 0
-        except Exception:
-            return False
-
-    async def claim_and_record_referral_credit(self, referee_id: int, referrer_id: int,
-                                               order_id: int, amount_cents: int) -> bool:
-        async with self._db() as db:
-            cur = await db.execute(
-                "INSERT OR IGNORE INTO referral_claims(referee_id, claimed_at)"
-                " VALUES (?, ?)",
-                (referee_id, utcnow_iso()),
-            )
-            won = cur.rowcount > 0
-            if won:
-                await db.execute(
-                    "INSERT OR IGNORE INTO referral_earnings"
-                    "(referrer_id, referee_id, order_id, amount_cents, created_at)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (referrer_id, referee_id, order_id, amount_cents, utcnow_iso()),
-                )
-            await db.commit()
-            return won
+                return won
 
     async def referral_earnings_total(self, user_id: int) -> int:
         async with self._db() as db:
@@ -1370,15 +1440,17 @@ class Database:
         UNIQUE(chain, txid) violations also return False.
         """
         try:
-            async with self._db() as db:
-                cur = await db.execute(
-                    "UPDATE crypto_deposits SET txid=?, seen_amount_crypto=?,"
-                    " confirmations=?, status='claimed'"
-                    " WHERE id=? AND status IN ('pending','underpaid','late')",
-                    (txid, seen_amount_crypto, confirmations, deposit_id),
-                )
-                await db.commit()
-                return cur.rowcount > 0
+            async with self._claim_lock:
+                async with self._db() as db:
+                    cur = await db.execute(
+                        "UPDATE crypto_deposits SET txid=?, seen_amount_crypto=?,"
+                        " confirmations=?, status='claimed'"
+                        " WHERE id=? AND status IN ('pending','underpaid','late')",
+                        (txid, seen_amount_crypto, confirmations, deposit_id),
+                    )
+                    won = cur.rowcount > 0
+                    await db.commit()
+                    return won
         except aiosqlite.IntegrityError:
             return False
 

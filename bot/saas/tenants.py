@@ -5,7 +5,8 @@ Architecture: Shared DB with tenant_id, encrypted bot tokens
 """
 import hashlib
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 # Pricing
 PLAN_MONTHLY = "monthly"
@@ -49,14 +50,31 @@ def hash_webhook_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()
 
 
+def _normalize_dt(dt: datetime) -> datetime | None:
+    """Normalize datetime for comparison: strip tzinfo, handle strings.
+    SQLite returns naive datetimes; API may give aware ones or ISO strings."""
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if isinstance(dt, datetime) and dt.tzinfo is not None:
+        # Convert to UTC first: stripping tzinfo without converting shifts
+        # the wall clock (e.g. +02:00 would grant 2 extra hours of service).
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt if isinstance(dt, datetime) else None
+
+
 def calculate_period_end(plan: str, start: datetime = None) -> datetime:
-    """Calculate subscription period end date."""
-    start = start or datetime.utcnow()
+    """Calculate subscription period end date. Plan must be a known constant."""
+    if plan not in (PLAN_MONTHLY, PLAN_YEARLY):
+        raise ValueError(f"Unknown plan: {plan!r}")
+    start = _normalize_dt(start) or datetime.utcnow()
     if plan == PLAN_MONTHLY:
         return start + timedelta(days=30)
-    elif plan == PLAN_YEARLY:
-        return start + timedelta(days=365)
-    raise ValueError(f"Unknown plan: {plan}")
+    return start + timedelta(days=365)
 
 
 def is_tenant_active(status: str, period_end: datetime = None) -> bool:
@@ -64,8 +82,10 @@ def is_tenant_active(status: str, period_end: datetime = None) -> bool:
 
     Fail closed: paid/trial/past-due tenants must have a valid period_end.
     An expired subscription means no service, even if status says active.
+    period_end must come from server-side billing data, never tenant input.
     """
     now = datetime.utcnow()
+    period_end = _normalize_dt(period_end)
     if status in (STATUS_ACTIVE, STATUS_TRIAL):
         return period_end is not None and now < period_end
     if status == STATUS_PAST_DUE:
@@ -108,10 +128,12 @@ CREATE TABLE IF NOT EXISTS saas_tenant_features (
     PRIMARY KEY (tenant_id, feature_key)
 );
 
--- Audit log for sensitive operations
+-- Audit log for sensitive operations.
+-- NOTE: no ON DELETE CASCADE here on purpose: deleting a tenant must NOT
+-- erase its audit trail. tenant_id is nulled instead.
 CREATE TABLE IF NOT EXISTS saas_audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tenant_id INTEGER REFERENCES saas_tenants(id) ON DELETE CASCADE,
+    tenant_id INTEGER REFERENCES saas_tenants(id) ON DELETE SET NULL,
     user_id INTEGER,
     action TEXT NOT NULL,
     details TEXT,
