@@ -1,7 +1,15 @@
 import type { CollectionConfig } from 'payload'
+import { isAdmin } from '../access/roles'
 
 export const Users: CollectionConfig = {
   slug: 'users',
+  access: {
+    read: isAdmin,
+    create: isAdmin,
+    update: isAdmin,
+    delete: isAdmin,
+    admin: ({ req }) => Boolean(req.user) && (req.user as { role?: string }).role === 'admin',
+  },
   admin: {
     useAsTitle: 'email',
   },
@@ -14,6 +22,7 @@ export const Users: CollectionConfig = {
     {
       name: 'role',
       type: 'select',
+      access: { create: isAdmin, update: isAdmin },
       required: true,
       defaultValue: 'staff',
       options: [
