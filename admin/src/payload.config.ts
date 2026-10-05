@@ -23,7 +23,11 @@ export default buildConfig({
   },
   collections: [Users, Media, Categories, Products, Orders],
   editor: lexicalEditor(),
-  secret: process.env.PAYLOAD_SECRET || '',
+  secret: (() => {
+    const secret = process.env.PAYLOAD_SECRET
+    if (!secret || secret.length < 32) throw new Error('PAYLOAD_SECRET must be set to at least 32 characters')
+    return secret
+  })(),
   typescript: {
     outputFile: path.resolve(dirname, 'payload-types.ts'),
   },
@@ -31,6 +35,10 @@ export default buildConfig({
     client: {
       url: process.env.DATABASE_URL || '',
     },
+    // Improve SQLite behavior for concurrent admin requests. This is still
+    // not a substitute for Postgres in a multi-process production topology.
+    wal: true,
+    busyTimeout: 5000,
   }),
   sharp,
   plugins: [],
