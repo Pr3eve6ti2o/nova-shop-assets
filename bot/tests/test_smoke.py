@@ -460,11 +460,10 @@ def _payment_rails_body(cp, cfg, importlib):
         rails = await cp.payment_rails(None, 1000)
         methods = [m for m, _ in rails]
         assert methods == ["balance", "stars", "cryptobot", "card", "crypto"], methods
-        # CryptoBot button shows +3% fee on $10.00 -> $10.31
-        # (gross-up: ceil(1000 * 100 / 97) = 1031, so the shop nets $10.00
-        # after CryptoBot deducts 3% from the gross invoice).
+        # CryptoBot button is a clean label now (fee shown on the invoice screen,
+        # not the button): "💎 CryptoBot".
         cb_label = rails[2][1]
-        assert "3%" in cb_label and "$10.31" in cb_label, cb_label
+        assert cb_label == "💎 CryptoBot", cb_label
 
         # restore
         for k in ("CRYPTOBOT_TOKEN", "PAYMENTS_PROVIDER_TOKEN", "XPUB_BTC",

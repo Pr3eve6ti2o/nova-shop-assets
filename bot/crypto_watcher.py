@@ -76,7 +76,7 @@ async def finalize_crypto_order(order_id: int, *, provider: str, external_id: st
         status="processing")
     if not is_new:
         logger.info("duplicate crypto payment seen: %s/%s", provider, external_id)
-        # Re-check order status in case it was confirmed while we were here.
+        # Re-check the order; it may have been fulfilled in a previous attempt.
         order = await db.get_order(order_id)
         if order and order["status"] == "confirmed":
             return True
@@ -195,7 +195,7 @@ async def _process_deposit(dep, now):
         dust = cp.DUST_BASE_UNITS.get(chain, 0)
         if total < dust:
             # Dust/griefing guard: count toward the total, but never spam the
-            # user with an underpaid notice and never flip the status for it.
+            # user with an underpaid notice for a dust payment.
             logger.info("deposit %s: dust %d base units (< %d); no notice",
                         dep["id"], total, dust)
             return
@@ -233,6 +233,31 @@ async def _process_deposit(dep, now):
         # Stale claimed: retry finalization in case a previous attempt failed
         # after recording the payment but before fulfillment succeeded.
         logger.info("deposit %s already claimed; retrying finalize", dep["id"])
+
+    # W1: top-up deposits credit the user's balance instead of fulfilling an order.
+    if (dep.get("purpose") or "order") == "topup":
+        ok, new_bal, bonus = await db.finalize_topup_payment(
+            provider=f"direct_{chain}",
+            external_id=best["txid"],
+            user_id=dep["topup_user_id"],
+            amount_cents=int(dep["expected_usd_cents"]),
+            currency=cp.CHAINS[chain]["symbol"])
+        if ok:
+            await db.update_crypto_deposit(dep["id"], status="paid")
+            u = await db.get_user(dep["topup_user_id"])
+            if u:
+                bonus_line = (f"\n\U0001f381 Deposit bonus (5%): <b>{fmt_money(bonus, config.CURRENCY)}</b>" if bonus else "")
+                try:
+                    await bot.send_message(u["tg_id"], texts.MSG_TOPUP_CREDITED.format(
+                        amount=fmt_money(int(dep["expected_usd_cents"]), config.CURRENCY),
+                        bonus_line=bonus_line, balance=fmt_money(new_bal, config.CURRENCY)), parse_mode="HTML")
+                except Exception as e:
+                    logger.warning("topup notify failed: %s", e)
+            await db.audit(dep["topup_user_id"], "topup_paid", f"deposit={dep['id']}")
+        else:
+            await db.update_crypto_deposit(dep["id"], status="underpaid")
+        return
+
     order = await db.get_order(dep["order_id"])
     ok = await finalize_crypto_order(
         dep["order_id"], provider=f"direct_{chain}", external_id=best["txid"],
@@ -257,7 +282,21 @@ async def _process_deposit(dep, now):
 
 
 async def _notify_expired(dep):
-    order = await db.get_order(dep["order_id"])
+    order = await db.get_order(dep["order_id"]) if dep["order_id"] else None
+    # W2: top-up deposits have no order — send a minimal notice to the topup user.
+    if (dep.get("purpose") or "order") == "topup":
+        user = (await db.get_user(dep["topup_user_id"])
+                if dep.get("topup_user_id") else None)
+        if not user:
+            return
+        try:
+            await bot.send_message(
+                user["tg_id"],
+                "\u23f3 Your top-up payment window expired. "
+                "You can start a new top-up anytime from the balance menu.")
+        except Exception as e:
+            logger.warning("topup expired notify failed: %s", e)
+        return
     if not order:
         return
     user = await db.get_user(order["user_id"])
@@ -272,7 +311,25 @@ async def _notify_expired(dep):
 
 
 async def _notify_underpaid(dep, seen: int, expected: int, chain: str):
-    order = await db.get_order(dep["order_id"])
+    order = await db.get_order(dep["order_id"]) if dep["order_id"] else None
+    # W2: top-up deposits have no order — send a minimal notice to the topup user.
+    if (dep.get("purpose") or "order") == "topup":
+        user = (await db.get_user(dep["topup_user_id"])
+                if dep.get("topup_user_id") else None)
+        if not user:
+            return
+        remaining = expected - seen
+        try:
+            await bot.send_message(
+                user["tg_id"],
+                "\u26a0\ufe0f Your top-up was underpaid: received "
+                f"{cp.format_crypto(seen, chain)}, expected "
+                f"{cp.format_crypto(expected, chain)}. Send the remaining "
+                f"{cp.format_crypto(remaining, chain)} to {dep['address']}.",
+                disable_web_page_preview=True)
+        except Exception as e:
+            logger.warning("topup underpaid notify failed: %s", e)
+        return
     if not order:
         return
     user = await db.get_user(order["user_id"])

@@ -251,10 +251,9 @@ def payment_kb(rails, cod: bool):
     return kb
 
 
-def crypto_menu_kb(cryptobot_label: str):
+def crypto_menu_kb():
     """Submenu for crypto payment options."""
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton(cryptobot_label, callback_data="cop:cryptobot"))
     kb.add(InlineKeyboardButton("\u20bf BTC", callback_data="cop:direct_btc"))
     kb.add(InlineKeyboardButton(texts.BTN_USDT_MENU, callback_data="cop:usdt_menu"))
     kb.add(InlineKeyboardButton(texts.BTN_USDC_MENU, callback_data="cop:usdc_menu"))
@@ -263,21 +262,23 @@ def crypto_menu_kb(cryptobot_label: str):
     return kb
 
 
-def usdt_menu_kb():
+def usdt_menu_kb(prefix: str = "cop"):
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("Base", callback_data="cop:usdt_base"))
-    kb.add(InlineKeyboardButton("Optimism", callback_data="cop:usdt_op"))
-    kb.add(InlineKeyboardButton("Polygon", callback_data="cop:usdt_polygon"))
-    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="cop:crypto_menu"))
+    kb.add(InlineKeyboardButton("Base", callback_data=f"{prefix}:usdt_base"))
+    kb.add(InlineKeyboardButton("Optimism", callback_data=f"{prefix}:usdt_op"))
+    kb.add(InlineKeyboardButton("Polygon", callback_data=f"{prefix}:usdt_polygon"))
+    back = "tup:back" if prefix == "tupc" else "cop:crypto_menu"
+    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data=back))
     return kb
 
 
-def usdc_menu_kb():
+def usdc_menu_kb(prefix: str = "cop"):
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("Base", callback_data="cop:usdc_base"))
-    kb.add(InlineKeyboardButton("Optimism", callback_data="cop:usdc_op"))
-    kb.add(InlineKeyboardButton("Polygon", callback_data="cop:usdc_polygon"))
-    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="cop:crypto_menu"))
+    kb.add(InlineKeyboardButton("Base", callback_data=f"{prefix}:usdc_base"))
+    kb.add(InlineKeyboardButton("Optimism", callback_data=f"{prefix}:usdc_op"))
+    kb.add(InlineKeyboardButton("Polygon", callback_data=f"{prefix}:usdc_polygon"))
+    back = "tup:back" if prefix == "tupc" else "cop:crypto_menu"
+    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data=back))
     return kb
 
 
@@ -388,8 +389,19 @@ def balance_topup_kb():
         label = fmt_money(cents, config.CURRENCY)
         kb.insert(InlineKeyboardButton(label, callback_data=f"bal:amt:{cents}"))
     kb.add(InlineKeyboardButton(texts.BTN_CUSTOM_AMOUNT, callback_data="bal:custom"))
-    kb.add(InlineKeyboardButton(texts.BTN_CONTINUE_TO_PAYMENT, callback_data="bal:topayment"))
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="bal:back"))
+    return kb
+
+
+def topup_method_kb(amount_cents: int):
+    """Deposit-method picker for balance top-ups (caller supplies the header)."""
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.insert(InlineKeyboardButton(texts.BTN_CRYPTOBOT, callback_data="tup:cryptobot"))
+    kb.insert(InlineKeyboardButton("\u20bf BTC", callback_data="tup:btc"))
+    kb.insert(InlineKeyboardButton(texts.BTN_USDT_MENU, callback_data="tup:usdt"))
+    kb.insert(InlineKeyboardButton(texts.BTN_USDC_MENU, callback_data="tup:usdc"))
+    kb.add(InlineKeyboardButton("TON", callback_data="tup:ton"))
+    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="tup:back"))
     return kb
 
 
@@ -644,6 +656,14 @@ def cryptobot_pay_kb(pay_url: str, invoice_id: int):
     kb.add(InlineKeyboardButton(f"{texts.BTN_CRYPTOBOT_PAY} #{invoice_id}", url=pay_url))
     # No "I've Paid — Check" button: payment is auto-detected.
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="copb"))
+    return kb
+
+
+def topup_cryptobot_kb(pay_url: str, invoice_id: int):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(f"{texts.BTN_CRYPTOBOT_PAY} #{invoice_id}", url=pay_url))
+    kb.row(InlineKeyboardButton("\u2705 I've Paid \u2014 Check", callback_data=f"tupkb:{invoice_id}"))
+    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="tup:back"))
     return kb
 
 

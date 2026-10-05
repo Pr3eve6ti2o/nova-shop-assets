@@ -33,31 +33,6 @@ async def cb_balance_topup(query: types.CallbackQuery):
         kb.balance_topup_kb())
 
 
-async def _start_topup_invoice(target, amount_cents: int):
-    """Shared top-up invoice flow for preset and custom amounts.
-
-    `target` is a CallbackQuery or a Message; the notice is shown by editing
-    the originating message when possible.
-    """
-    if isinstance(target, types.CallbackQuery):
-        query = target
-        await query.answer(texts.MSG_BALANCE_INVOICE_CREATING)
-    else:
-        query = None
-    user_tg = target.from_user
-    user, _ = await get_or_register(user_tg.id, user_tg.full_name)
-    # Create a top-up order (no product, just balance credit)
-    # This reuses the CryptoBot flow via a special order
-    # TODO: integrate with CryptoBot invoice creation
-    # For now, direct to support
-    text = texts.MSG_BALANCE_TOPUP_MANUAL
-    markup = kb.balance_kb()
-    if query is not None:
-        await edit_text_safe(query, text, markup)
-    else:
-        await target.answer(text, reply_markup=markup, parse_mode="HTML")
-
-
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("bal:amt:"))
 async def cb_balance_amount(query: types.CallbackQuery, state: FSMContext):
     """User picked a top-up amount - create CryptoBot invoice."""
@@ -67,7 +42,12 @@ async def cb_balance_amount(query: types.CallbackQuery, state: FSMContext):
         # CryptoBot integration below is implemented.
         await query.answer(texts.ERR_INVALID_AMOUNT, show_alert=True)
         return
-    await _start_topup_invoice(query, amount_cents)
+    await state.update_data(topup_cents=amount_cents)
+    await edit_text_safe(
+        query,
+        texts.MSG_TOPUP_METHOD.format(
+            amount=fmt_money(amount_cents, config.CURRENCY)),
+        kb.topup_method_kb(amount_cents))
 
 
 @dp.callback_query_handler(text="bal:custom")
@@ -112,23 +92,64 @@ async def cb_balance_custom_amount(message: types.Message, state: FSMContext):
         await state.set_state(prev)
     else:
         await state.finish()
-    await _start_topup_invoice(message, cents)
+    await state.update_data(topup_cents=cents)
+    await message.answer(
+        texts.MSG_TOPUP_METHOD.format(
+            amount=fmt_money(cents, config.CURRENCY)),
+        reply_markup=kb.topup_method_kb(cents), parse_mode="HTML")
 
 
-@dp.callback_query_handler(text="bal:topayment")
-async def cb_balance_to_payment(query: types.CallbackQuery, state: FSMContext):
-    """Continue to Payment: back to checkout's Step 1 when in a checkout,
-    otherwise back to the balance screen."""
-    from .checkout import render_payment  # local import: avoids any cycle
-    await query.answer()
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("tup:"))
+async def cb_topup_method(query: types.CallbackQuery, state: FSMContext):
+    from .crypto import start_topup_cryptobot, start_topup_deposit  # local import
+    data = await state.get_data()
+    amount = data.get("topup_cents")
+    action = query.data.split(":")[1]
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
-    cur = await state.get_state() or ""
-    prev = (await state.get_data()).get("_prev_state") or ""
-    if cur.startswith("Checkout:") or prev.startswith("Checkout:"):
-        await render_payment(query, state, user["id"])
-    else:
-        balance = await db.get_balance(user["id"])
+    if action == "back":
+        await query.answer()
+        await edit_text_safe(query, texts.MSG_BALANCE_TOPUP, kb.balance_topup_kb())
+        return
+    if not amount or amount <= 0:
+        await query.answer(texts.ERR_INVALID_AMOUNT, show_alert=True)
+        return
+    if action == "cryptobot":
+        await start_topup_cryptobot(query, state, user, int(amount))
+        return
+    if action == "usdt":
+        await query.answer()
         await edit_text_safe(
             query,
-            texts.MSG_BALANCE.format(balance=fmt_money(balance, config.CURRENCY)),
-            kb.balance_kb())
+            texts.MSG_TOPUP_METHOD.format(
+                amount=fmt_money(int(amount), config.CURRENCY)),
+            kb.usdt_menu_kb(prefix="tupc"))
+        return
+    if action == "usdc":
+        await query.answer()
+        await edit_text_safe(
+            query,
+            texts.MSG_TOPUP_METHOD.format(
+                amount=fmt_money(int(amount), config.CURRENCY)),
+            kb.usdc_menu_kb(prefix="tupc"))
+        return
+    if action == "btc":
+        await start_topup_deposit(query, state, user, int(amount), "btc")
+        return
+    if action == "ton":
+        await start_topup_deposit(query, state, user, int(amount), "ton")
+        return
+    await query.answer()
+
+
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("tupc:"))
+async def cb_topup_chain(query: types.CallbackQuery, state: FSMContext):
+    from .crypto import start_topup_deposit
+    data = await state.get_data()
+    amount = data.get("topup_cents")
+    chain = query.data.split(":")[1]  # e.g. usdt_base
+    if not amount or amount <= 0:
+        await query.answer(texts.ERR_INVALID_AMOUNT, show_alert=True)
+        return
+    user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
+    await start_topup_deposit(query, state, user, int(amount), chain)
+

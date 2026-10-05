@@ -1,6 +1,4 @@
 """Crypto payments: CryptoBot rail + self-custody direct deposits + admin panel.
-import asyncio
-import re
 
 Wired into checkout: payment step lists rails via crypto_payments.payment_rails();
 place-order branches here for 'cryptobot' and 'direct_<chain>'.
@@ -10,7 +8,6 @@ import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
-
 
 from aiogram import types
 from aiogram.dispatcher import FSMContext
@@ -231,6 +228,75 @@ async def start_cryptobot_payment(query: types.CallbackQuery, state: FSMContext,
         kb.cryptobot_pay_kb(pay_url, invoice_id))
 
 
+async def start_topup_cryptobot(query: types.CallbackQuery, state: FSMContext,
+                                user, amount_cents: int):
+    """Create the CryptoBot top-up invoice and show pay + check buttons.
+
+    Order-free mirror of start_cryptobot_payment: no order id is touched, the
+    invoice is tagged purpose="topup" and credited to the user's balance once
+    paid (see cb_topup_cryptobot_check).
+    """
+    fee_pct = int(config.CRYPTOBOT_FEE_PERCENT)
+    # Same gross-up as start_cryptobot_payment / cryptobot_create_invoice:
+    # gross = ceil(net * 100 / (100 - fee_pct)); CryptoBot deducts its fee
+    # from the gross invoice amount, so the user is netted the amount they
+    # asked to top up.
+    gross_cents = ((int(amount_cents) * 100 + (100 - fee_pct) - 1)
+                   // (100 - fee_pct))
+    fee_cents = gross_cents - int(amount_cents)
+    # Single active top-up invoice per user: cancel any prior open top-up
+    # invoices before creating a new one, so two distinct invoice_ids cannot
+    # both be paid and double-credit the balance.
+    try:
+        priors = await db.active_cryptobot_invoices() or []
+    except Exception as e:
+        logger.warning("list cryptobot invoices failed: %s", e)
+        priors = []
+    for prior in priors:
+        if (prior.get("purpose") or "order") != "topup":
+            continue
+        if prior.get("topup_user_id") != user["id"]:
+            continue
+        if prior.get("status") != "active":
+            continue
+        await db.set_cryptobot_status(prior["invoice_id"], "cancelled")
+        try:
+            await cp.cryptobot_delete_invoice(prior["invoice_id"])
+        except Exception as e:
+            logger.warning("cryptobot deleteInvoice %s failed: %s",
+                           prior["invoice_id"], e)
+    try:
+        inv = await cp.cryptobot_create_invoice(
+            order_id=0, usd_cents=int(amount_cents),
+            note=f"Nova Shop balance top-up ({fmt_money(amount_cents, config.CURRENCY)})",
+            payload="topup")
+        invoice_id = int(inv["invoice_id"])
+        pay_url = inv["bot_invoice_url"]
+        await db.create_cryptobot_invoice(order_id=None, invoice_id=invoice_id,
+                                          asset=inv.get("asset", "USDT"),
+                                          amount=str(inv.get("amount", "")),
+                                          purpose="topup",
+                                          topup_user_id=user["id"])
+    except Exception as e:
+        logger.warning("cryptobot topup createInvoice failed: %s", e)
+        await state.finish()
+        await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
+                             kb.balance_topup_kb())
+        await db.audit(user["tg_id"], "topup_cryptobot_error",
+                       f"amount={amount_cents}: {e}")
+        return
+    await db.audit(user["tg_id"], "topup_cryptobot_invoice",
+                   f"invoice={invoice_id}")
+    await state.finish()
+    await edit_text_safe(
+        query,
+        texts.MSG_CRYPTOBOT_CREATED.format(
+            total=fmt_money(amount_cents, config.CURRENCY),
+            fee=fmt_money(fee_cents, config.CURRENCY),
+            gross=fmt_money(gross_cents, config.CURRENCY)),
+        kb.topup_cryptobot_kb(pay_url, invoice_id))
+
+
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("cokb:"))
 async def cb_cryptobot_check(query: types.CallbackQuery):
     """"I've Paid — Check": poll CryptoBot for this invoice (named states).
@@ -288,6 +354,68 @@ async def cb_cryptobot_check(query: types.CallbackQuery):
         await query.message.delete()
     except Exception:
         pass
+
+
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("tupkb:"))
+async def cb_topup_cryptobot_check(query: types.CallbackQuery):
+    """"I've Paid — Check" for a balance top-up CryptoBot invoice.
+
+    Exactly one query.answer() per path (see cb_cryptobot_check).
+    """
+    try:
+        invoice_id = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await query.answer()
+        return
+    inv = await db.get_cryptobot_invoice(invoice_id)
+    user = await db.get_user_by_tg(query.from_user.id)
+    if (not inv or (inv.get("purpose") or "order") != "topup"
+            or not user or inv["topup_user_id"] != user["id"]):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
+    # Recover the NET amount EXACTLY from the stored gross string:
+    # gross = ceil(net * 100 / (100 - fee)) implies
+    # net <= gross * (100 - fee) / 100 < net + 1, hence the floor below
+    # yields net precisely (no rounding ambiguity).
+    gross_cents = int(round(float(inv["amount"]) * 100))
+    fee_pct = int(config.CRYPTOBOT_FEE_PERCENT)
+    net_cents = (gross_cents * (100 - fee_pct)) // 100
+
+    async def _finalize_and_show():
+        ok, new_bal, bonus = await db.finalize_topup_payment(
+            provider="cryptobot", external_id=f"cb_{invoice_id}",
+            user_id=user["id"], amount_cents=net_cents, currency="USDT")
+        bonus_line = (f"\n\U0001f381 Deposit bonus (5%): "
+                      f"<b>{fmt_money(bonus, config.CURRENCY)}</b>"
+                      if bonus else "")
+        await edit_text_safe(query, texts.MSG_TOPUP_CREDITED.format(
+            amount=fmt_money(net_cents, config.CURRENCY),
+            bonus_line=bonus_line,
+            balance=fmt_money(new_bal, config.CURRENCY)), kb.balance_kb())
+
+    if inv["status"] == "paid":
+        # Idempotent credit: a prior crash may have marked the invoice paid
+        # without crediting the balance (finalize_topup_payment is idempotent).
+        await _finalize_and_show()
+        await query.answer(texts.TOAST_CRYPTO_ALREADY)
+        return
+    try:
+        items = await cp.cryptobot_get_invoices(invoice_ids=[invoice_id])
+    except Exception as e:
+        logger.warning("cryptobot topup check failed: %s", e)
+        await query.answer()
+        await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
+                             kb.balance_topup_kb())
+        return
+    paid = any(str(p.get("invoice_id")) == str(invoice_id)
+               and p.get("status") == "paid" for p in items)
+    if not paid:
+        await query.answer()
+        await query.message.answer(texts.MSG_CRYPTO_STILL_UNPAID)
+        return
+    await db.set_cryptobot_status(invoice_id, "paid")
+    await _finalize_and_show()
+    await query.answer()
 
 
 # ------------------------------------------------- direct deposit rail ---
@@ -382,6 +510,109 @@ async def start_direct_deposit(query: types.CallbackQuery, state: FSMContext,
             confs=cp.CHAINS[chain]["confirmations"],
             ttl=_ttl_line(expires)),
         kb.deposit_kb(dep_id))
+
+
+async def start_topup_deposit(query: types.CallbackQuery, state: FSMContext,
+                              user, amount_cents: int, chain: str):
+    """Order-free mirror of start_direct_deposit for a balance top-up.
+
+    Allocates a fresh deposit address tagged purpose="topup"; funds are
+    credited to the user's balance by the watcher once confirmed.
+    """
+    try:
+        rates = await cp.get_rates()
+        price = rates.get(chain)
+    except Exception as e:
+        logger.warning("get %s rate failed: %s", chain, e)
+        await state.finish()
+        await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
+                             kb.balance_topup_kb())
+        return
+    if not price:
+        logger.warning("no %s rate — hiding direct crypto", chain)
+        await state.finish()
+        await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
+                             kb.balance_topup_kb())
+        return
+    expected = cp.usd_cents_to_base_units(int(amount_cents), price, chain)
+    memo = f"NOVA-TOPUP-{user['id']}" if chain == "ton" else None
+    ttl_min = config.CRYPTO_TTL_MINUTES
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=ttl_min)).isoformat()
+    try:
+        # If a prior top-up deposit already has seen funds, reuse it instead
+        # of cancelling it and stranding those funds on an unmonitored address.
+        existing = None
+        for _st in ("pending", "underpaid"):
+            for _old in await db.list_crypto_deposits(status=_st, limit=1000):
+                if (_old.get("purpose") or "order") != "topup":
+                    continue
+                if _old.get("topup_user_id") != user["id"] or _old["chain"] != chain:
+                    continue
+                if int(_old.get("seen_amount_crypto") or 0) > 0:
+                    if existing is None:
+                        existing = _old
+                else:
+                    await db.update_crypto_deposit(_old["id"], status="cancelled")
+        if existing:
+            await state.finish()
+            memo_line = texts.MSG_DEPOSIT_MEMO_LINE.format(memo=existing["memo"]) if existing["memo"] else ""
+            await edit_text_safe(
+                query,
+                texts.MSG_DEPOSIT_SCREEN.format(
+                    amount=cp.format_crypto(int(existing["expected_crypto"]), existing["chain"]),
+                    address=existing["address"],
+                    memo_line=memo_line,
+                    total=fmt_money(int(existing["expected_usd_cents"]), config.CURRENCY),
+                    confs=cp.CHAINS[existing["chain"]]["confirmations"],
+                    ttl=_ttl_line(existing["expires_at"])),
+                types.InlineKeyboardMarkup(inline_keyboard=[
+                    [types.InlineKeyboardButton(
+                        text=texts.BTN_DEPOSIT_CHECK,
+                        callback_data=cb("codc", existing["id"]))],
+                    [types.InlineKeyboardButton(
+                        text=texts.BTN_BACK,
+                        callback_data="tup:back")],
+                ]))
+            return
+        address, index, _ = await cp.next_deposit_address(db, chain)
+        if not _valid_deposit_address(chain, address):
+            raise ValueError(f"invalid {chain} address derived: {address!r}")
+        dep_id = await db.create_crypto_deposit(
+            order_id=None, chain=chain, address=address,
+            derivation_index=index, memo=memo, expected_crypto=str(expected),
+            expected_usd_cents=int(amount_cents), expires_at=expires,
+            purpose="topup", topup_user_id=user["id"])
+    except Exception as e:
+        logger.error("topup deposit setup failed for %s: %s", chain, e)
+        await state.finish()
+        await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
+                             kb.balance_topup_kb())
+        return
+    await db.audit(user["tg_id"], "topup_deposit",
+                   f"chain={chain} addr={address[:12]}…")
+    await notify_admins(
+        texts.MSG_CRYPTO_ADMIN_DEPOSIT.format(
+            oid="topup", chain=cp.CHAINS[chain]["name"], address=address,
+            amount=cp.format_crypto(expected, chain)),
+        min_bit=config.PERM_ORDERS)
+    await state.finish()
+    memo_line = texts.MSG_DEPOSIT_MEMO_LINE.format(memo=memo) if memo else ""
+    await edit_text_safe(
+        query,
+        texts.MSG_DEPOSIT_SCREEN.format(
+            amount=cp.format_crypto(expected, chain), address=address,
+            memo_line=memo_line,
+            total=fmt_money(amount_cents, config.CURRENCY),
+            confs=cp.CHAINS[chain]["confirmations"],
+            ttl=_ttl_line(expires)),
+        types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(
+                text=texts.BTN_DEPOSIT_CHECK,
+                callback_data=cb("codc", dep_id))],
+            [types.InlineKeyboardButton(
+                text=texts.BTN_BACK,
+                callback_data="tup:back")],
+        ]))
 
 
 async def _manual_deposit_scan(deposit_id: int) -> str:

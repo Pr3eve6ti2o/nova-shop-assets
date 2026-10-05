@@ -335,17 +335,9 @@ async def cb_payment_method(query: types.CallbackQuery, state: FSMContext):
     # Crypto submenu navigation
     if method == "crypto_menu":
         await query.answer()
-        import crypto_payments as cp
-        user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
-        t = await totals(user["id"], state, with_delivery=True)
-        rails = await cp.payment_rails(db, t["total"])
-        label = next((lbl for m, lbl in rails if m == "cryptobot"),
-                     texts.BTN_CRYPTOBOT_RAIL.format(
-                         total=fmt_money(t["total"], config.CURRENCY),
-                         fee_pct=config.CRYPTOBOT_FEE_PERCENT))
         await edit_text_safe(
             query, texts.MSG_CRYPTO_MENU,
-            kb.crypto_menu_kb(label))
+            kb.crypto_menu_kb())
         return
     if method == "usdt_menu":
         await query.answer()
@@ -378,12 +370,14 @@ async def cb_payment_method(query: types.CallbackQuery, state: FSMContext):
                 or not await db.crypto_chain_enabled(method)):
             await query.answer(texts.MSG_CRYPTO_PROVIDER_DOWN, show_alert=True)
             return
-    elif method == "card" and not config.PAYMENTS_PROVIDER_TOKEN:
-        await query.answer(texts.MSG_NEED_CARD_TOKEN, show_alert=True)
-        return
-    elif method == "cryptobot" and not config.CRYPTOBOT_TOKEN:
-        await query.answer(texts.MSG_NEED_CRYPTOBOT_TOKEN, show_alert=True)
-        return
+    elif method == "card":
+        if not config.PAYMENTS_PROVIDER_TOKEN:
+            await query.answer(texts.MSG_NEED_CARD_TOKEN, show_alert=True)
+            return
+    elif method == "cryptobot":
+        if not config.CRYPTOBOT_TOKEN:
+            await query.answer(texts.MSG_NEED_CRYPTOBOT_TOKEN, show_alert=True)
+            return
     elif method == "cod":
         cod_user, _ = await get_or_register(query.from_user.id,
                                             query.from_user.full_name)
@@ -414,7 +408,10 @@ async def cb_payment_method(query: types.CallbackQuery, state: FSMContext):
 # ------------------------------------------------------------- confirm ---
 def _confirm_text_and_kb(state_data: dict, t: dict):
     kind = state_data.get("delivery_kind") or "delivery"
-    step = 2 if state_data.get("details_skipped") else 3
+    method = state_data.get("payment_method")
+    crypto_sub = method in ("direct_btc", "direct_ton", "usdt_base", "usdt_op",
+                            "usdt_polygon", "usdc_base", "usdc_op", "usdc_polygon")
+    step = 3 if crypto_sub else 2
     if state_data.get("details_skipped"):
         contact_block = ""
     else:
@@ -792,3 +789,4 @@ async def cb_change_payment(query: types.CallbackQuery, state: FSMContext):
         address=order["address"], payment_method=None, promo_code=None,
         details_skipped=digital_only)
     await render_payment(query, state, user["id"])
+

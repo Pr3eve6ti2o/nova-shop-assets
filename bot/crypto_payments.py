@@ -24,6 +24,7 @@ import aiohttp
 
 import config
 
+
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ chains ---
@@ -475,7 +476,9 @@ async def _cryptobot_call(method: str, params: dict) -> dict:
 
 
 async def cryptobot_create_invoice(*, order_id: int, usd_cents: int,
-                                   asset: str = "USDT") -> dict:
+                                   asset: str = "USDT",
+                                   note: str = None,
+                                   payload: str = None) -> dict:
     """Create a CryptoBot invoice: USD total + fee%, rounded UP to cents."""
     fee_pct = config.CRYPTOBOT_FEE_PERCENT
     if not isinstance(fee_pct, int) or not (0 <= fee_pct < 100):
@@ -488,8 +491,8 @@ async def cryptobot_create_invoice(*, order_id: int, usd_cents: int,
     return await _cryptobot_call("createInvoice", {
         "asset": asset,
         "amount": amount,
-        "description": f"Nova Shop order #{order_id}",
-        "payload": str(order_id),
+        "description": note or f"Nova Shop order #{order_id}",
+        "payload": payload or str(order_id),
         "expires_in": 1800,  # 30 min invoice window
     })
 
@@ -812,10 +815,9 @@ def match_deposit(chain: str, txs: list, address: str, expected_base: int,
     """Pure matching logic (unit-testable). Returns the best tx dict or None.
 
     Best = the largest payment to the address. The caller splits paid vs
-    underpaid with meets_tolerance() (98%): an underpaid tx is still
-    returned so the watcher can flag it and keep watching until TTL
-    instead of going silent. Use matching_txs() + sum when several
-    top-up payments must count together.
+    underpaid with meets_tolerance() (98%): an underpaid deposit stays in the
+    sweep until its TTL instead of going silent. Use matching_txs() + sum when
+    several top-up payments must count together.
     """
     best = None
     best_amt = 0
@@ -840,12 +842,7 @@ async def payment_rails(db, total_cents: int):
         fee_pct = config.CRYPTOBOT_FEE_PERCENT
         if not isinstance(fee_pct, int) or not (0 <= fee_pct < 100):
             raise ValueError("CRYPTOBOT_FEE_PERCENT must be an integer in [0, 100)")
-        # Gross up: fee is a percentage of the gross invoice amount.
-        gross = ((int(total_cents) * 100 + (100 - fee_pct) - 1)
-                 // (100 - fee_pct))
-        rails.append(("cryptobot", texts.BTN_CRYPTOBOT_RAIL.format(
-            total=fmt_money(gross, config.CURRENCY),
-            fee_pct=fee_pct)))
+        rails.append(("cryptobot", texts.BTN_CRYPTOBOT))
     if config.PAYMENTS_PROVIDER_TOKEN:
         rails.append(("card", texts.BTN_CARD.format(
             total=fmt_money(total_cents, config.CURRENCY))))

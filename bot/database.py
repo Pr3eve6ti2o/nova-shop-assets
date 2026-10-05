@@ -100,11 +100,13 @@ CREATE TABLE IF NOT EXISTS crypto_deposits(
   memo TEXT, expected_crypto TEXT NOT NULL, expected_usd_cents INTEGER NOT NULL,
   status TEXT DEFAULT 'pending',
   txid TEXT, confirmations INTEGER DEFAULT 0, seen_amount_crypto TEXT,
-  created_at TEXT, expires_at TEXT, UNIQUE(chain, txid));
+  created_at TEXT, expires_at TEXT, purpose TEXT DEFAULT 'order',
+  topup_user_id INTEGER, UNIQUE(chain, txid));
 CREATE TABLE IF NOT EXISTS cryptobot_invoices(
   id INTEGER PRIMARY KEY, order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
   invoice_id INTEGER UNIQUE NOT NULL, asset TEXT, amount TEXT,
-  status TEXT DEFAULT 'active', created_at TEXT);
+  status TEXT DEFAULT 'active', created_at TEXT, purpose TEXT DEFAULT 'order',
+  topup_user_id INTEGER);
 -- Performance indexes (Step 1b)
 CREATE INDEX IF NOT EXISTS idx_products_category_active ON products(category_id, is_active);
 CREATE INDEX IF NOT EXISTS idx_categories_active ON categories(is_active);
@@ -165,6 +167,24 @@ class Database:
             # Migration: add balance_cents to users if missing
             try:
                 await db.execute("ALTER TABLE users ADD COLUMN balance_cents INTEGER NOT NULL DEFAULT 0")
+            except Exception:
+                pass  # Column already exists or table doesn't exist yet
+            # Migration: add purpose/topup_user_id to crypto_deposits if missing
+            try:
+                await db.execute("ALTER TABLE crypto_deposits ADD COLUMN purpose TEXT DEFAULT 'order'")
+            except Exception:
+                pass  # Column already exists or table doesn't exist yet
+            try:
+                await db.execute("ALTER TABLE crypto_deposits ADD COLUMN topup_user_id INTEGER")
+            except Exception:
+                pass  # Column already exists or table doesn't exist yet
+            # Migration: add purpose/topup_user_id to cryptobot_invoices if missing
+            try:
+                await db.execute("ALTER TABLE cryptobot_invoices ADD COLUMN purpose TEXT DEFAULT 'order'")
+            except Exception:
+                pass  # Column already exists or table doesn't exist yet
+            try:
+                await db.execute("ALTER TABLE cryptobot_invoices ADD COLUMN topup_user_id INTEGER")
             except Exception:
                 pass  # Column already exists or table doesn't exist yet
             await db.executescript(SCHEMA)
@@ -1373,15 +1393,18 @@ class Database:
                                     address: str, derivation_index=None,
                                     memo=None, expected_crypto: str,
                                     expected_usd_cents: int,
-                                    expires_at: str) -> int:
+                                    expires_at: str,
+                                    purpose: str = "order",
+                                    topup_user_id: int = None) -> int:
         async with self._db() as db:
             cur = await db.execute(
                 "INSERT INTO crypto_deposits(order_id, chain, address,"
                 " derivation_index, memo, expected_crypto, expected_usd_cents,"
-                " status, created_at, expires_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+                " status, created_at, expires_at, purpose, topup_user_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
                 (order_id, chain, address, derivation_index, memo,
-                 expected_crypto, expected_usd_cents, utcnow_iso(), expires_at),
+                 expected_crypto, expected_usd_cents, utcnow_iso(), expires_at,
+                 purpose, topup_user_id),
             )
             await db.commit()
             return cur.lastrowid
@@ -1415,7 +1438,7 @@ class Database:
         allowed = {"order_id", "chain", "address", "derivation_index", "memo",
                    "expected_crypto", "expected_usd_cents", "status", "txid",
                    "confirmations", "seen_amount_crypto", "created_at",
-                   "expires_at"}
+                   "expires_at", "purpose", "topup_user_id"}
         invalid = set(fields) - allowed
         if invalid:
             raise ValueError(
@@ -1465,13 +1488,18 @@ class Database:
             async with db.execute(q, (*args, limit)) as cur:
                 return await cur.fetchall()
 
-    async def create_cryptobot_invoice(self, *, order_id: int, invoice_id: int,
-                                       asset: str, amount: str) -> int:
+    async def create_cryptobot_invoice(self, *, order_id: int = None,
+                                       invoice_id: int,
+                                       asset: str, amount: str,
+                                       purpose: str = "order",
+                                       topup_user_id: int = None) -> int:
         async with self._db() as db:
             cur = await db.execute(
                 "INSERT INTO cryptobot_invoices(order_id, invoice_id, asset,"
-                " amount, status, created_at) VALUES (?, ?, ?, ?, 'active', ?)",
-                (order_id, invoice_id, asset, amount, utcnow_iso()),
+                " amount, status, created_at, purpose, topup_user_id)"
+                " VALUES (?, ?, ?, ?, 'active', ?, ?, ?)",
+                (order_id, invoice_id, asset, amount, utcnow_iso(),
+                 purpose, topup_user_id),
             )
             await db.commit()
             return cur.lastrowid
@@ -1513,3 +1541,19 @@ class Database:
             await db.execute("UPDATE cryptobot_invoices SET status=? WHERE invoice_id=?",
                              (status, invoice_id))
             await db.commit()
+
+    async def finalize_topup_payment(self, *, provider: str, external_id: str,
+                                     user_id: int, amount_cents: int,
+                                     currency: str) -> tuple:
+        """Idempotent balance credit for top-ups. Returns (ok, new_balance_cents, bonus_cents)."""
+        is_new = await self.record_payment(
+            provider=provider, external_id=str(external_id),
+            user_id=user_id, order_id=None, amount_cents=amount_cents,
+            currency=currency, status="paid")
+        if not is_new:
+            bal = await self.get_balance(user_id)
+            return (True, bal, 0)
+        import config as cfg
+        bonus = int(amount_cents) * cfg.DEPOSIT_BONUS_PERCENT // 100
+        new_bal = await self.add_balance(user_id, int(amount_cents), tx_type="topup")
+        return (True, new_bal, bonus)
