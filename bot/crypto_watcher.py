@@ -141,6 +141,11 @@ async def _fetch_chain_txs(chain: str, address: str):
         return await cp.fetch_trx_usdt_txs(address)
     if chain == "ton":
         return await cp.fetch_ton_txs(address)
+    if chain in ("usdt_base", "usdc_base", "usdt_op", "usdc_op",
+                 "usdt_polygon", "usdc_polygon"):
+        entry = cp.CHAINS[chain]
+        return await cp.fetch_evm_token_txs(
+            address, entry["blockscout"], entry["token_contract"])
     return []
 
 

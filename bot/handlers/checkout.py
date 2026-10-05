@@ -257,27 +257,16 @@ async def details_typed(message: types.Message, state: FSMContext):
 
 # ------------------------------------------------------------- payment ---
 async def render_payment(target, state: FSMContext, user_id: int):
-    """Payment step: rails with direct-crypto chains listed directly (no sub-menu)."""
+    """Payment step: Balance (always first) -> Stars -> Card -> Crypto submenu."""
     await Checkout.payment.set()
     import crypto_payments as cp
     t = await totals(user_id, state, with_delivery=True)
     data = await state.get_data()
     kind = data.get("delivery_kind") or "delivery"
     step = 1  # Digital-only: payment is step 1 (no details step)
+    # payment_rails() returns: balance (always) -> stars -> card (if token) ->
+    # crypto. The single "crypto" rail opens the crypto submenu.
     rails = await cp.payment_rails(db, t["total"])
-    chains = [c for c in cp.enabled_chains() if await db.crypto_chain_enabled(c)]
-    expanded = []
-    for method, label in rails:
-        if method == "direct":
-            for c in chains:
-                expanded.append((f"direct_{c}", cp.CHAINS[c]["button"]))
-        else:
-            expanded.append((method, label))
-    # Add balance payment option if user has sufficient balance
-    balance = await db.get_balance(user_id)
-    if balance >= t["total"]:
-        expanded.insert(0, ("balance", texts.BTN_PAY_BALANCE.format(
-            balance=fmt_money(balance, config.CURRENCY))))
     text = texts.MSG_CO_PAYMENT.format(
         step=step, total=fmt_money(t["total"], config.CURRENCY))
     # M7: COD makes no sense for any cart containing digital items (keys would
@@ -285,7 +274,7 @@ async def render_payment(target, state: FSMContext, user_id: int):
     # mixed carts, not just when details were skipped.
     show_cod = (kind == "delivery") and not data.get("details_skipped") \
         and not await _cart_has_digital(user_id)
-    markup = kb.payment_kb(expanded, cod=show_cod)
+    markup = kb.payment_kb(rails, cod=show_cod)
     if isinstance(target, types.CallbackQuery):
         await edit_text_safe(target, text, markup)
     else:
@@ -351,17 +340,25 @@ async def cb_payment_method(query: types.CallbackQuery, state: FSMContext):
         user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
         t = await totals(user["id"], state, with_delivery=True)
         rails = await cp.payment_rails(db, t["total"])
-        chains = [c for c in cp.enabled_chains() if await db.crypto_chain_enabled(c)]
-        crypto_rails = []
-        for m, label in rails:
-            if m == "cryptobot":
-                crypto_rails.append((m, label))
-            elif m == "direct":
-                for c in chains:
-                    crypto_rails.append((f"direct_{c}", cp.CHAINS[c]["button"]))
+        label = next((lbl for m, lbl in rails if m == "cryptobot"),
+                     texts.BTN_CRYPTOBOT_RAIL.format(
+                         total=fmt_money(t["total"], config.CURRENCY),
+                         fee_pct=config.CRYPTOBOT_FEE_PERCENT))
         await edit_text_safe(
             query, texts.MSG_CRYPTO_MENU,
-            kb.crypto_menu_kb(crypto_rails))
+            kb.crypto_menu_kb(label))
+        return
+    if method == "usdt_menu":
+        await query.answer()
+        await edit_text_safe(
+            query, query.message.text or texts.MSG_CRYPTO_MENU,
+            kb.usdt_menu_kb())
+        return
+    if method == "usdc_menu":
+        await query.answer()
+        await edit_text_safe(
+            query, query.message.text or texts.MSG_CRYPTO_MENU,
+            kb.usdc_menu_kb())
         return
     if method == "back_to_payment":
         await query.answer()
@@ -373,6 +370,13 @@ async def cb_payment_method(query: types.CallbackQuery, state: FSMContext):
         chain = method.split("_", 1)[1]
         if (chain not in cp.CHAINS or not cp.chain_configured(chain)
                 or not await db.crypto_chain_enabled(chain)):
+            await query.answer(texts.MSG_CRYPTO_PROVIDER_DOWN, show_alert=True)
+            return
+    elif method in ("usdt_base", "usdc_base", "usdt_op", "usdc_op",
+                    "usdt_polygon", "usdc_polygon"):
+        import crypto_payments as cp
+        if (method not in cp.CHAINS or not cp.chain_configured(method)
+                or not await db.crypto_chain_enabled(method)):
             await query.answer(texts.MSG_CRYPTO_PROVIDER_DOWN, show_alert=True)
             return
     elif method == "card" and not config.PAYMENTS_PROVIDER_TOKEN:
@@ -389,13 +393,15 @@ async def cb_payment_method(query: types.CallbackQuery, state: FSMContext):
                                "order.", show_alert=True)
             return
     elif method == "balance":
-        # Balance payment: check sufficient funds
+        # Balance is always offered; insufficient funds redirect to top-up.
         bal_user, _ = await get_or_register(query.from_user.id,
                                             query.from_user.full_name)
         t = await totals(bal_user["id"], state, with_delivery=True)
         balance = await db.get_balance(bal_user["id"])
         if balance < t["total"]:
-            await query.answer(texts.MSG_BALANCE_INSUFFICIENT, show_alert=True)
+            await query.answer(texts.MSG_INSUFFICIENT_BALANCE, show_alert=True)
+            await edit_text_safe(query, texts.MSG_BALANCE_TOPUP,
+                                 kb.balance_topup_kb())
             return
     elif method not in ("stars",):
         await query.answer(show_alert=False)

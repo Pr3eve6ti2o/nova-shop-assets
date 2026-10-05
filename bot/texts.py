@@ -111,6 +111,10 @@ BTN_BALANCE = "\U0001f4b3 Balance"
 BTN_TOPUP = "\U0001f4b3 Top Up"
 BTN_CUSTOM_AMOUNT = "\u270f\ufe0f Custom Amount"
 BTN_PAY_BALANCE = "\U0001f4b3 Pay with Balance ({balance})"
+BTN_PAY_WITH_BALANCE = "\U0001f4b3 Pay with Balance"
+BTN_USDT_MENU = "USDT (base/optimism/polygon)"
+BTN_USDC_MENU = "USDC (base/optimism/polygon)"
+MSG_INSUFFICIENT_BALANCE = "Insufficient balance \u2014 top up first."
 BTN_ORDER_LINK = "\U0001f517 Order Link"
 BTN_CRYPTO_PAYMENT = "\U0001f4b0 Crypto Payment"
 MSG_CRYPTO_MENU = (
@@ -140,6 +144,12 @@ PAY_METHOD_LABEL = {
     "direct_eth": "\U0001fa99 USDT-ERC20 (direct)",
     "direct_trx": "\U0001fa99 USDT-TRC20 (direct)",
     "direct_ton": "\U0001fa99 TON (direct)",
+    "usdt_base": "\U0001fa99 USDT (Base)",
+    "usdc_base": "\U0001fa99 USDC (Base)",
+    "usdt_op": "\U0001fa99 USDT (Optimism)",
+    "usdc_op": "\U0001fa99 USDC (Optimism)",
+    "usdt_polygon": "\U0001fa99 USDT (Polygon)",
+    "usdc_polygon": "\U0001fa99 USDC (Polygon)",
 }
 PAY_METHOD_PICKUP = "\U0001f91d Pay on Pickup"
 

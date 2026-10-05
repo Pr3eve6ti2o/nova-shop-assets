@@ -50,7 +50,59 @@ CHAINS = {
         # NOTE: do NOT use 💎 here — the lexicon reserves 💎 for CryptoBot.
         "confirmations": 1, "button": "\U0001f537 TON",
     },
+    "usdt_base": {
+        "name": "USDT (Base)", "symbol": "USDT", "decimals": 6,
+        "confirmations": 12, "button": "USDT (Base)",
+        "xpub_env": "XPUB_ETH", "hd": ("bip44", 60),
+        "token_contract": "0x102d758f688a4C1C5a80b116bD945d4455460282",
+        "blockscout": "https://base.blockscout.com/api/v2",
+    },
+    "usdc_base": {
+        "name": "USDC (Base)", "symbol": "USDC", "decimals": 6,
+        "confirmations": 12, "button": "USDC (Base)",
+        "xpub_env": "XPUB_ETH", "hd": ("bip44", 60),
+        "token_contract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "blockscout": "https://base.blockscout.com/api/v2",
+    },
+    "usdt_op": {
+        "name": "USDT (Optimism)", "symbol": "USDT", "decimals": 6,
+        "confirmations": 12, "button": "USDT (Optimism)",
+        "xpub_env": "XPUB_ETH", "hd": ("bip44", 60),
+        "token_contract": "0x94b008aA00579c1307B0EF2c499aD98a8Ce58e58",
+        "blockscout": "https://optimism.blockscout.com/api/v2",
+    },
+    "usdc_op": {
+        "name": "USDC (Optimism)", "symbol": "USDC", "decimals": 6,
+        "confirmations": 12, "button": "USDC (Optimism)",
+        "xpub_env": "XPUB_ETH", "hd": ("bip44", 60),
+        "token_contract": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+        "blockscout": "https://optimism.blockscout.com/api/v2",
+    },
+    "usdt_polygon": {
+        "name": "USDT (Polygon)", "symbol": "USDT", "decimals": 6,
+        "confirmations": 12, "button": "USDT (Polygon)",
+        "xpub_env": "XPUB_ETH", "hd": ("bip44", 60),
+        "token_contract": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+        "blockscout": "https://polygon.blockscout.com/api/v2",
+    },
+    "usdc_polygon": {
+        "name": "USDC (Polygon)", "symbol": "USDC", "decimals": 6,
+        "confirmations": 12, "button": "USDC (Polygon)",
+        "xpub_env": "XPUB_ETH", "hd": ("bip44", 60),
+        "token_contract": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        "blockscout": "https://polygon.blockscout.com/api/v2",
+    },
 }
+
+EVM_CHAINS = frozenset({
+    "eth", "usdt_base", "usdc_base", "usdt_op", "usdc_op",
+    "usdt_polygon", "usdc_polygon",
+})
+LEGACY_CHAINS = frozenset({"eth", "trx"})
+STABLECOIN_CHAINS = frozenset({
+    "eth", "trx", "usdt_base", "usdc_base", "usdt_op", "usdc_op",
+    "usdt_polygon", "usdc_polygon",
+})
 
 TON_FINALITY_CONFIRMATIONS = 1
 
@@ -92,7 +144,7 @@ def chain_configured(chain: str) -> bool:
 
 def enabled_chains() -> list:
     """Chains that are both configured. Per-chain admin toggles live in kv."""
-    return [c for c in CHAINS if chain_configured(c)]
+    return [c for c in CHAINS if c not in LEGACY_CHAINS and chain_configured(c)]
 
 
 # ------------------------------------------------------------ derivation ---
@@ -211,7 +263,8 @@ def derive_address(chain: str, xpub: str, index: int) -> str:
     lifetime), so the addresses users pay to come from Trust Wallet's own
     code. Verified against canonical test vectors in the smoke suite.
     """
-    if chain not in ("btc", "eth", "trx"):
+    daemon_chain = "eth" if chain in EVM_CHAINS else chain
+    if daemon_chain not in ("btc", "eth", "trx"):
         raise ValueError(f"unsupported chain: {chain}")
     if not xpub or not xpub.strip():
         raise ValueError(f"missing xpub for {chain}")
@@ -222,7 +275,7 @@ def derive_address(chain: str, xpub: str, index: int) -> str:
         raise ValueError(f"bad derivation index: {index}")
     # H1: the xpub travels inside the daemon request body (stdin pipe),
     # never in argv (/proc cmdline is world-readable).
-    return _ENGINE.derive(chain, xpub, index)
+    return _ENGINE.derive(daemon_chain, xpub, index)
 
 
 async def next_deposit_address(db, chain: str):
@@ -351,7 +404,7 @@ async def get_rates(force: bool = False) -> dict:
     if not force and now - _rates_cache["ts"] < _RATES_TTL and _rates_cache["rates"]:
         return _rates_cache["rates"]
 
-    rates: dict = {}
+    rates: dict = {c: 1.0 for c in STABLECOIN_CHAINS}
     served_by: dict = {}
     fetchers = (("coingecko", _fetch_coingecko),
                 ("kraken", _fetch_kraken),
@@ -531,25 +584,26 @@ async def fetch_btc_txs(address: str) -> tuple:
     return out, tip or 0
 
 
-async def fetch_eth_usdt_txs(address: str) -> list:
-    """USDT-ERC20 transfers TO address. tx: {txid, to, base, confirmations}."""
-    contract = CHAINS["eth"]["token_contract"]
+async def fetch_evm_token_txs(address: str, blockscout_base: str,
+                              contract: str) -> list:
+    """ERC-20 token transfers TO address via Blockscout v2.
+    tx: {txid, to, base, confirmations}."""
     try:
         items = []
         params = {"type": "ERC-20"}
         while True:
             data = await _get_json(
-                f"https://eth.blockscout.com/api/v2/addresses/{address}/token-transfers",
+                f"{blockscout_base}/addresses/{address}/token-transfers",
                 params=params)
             items.extend(data.get("items", []))
             next_params = data.get("next_page_params")
             if not next_params:
                 break
             params = {"type": "ERC-20", **next_params}
-        stats = await _get_json("https://eth.blockscout.com/api/v2/stats")
+        stats = await _get_json(f"{blockscout_base}/stats")
         tip = int(stats.get("total_blocks", 0) or 0)
     except Exception as e:
-        logger.warning("blockscout failed: %s", e)
+        logger.warning("blockscout failed (%s): %s", blockscout_base, e)
         return []
     out = []
     for it in items:
@@ -567,6 +621,13 @@ async def fetch_eth_usdt_txs(address: str) -> list:
                     "base": base, "confirmations": conf})
     await asyncio.sleep(1)
     return out
+
+
+async def fetch_eth_usdt_txs(address: str) -> list:
+    """USDT-ERC20 transfers TO address. tx: {txid, to, base, confirmations}."""
+    return await fetch_evm_token_txs(
+        address, "https://eth.blockscout.com/api/v2",
+        CHAINS["eth"]["token_contract"])
 
 
 async def fetch_trx_usdt_txs(address: str) -> list:
@@ -767,16 +828,14 @@ def match_deposit(chain: str, txs: list, address: str, expected_base: int,
 
 # ------------------------------------------------------------- rails list ---
 async def payment_rails(db, total_cents: int):
-    """Ordered payment rails per SPEC2 §1: (method_id, button_text).
-
-    Order: Stars (always) -> CryptoBot (if token) -> Card (if token) ->
-    Direct Crypto (if any chain) -> COD/pickup (label chosen by caller).
-    """
+    """Ordered payment rails: (method_id, button_text)."""
     from utils import fmt_money, stars_for_cents
     import texts
-    rails = []
     stars_n = stars_for_cents(int(total_cents), config.STARS_PER_USD)
-    rails.append(("stars", texts.BTN_STARS.format(n=stars_n)))
+    rails = [
+        ("balance", texts.BTN_PAY_WITH_BALANCE),
+        ("stars", texts.BTN_STARS.format(n=stars_n)),
+    ]
     if config.CRYPTOBOT_TOKEN:
         fee_pct = config.CRYPTOBOT_FEE_PERCENT
         if not isinstance(fee_pct, int) or not (0 <= fee_pct < 100):
@@ -790,9 +849,5 @@ async def payment_rails(db, total_cents: int):
     if config.PAYMENTS_PROVIDER_TOKEN:
         rails.append(("card", texts.BTN_CARD.format(
             total=fmt_money(total_cents, config.CURRENCY))))
-    direct_chains = [c for c in enabled_chains()
-                     if db is None or await db.crypto_chain_enabled(c)]
-    if direct_chains:
-        rails.append(("direct", texts.BTN_DIRECT_CRYPTO))
-    # COD removed: digital-only bot, no cash on delivery
+    rails.append(("crypto", texts.BTN_CRYPTO_PAYMENT))
     return rails

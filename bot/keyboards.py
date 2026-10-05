@@ -236,33 +236,48 @@ def payment_kb(rails, cod: bool):
     carries label None and is rendered as COD/pickup here.
     Crypto chains are hidden behind a single 'Crypto payment' submenu.
     """
-    CRYPTO_METHODS = {"cryptobot", "direct_ton", "direct_eth", "direct_usdt",
-                      "direct_trx", "direct_btc"}
     kb = InlineKeyboardMarkup()
-    has_crypto = False
     for method, label in rails:
-        if method in CRYPTO_METHODS:
-            has_crypto = True
-            continue
-        if method == "cod":
+        if method == "crypto":
+            kb.add(InlineKeyboardButton(
+                texts.BTN_CRYPTO_PAYMENT, callback_data="cop:crypto_menu"))
+        elif method == "cod":
             kb.add(InlineKeyboardButton(
                 texts.BTN_COD if cod else texts.BTN_PAY_PICKUP,
                 callback_data=cb("cop", "cod")))
         else:
             kb.add(InlineKeyboardButton(label, callback_data=cb("cop", method)))
-    if has_crypto:
-        kb.add(InlineKeyboardButton(
-            texts.BTN_CRYPTO_PAYMENT, callback_data="cop:crypto_menu"))
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="co4"))
     return kb
 
 
-def crypto_menu_kb(crypto_rails):
+def crypto_menu_kb(cryptobot_label: str):
     """Submenu for crypto payment options."""
     kb = InlineKeyboardMarkup()
-    for method, label in crypto_rails:
-        kb.add(InlineKeyboardButton(label, callback_data=cb("cop", method)))
+    kb.add(InlineKeyboardButton(cryptobot_label, callback_data="cop:cryptobot"))
+    kb.add(InlineKeyboardButton("\u20bf BTC", callback_data="cop:direct_btc"))
+    kb.add(InlineKeyboardButton(texts.BTN_USDT_MENU, callback_data="cop:usdt_menu"))
+    kb.add(InlineKeyboardButton(texts.BTN_USDC_MENU, callback_data="cop:usdc_menu"))
+    kb.add(InlineKeyboardButton("TON", callback_data="cop:direct_ton"))
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="cop:back_to_payment"))
+    return kb
+
+
+def usdt_menu_kb():
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("Base", callback_data="cop:usdt_base"))
+    kb.add(InlineKeyboardButton("Optimism", callback_data="cop:usdt_op"))
+    kb.add(InlineKeyboardButton("Polygon", callback_data="cop:usdt_polygon"))
+    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="cop:crypto_menu"))
+    return kb
+
+
+def usdc_menu_kb():
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("Base", callback_data="cop:usdc_base"))
+    kb.add(InlineKeyboardButton("Optimism", callback_data="cop:usdc_op"))
+    kb.add(InlineKeyboardButton("Polygon", callback_data="cop:usdc_polygon"))
+    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="cop:crypto_menu"))
     return kb
 
 
@@ -272,10 +287,6 @@ def confirm_kb(total_cents: int):
     kb.add(InlineKeyboardButton(
         f"{texts.BTN_PLACE_ORDER} \u00b7 {fmt_money(total_cents, config.CURRENCY)}",
         callback_data="cok"))
-    kb.row(
-        InlineKeyboardButton(f"{texts.BTN_EDIT} Items", callback_data=cb("coe", "items")),
-        InlineKeyboardButton(f"{texts.BTN_EDIT} Payment", callback_data=cb("coe", "payment")),
-    )
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="cob"))
     return kb
 

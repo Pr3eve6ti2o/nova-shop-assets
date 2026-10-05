@@ -11,6 +11,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
+
 from aiogram import types
 from aiogram.dispatcher import FSMContext
 
@@ -49,7 +50,7 @@ def _valid_deposit_address(chain: str, address) -> bool:
     addr = address.strip()
     if chain == "btc":
         return _valid_btc_bech32(addr)
-    if chain == "eth":
+    if chain in ("eth", "usdt_base", "usdc_base", "usdt_op", "usdc_op", "usdt_polygon", "usdc_polygon"):
         return bool(re.fullmatch(r"0x[0-9a-fA-F]{40}", addr))
     if chain == "trx":
         return bool(re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}", addr))

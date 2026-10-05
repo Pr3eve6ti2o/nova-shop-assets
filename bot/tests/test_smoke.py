@@ -444,10 +444,13 @@ def _payment_rails_body(cp, cfg, importlib):
         importlib.reload(cfg)
         importlib.reload(cp)
         rails = await cp.payment_rails(None, 1000)
-        assert [m for m, _ in rails] == ["stars"], rails
-        assert rails[0][1].startswith("\u2b50")
+        # New rail order: balance (always) -> stars -> crypto submenu
+        # (COD removed for digital-only; direct chains hidden behind submenu)
+        assert [m for m, _ in rails] == ["balance", "stars", "crypto"], rails
+        assert rails[0][1].startswith("\U0001f4b3")
+        assert rails[1][1].startswith("\u2b50")
 
-        # Case 2: everything on -> stars, cryptobot, card, direct, cod
+        # Case 2: everything on -> balance, stars, cryptobot, card, crypto
         os.environ["CRYPTOBOT_TOKEN"] = "cb-test"
         os.environ["PAYMENTS_PROVIDER_TOKEN"] = "stripe-test"
         os.environ["XPUB_BTC"] = "zpub-test"
@@ -456,11 +459,11 @@ def _payment_rails_body(cp, cfg, importlib):
         importlib.reload(cp)
         rails = await cp.payment_rails(None, 1000)
         methods = [m for m, _ in rails]
-        assert methods == ["stars", "cryptobot", "card", "direct"], methods
+        assert methods == ["balance", "stars", "cryptobot", "card", "crypto"], methods
         # CryptoBot button shows +3% fee on $10.00 -> $10.31
         # (gross-up: ceil(1000 * 100 / 97) = 1031, so the shop nets $10.00
         # after CryptoBot deducts 3% from the gross invoice).
-        cb_label = rails[1][1]
+        cb_label = rails[2][1]
         assert "3%" in cb_label and "$10.31" in cb_label, cb_label
 
         # restore
