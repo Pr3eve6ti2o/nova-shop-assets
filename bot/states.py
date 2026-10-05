@@ -74,3 +74,7 @@ class UserSearch(StatesGroup):
 
 class CartPromo(StatesGroup):
     waiting_code = State()
+
+
+class BalanceFlow(StatesGroup):
+    topup_custom = State()  # waiting for the user to type a custom top-up amount

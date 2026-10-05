@@ -309,7 +309,7 @@ MSG_CO_DETAILS_ADDRESS_LINE = "\U0001f4cd Address: {address}\n"
 MSG_CO_DETAILS_SAVED_NOTE = "\n\u2713 Using your saved details \u2014 tap \U0001f4de/\U0001f4cd to update."
 MSG_CO_PAYMENT = (
     "\U0001f4b3 <b>Step {step} \u2014 Payment method</b>\n\n"
-    "Total to pay: <b>{total}</b>"
+    "Choose how you'd like to pay. You'll see the exact total on the next step before confirming."
 )
 MSG_CO_CONFIRM = (
     "\u2705 <b>Step {step} \u2014 Review & confirm</b>\n\n"
@@ -451,6 +451,17 @@ MSG_BALANCE_TOPUP_MANUAL = (
 MSG_BALANCE_INSUFFICIENT = (
     "\U0001f4b3 Insufficient balance. Please top up first."
 )
+MSG_BALANCE_CUSTOM_PROMPT = (
+    "\u270f\ufe0f <b>Custom amount</b>\n\n"
+    "Type the amount in USD (minimum $1)."
+)
+MSG_BALANCE_CUSTOM_TOO_SMALL = (
+    "\u274c Minimum top-up is <b>$1</b>. Please enter $1 or more."
+)
+MSG_BALANCE_CUSTOM_INVALID = (
+    "\u274c That doesn't look like an amount. Type a number like <b>5</b> or <b>5.50</b>."
+)
+BTN_CONTINUE_TO_PAYMENT = "\U0001f4b3 Continue to Payment"
 MSG_BALANCE_ORDER_PLACED = (
     "\u2705 <b>Order #{oid} confirmed!</b>\n"
     "Paid with balance.\n"

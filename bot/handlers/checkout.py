@@ -257,7 +257,7 @@ async def details_typed(message: types.Message, state: FSMContext):
 
 # ------------------------------------------------------------- payment ---
 async def render_payment(target, state: FSMContext, user_id: int):
-    """Payment step: Balance (always first) -> Stars -> Card -> Crypto submenu."""
+    """Payment step: method choice only, no amounts shown (total appears on the confirm step)."""
     await Checkout.payment.set()
     import crypto_payments as cp
     t = await totals(user_id, state, with_delivery=True)
@@ -267,8 +267,7 @@ async def render_payment(target, state: FSMContext, user_id: int):
     # payment_rails() returns: balance (always) -> stars -> card (if token) ->
     # crypto. The single "crypto" rail opens the crypto submenu.
     rails = await cp.payment_rails(db, t["total"])
-    text = texts.MSG_CO_PAYMENT.format(
-        step=step, total=fmt_money(t["total"], config.CURRENCY))
+    text = texts.MSG_CO_PAYMENT.format(step=step)
     # M7: COD makes no sense for any cart containing digital items (keys would
     # be popped at placement without payment). Hide it for digital-only AND
     # mixed carts, not just when details were skipped.

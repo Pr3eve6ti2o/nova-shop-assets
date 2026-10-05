@@ -388,6 +388,7 @@ def balance_topup_kb():
         label = fmt_money(cents, config.CURRENCY)
         kb.insert(InlineKeyboardButton(label, callback_data=f"bal:amt:{cents}"))
     kb.add(InlineKeyboardButton(texts.BTN_CUSTOM_AMOUNT, callback_data="bal:custom"))
+    kb.add(InlineKeyboardButton(texts.BTN_CONTINUE_TO_PAYMENT, callback_data="bal:topayment"))
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="bal:back"))
     return kb
 
