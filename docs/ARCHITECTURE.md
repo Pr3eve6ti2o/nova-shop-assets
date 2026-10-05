@@ -1,48 +1,90 @@
-# Architecture
+# Nova Shop Architecture
 
-## System overview
+## Runtime topology
 
-```
-┌─────────────┐     sendData      ┌──────────────┐
-│  Mini App   │ ───────────────► │     Bot      │──► Telegram API
-│ (static JS) │ ◄─────────────── │  (aiogram)   │
-└─────────────┘   bot messages   └──────┬───────┘
-                                       │ thread
-                                       ▼
-                                ┌──────────────┐     ┌───────────┐
-                                │ Payload CMS  │◄────│  SQLite   │
-                                │  (Next.js)   │     │ (bot DB)  │
-                                └──────────────┘     └───────────┘
-```
+~~~text
+                    Telegram
+                       |
+             +---------+---------+
+             |                   |
+          Bot API            Mini App
+             |                   |
+             v                   v
+        Bot application      static UI
+             |
+      +------+------+
+      |             |
+      v             v
+ Transactional   Integration
+    database      adapters
+      |             |
+      |       +-----+----------------+
+      |       |     |        |       |
+      v       v     v        v       v
+    orders  Stars  CryptoBot chains Payload
+      |                       |
+      +-----------+-----------+
+                  v
+             fulfillment
+~~~
 
-## Payment rails
+## Architectural rules
 
-| Rail | Flow |
-|---|---|
-| Telegram Stars | Native invoice → `successful_payment` |
-| Card | Telegram provider token |
-| CryptoBot | Invoice API + 60s recovery poller |
-| Direct crypto (BTC/ETH/TRX) | HD-derived deposit address per order, chain watchers |
-| TON Connect | Wallet `sendTransaction` → toncenter verification (sender + amount + 15-min window, txid claimed) |
-| COD | Physical goods only |
+1. The client proposes; the server decides.
+2. The bot database is the current transaction ledger.
+3. Payload is the catalog/admin CMS and order mirror.
+4. Payment evidence is retained separately from the business decision.
+5. Fulfillment is idempotent and retryable.
+6. Provider adapters do not own business truth.
+7. Generated Mini App artifacts are outputs, never independent sources.
 
-## Money invariants
+## Current technology
 
-1. Integer cents everywhere; no floats in payment math.
-2. Every payment claim is idempotent (`UNIQUE(provider, external_id)`).
-3. Stock, promos, deposits use atomic single-statement guards.
-4. Fulfillment goes through `fulfill_order()` — never inline.
-5. Cancelled orders are never finalized (watcher bails + alerts admin).
-6. Promo claims release on every cancellation path.
+- Python bot using aiogram 2.25.2.
+- Async SQLite using aiosqlite for the current bot deployment.
+- Next.js 16.3.3 + Payload 3.90.2 admin.
+- Payload currently uses the SQLite adapter.
+- Vanilla JavaScript Telegram Mini App.
+- TON Connect for blockchain payment interaction.
+- Trust Wallet Core for HD wallet derivation.
+- External chain, rate and payment providers through HTTP adapters.
 
-## Background jobs
+## Target bounded contexts
 
-`crypto_watcher_loop` (60s): direct-deposit sweeps, late-deposit bucket, CryptoBot recovery, TON Connect pending sweep, CryptoBot invoice expiry.
+~~~text
+Catalog
+Customers
+Cart
+Orders
+Inventory
+Payments
+Wallet
+Fulfillment
+Referrals
+Support
+Tenancy
+Integrations
+Admin
+~~~
 
-## Mini App ↔ bot contract
+Handlers should be thin. Application services enforce business rules. Domain code must not import Telegram, HTTP clients, Payload or payment-provider implementations.
 
-The Mini App is static; all mutations go through `tg.sendData()` (which closes the app):
-- `{items, promo}` → order checkout
-- `{type:"tonconnect_paid", …}` → TON verification
-- `{type:"stock_alert"}` → queued, piggybacked on checkout
-- `{type:"get_orders"}` / `{type:"get_referral"}` → bot replies in chat
+The intended dependency direction is:
+
+~~~text
+interface
+   ↓
+application
+   ↓
+domain
+   ↓
+ports
+   ↓
+infrastructure
+~~~
+
+## Scaling boundary
+
+The current crypto watcher runs inside the bot process. For horizontal scaling it should move behind a worker lease or queue so two bot instances cannot independently own the same sweep.
+
+The current in-memory locks and rate limits are also process-local.
