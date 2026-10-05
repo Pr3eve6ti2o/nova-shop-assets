@@ -21,3 +21,13 @@ __pycache__/
 node_modules/
 # OS
 .DS_Store
+
+# Build/test output
+coverage/
+.pytest_cache/
+.ruff_cache/
+playwright-report/
+admin/test-results/
+admin/.next/
+admin/.env.local
+miniapp/.tmp/

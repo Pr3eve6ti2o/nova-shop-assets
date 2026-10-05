@@ -71,10 +71,13 @@ if DELIVERY_FEE_CENTS < 0:
 
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST") or None
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH") or None
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN") or None
 if WEBHOOK_HOST and WEBHOOK_PATH:
     WEBHOOK_URL = f"{WEBHOOK_HOST.rstrip('/')}/{WEBHOOK_PATH.lstrip('/')}"
     if not WEBHOOK_URL.startswith("https://"):
         raise RuntimeError("WEBHOOK_URL must use https://")
+    if not WEBHOOK_SECRET_TOKEN or len(WEBHOOK_SECRET_TOKEN) < 16:
+        raise RuntimeError("WEBHOOK_SECRET_TOKEN must be set to a strong value when webhook mode is enabled")
 else:
     WEBHOOK_URL = None
 

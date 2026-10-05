@@ -1,4 +1,5 @@
 import type { CollectionConfig } from 'payload'
+import { isAdmin, isStaff } from '../access/roles'
 
 export const Products: CollectionConfig = {
   slug: 'products',
@@ -9,9 +10,9 @@ export const Products: CollectionConfig = {
   access: {
     // Public storefront reads; writes restricted to logged-in users / API-key sync
     read: () => true,
-    create: ({ req }) => Boolean(req?.user),
-    update: ({ req }) => Boolean(req?.user),
-    delete: ({ req }) => Boolean(req?.user),
+    create: isStaff,
+    update: isStaff,
+    delete: isAdmin,
   },
   fields: [
     {
@@ -59,6 +60,7 @@ export const Products: CollectionConfig = {
     {
       name: 'stock',
       type: 'number',
+      access: { update: isStaff },
       defaultValue: -1,
       admin: {
         description: '-1 = unlimited stock.',
@@ -72,6 +74,7 @@ export const Products: CollectionConfig = {
     {
       name: 'status',
       type: 'select',
+      access: { update: isAdmin },
       defaultValue: 'draft',
       options: [
         { label: 'Draft', value: 'draft' },
@@ -84,6 +87,7 @@ export const Products: CollectionConfig = {
     {
       name: 'featured',
       type: 'checkbox',
+      access: { update: isStaff },
     },
     {
       name: 'ratingSum',

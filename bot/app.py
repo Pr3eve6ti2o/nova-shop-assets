@@ -47,7 +47,7 @@ async def on_startup(dp_):
     await db.create_tables()
     await bot.delete_webhook()
     if config.WEBHOOK_URL:
-        await bot.set_webhook(config.WEBHOOK_URL)
+        await bot.set_webhook(config.WEBHOOK_URL, secret_token=config.WEBHOOK_SECRET_TOKEN)
     try:
         await bot.set_my_commands([
             types.BotCommand("start", "Start the shop"),

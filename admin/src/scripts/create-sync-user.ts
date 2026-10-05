@@ -66,7 +66,7 @@ async function main() {
       data: {
         email: syncEmail,
         password: crypto.randomBytes(24).toString('hex'),
-        role: 'admin',
+        role: 'service',
         apiKey,
       },
       overrideAccess: true,
