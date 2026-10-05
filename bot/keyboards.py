@@ -294,7 +294,7 @@ def order_success_kb(order_id: int, bot_username: str = None):
     kb.add(InlineKeyboardButton(texts.BTN_TRACK_ORDER,
                                 callback_data=cb("o", order_id)))
     if bot_username:
-        # Deep link for instant access
+        # Deep link for instant order access
         kb.add(InlineKeyboardButton(
             texts.BTN_ORDER_LINK,
             url=f"https://t.me/{bot_username}?start=o_{order_id}"))
