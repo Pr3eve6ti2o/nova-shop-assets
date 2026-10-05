@@ -1,4 +1,5 @@
 import type { CollectionConfig } from 'payload'
+import { isAdmin, isAdminOrService, isAuthenticated, isStaff } from '../access/roles'
 
 /**
  * Orders are created by the Telegram bot via its API key (POST /api/orders).
@@ -6,17 +7,6 @@ import type { CollectionConfig } from 'payload'
  * requests authenticated with a `users API-Key` Authorization header
  * (the browser panel uses cookie auth, so the "Create" button stays hidden).
  */
-const isApiKeyRequest = ({ req }: { req: { headers?: { get?: (k: string) => string | null } } }) => {
-  try {
-    const h = req?.headers?.get?.('authorization') || ''
-    return h.startsWith('users API-Key ')
-  } catch {
-    return false
-  }
-}
-
-const isLoggedIn = ({ req }: { req: { user?: unknown } }) => Boolean(req?.user)
-
 export const Orders: CollectionConfig = {
   slug: 'orders',
   admin: {
@@ -24,9 +14,9 @@ export const Orders: CollectionConfig = {
     defaultColumns: ['orderNumber', 'customerName', 'totalCents', 'paymentMethod', 'status'],
   },
   access: {
-    read: isLoggedIn,
-    create: isApiKeyRequest,
-    update: isLoggedIn,
+    read: isStaff,
+    create: isAdminOrService,
+    update: isStaff,
     delete: () => false,
   },
   fields: [
@@ -59,15 +49,18 @@ export const Orders: CollectionConfig = {
     {
       name: 'totalCents',
       type: 'number',
+      access: { update: isAdminOrService },
     },
     {
       name: 'currency',
       type: 'text',
+      access: { update: isAdminOrService },
       defaultValue: 'USD',
     },
     {
       name: 'paymentMethod',
       type: 'select',
+      access: { update: isAdminOrService },
       options: [
         { label: 'Telegram Stars', value: 'stars' },
         { label: 'Card', value: 'card' },
@@ -78,6 +71,7 @@ export const Orders: CollectionConfig = {
     {
       name: 'status',
       type: 'select',
+      access: { update: isStaff },
       defaultValue: 'pending',
       options: [
         { label: 'Pending', value: 'pending' },
@@ -91,6 +85,7 @@ export const Orders: CollectionConfig = {
     {
       name: 'rawPayload',
       type: 'json',
+      access: { create: isAdminOrService, read: isAdmin, update: isAdminOrService },
       admin: {
         readOnly: true,
         description: 'Original order payload from the bot (debug).',
