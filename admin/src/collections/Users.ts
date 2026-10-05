@@ -28,6 +28,7 @@ export const Users: CollectionConfig = {
       options: [
         { label: 'Admin', value: 'admin' },
         { label: 'Staff', value: 'staff' },
+        { label: 'Service', value: 'service' },
       ],
       admin: {
         description: 'Admins can manage users and settings; staff manage catalog and orders.',
