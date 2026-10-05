@@ -525,6 +525,17 @@ async def cb_place_order(query: types.CallbackQuery, state: FSMContext):
         lock.release()
 
 
+# Stateless fallback for the confirm button.  After a restart MemoryStorage
+# loses all FSM state, so the state-gated handler above never matches and the
+# button appears dead.  This handler is registered *after* the state-gated one,
+# so the normal path still wins; it simply answers and restarts checkout.
+@dp.callback_query_handler(text="cok", state="*")
+async def cb_place_order_stale(query: types.CallbackQuery, state: FSMContext):
+    # NOTE: no query.answer() here — start_checkout answers on every path
+    # (alert on empty cart, bare answer before rendering payment).
+    await start_checkout(query, state)
+
+
 async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict):
     data = await state.get_data()
     kind = data.get("delivery_kind") or "delivery"
@@ -663,6 +674,7 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
         new_bal = await db.deduct_balance(user["id"], t["total"], order_id=oid)
         if new_bal is None:
             await db.set_order_status(oid, "cancelled")
+            await db.release_order_promo(oid)  # don't burn promo on failed balance
             await query.answer(texts.MSG_BALANCE_INSUFFICIENT, show_alert=True)
             await render_confirm(query, state, user["id"])
             return
