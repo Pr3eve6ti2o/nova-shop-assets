@@ -1,233 +1,289 @@
 # Nova Shop
 
-A complete Telegram-native e-commerce platform. One codebase runs a storefront bot, a Mini App web shop, an admin CMS, and a multi-tenant SaaS layer — all designed around a single principle: **money must never move incorrectly**.
+> Telegram-native commerce platform for storefronts, checkout, fulfillment, crypto observation, and merchant operations.
 
-**Live:** [@testssscbot](https://t.me/testssscbot) · [Mini App](https://muse.ai/s/nova-shop-mini-app-xim6wudxohxjxiy)
+[![CI](https://github.com/Pr3eve6ti2o/nova-shop-assets/actions/workflows/ci.yml/badge.svg)](https://github.com/Pr3eve6ti2o/nova-shop-assets/actions/workflows/ci.yml)
 
----
+Nova Shop is a production-oriented Telegram commerce codebase. It combines a Telegram Bot, Telegram Mini App, Payload CMS administration, payment integrations, self-custody wallet observation, catalog synchronization, and an optional multi-tenant SaaS layer.
 
-## What this is
+It is designed around one rule:
 
-Nova Shop started from a simple observation: selling inside Telegram shouldn't require duct-taping five services together. So we built one coherent system where the bot, the web storefront, the admin panel, and the payment rails all share the same data model, the same money invariants, and the same audit trail.
+> **Clients propose actions. The server verifies facts. The database claims state. Fulfillment happens once.**
 
-The result is a platform that handles the full commerce lifecycle — browsing, cart, checkout, payment across six rails, fulfillment of digital and physical goods, refunds, reviews, referrals, promos, support tickets — plus a SaaS layer that lets you spin up independent storefronts for other merchants on the same infrastructure.
+## What it contains
 
----
+~~~text
+Telegram
+   |
+   +--> Bot --------------------+
+   |     checkout                |
+   |     orders                  |
+   |     fulfillment             |
+   |     customer support        |
+   |     payment orchestration   |
+   |                            |
+   +--> Mini App ---------------+
+                                  |
+                                  v
+                            Bot transaction DB
+                                  |
+              +-------------------+-------------------+
+              |                   |                   |
+              v                   v                   v
+          Payment APIs        Chain observers     Payload CMS
+              |                   |                   |
+              +-------------------+-------------------+
+                                  |
+                                  v
+                           Admin / operations
+~~~
+
+## Major capabilities
+
+### Storefront
+
+- Telegram bot storefront with catalog, search, categories, cart, wishlist, reviews, support, referrals, promotions, and order history.
+- Telegram Mini App storefront with product sheets, filtering, sorting, wishlist, cart, recent searches, stock alerts, referral UI, and checkout bridge.
+- Physical and digital product modeling.
+- Digital inventory/license-key delivery and physical stock fulfillment.
+
+### Payments
+
+The code contains several payment rails:
+
+| Rail | Current role |
+|---|---|
+| Telegram Stars | Digital goods/services inside Telegram |
+| Telegram/provider payments | Eligible physical/service orders |
+| CryptoBot | External crypto payment rail where applicable |
+| Direct blockchain payments | Self-custody observation for supported physical/permitted flows |
+| TON Connect | Wallet interaction + on-chain verification |
+| Cash on delivery | Physical-order flow |
+
+**Telegram payment compliance matters:** digital goods and services sold inside Telegram bots/Mini Apps must use Telegram Stars. Third-party/provider and crypto routes must not be exposed for those digital orders merely because the implementation supports them. See https://core.telegram.org/bots/payments-stars
+
+### Crypto
+
+Current code supports Bitcoin, EVM stablecoin rails, TRON, TON, and additional Base/Optimism/Polygon stablecoin variants.
+
+The crypto layer uses:
+
+- public-only HD-wallet derivation;
+- persistent Wallet Core daemon;
+- integer atomic-unit accounting;
+- underpayment/top-up handling;
+- chain/provider-specific confirmation state;
+- duplicate/replay protection;
+- late-payment review;
+- periodic reconciliation concepts.
+
+Wallet generation belongs in the separate Bawa reference repository. Nova Shop should consume public derivation material; private recovery material must never be part of the running web/bot process.
+
+### Admin
+
+Payload CMS provides:
+
+- catalog/category/media administration;
+- order visibility;
+- staff/admin authentication;
+- service-to-service catalog/order synchronization.
+
+The current architecture intentionally treats Payload as the CMS/administrative surface and the bot database as the live transactional ledger.
+
+### SaaS
+
+The repository also contains an optional multi-tenant layer for merchant lifecycle/billing. Tenant isolation must remain explicit at every data and API boundary before this mode is used for multiple untrusted merchants.
 
 ## Repository layout
 
-```
-├── bot/                  # Telegram bot (Python 3.12, aiogram 2.x)
-│   ├── handlers/         # shop, cart, checkout, crypto, payments, admin, …
-│   │   └── admin/        # catalog, orders, promos, users, broadcast, panel
-│   ├── saas/             # multi-tenant SaaS: tenant lifecycle, billing
-│   ├── tests/            # smoke tests (10 groups)
-│   ├── requirements.txt, Dockerfile, .env.example
-├── miniapp/              # Telegram Mini App storefront (vanilla JS)
-│   ├── app.js, styles.css, index.html   # source
-│   └── dist/index.html                  # built bundle
-├── admin/                # Payload CMS 3.x + Next.js (catalog, orders, users)
-├── tools/                # catalog sync, bundle builder, wallet utils
-├── tonconnect/           # TON Connect manifest + icon (served via jsDelivr)
-├── brand/                # brand assets
-└── docs/                 # architecture, security, deployment, audits
-```
+~~~text
+.
+├── bot/
+│   ├── handlers/          # Telegram presentation/application entrypoints
+│   ├── saas/              # tenant lifecycle/billing
+│   ├── tests/              # bot smoke coverage
+│   ├── app.py             # runtime entrypoint
+│   ├── config.py          # validated environment configuration
+│   ├── database.py        # current transactional repository + schema
+│   ├── crypto_payments.py # current payment/chain integration hub
+│   ├── crypto_watcher.py  # background observation/finalization loop
+│   ├── webapp_auth.py     # Telegram Mini App initData validator
+│   └── texts.py           # current UI/legal copy source
+├── miniapp/
+│   ├── index.html
+│   ├── app.js              # current source monolith; migration target below
+│   ├── styles.css
+│   ├── catalog.json        # generated
+│   ├── policies.json       # generated
+│   └── dist/index.html     # generated deploy artifact
+├── admin/
+│   ├── src/collections/    # Payload data/admin model
+│   ├── scripts/            # CMS bootstrap utilities
+│   └── package-lock.json
+├── tools/
+│   ├── build_miniapp_bundle.py
+│   ├── export_catalog.py
+│   ├── export_policies.py
+│   ├── sync_payload_to_bot.py
+│   ├── notify_restock.py
+│   └── wallet utilities
+├── tonconnect/
+├── brand/
+├── docs/
+└── LICENSE
+~~~
 
----
+## Data ownership
 
-## Features
+This is currently a deliberate dual-database design:
 
-### Storefront bot
-- Sleek 4-button menu (Profile, Shop, Info, Rent) — English-only, minimal taps
-- 3-screen checkout wizard: cart → details → payment
-- Product catalog with categories, search, filters, reviews, stock alerts
-- Digital goods (license keys) and physical goods with delivery/pickup
-- Wishlist, order tracking with deep links, support tickets with SLAs
-- Legal pages: `/terms`, `/privacy`, `/refund`
+~~~text
+Payload
+  ↓
+catalog authoring
+  ↓
+sync
+  ↓
+Bot SQLite
+  ↓
+orders / payments / inventory / customer state
+~~~
 
-### Payment rails (six)
-| Rail | How it works |
-|------|--------------|
-| Telegram Stars | Native invoice → `successful_payment` webhook |
-| Card | Telegram Payments provider token |
-| CryptoBot | Invoice API + 60-second recovery poller, 3% fee handling |
-| Direct crypto | Per-order HD-wallet deposit addresses (BTC/ETH/TRX), chain watchers |
-| TON Connect | Wallet `sendTransaction` → on-chain verification |
-| Cash on delivery | Physical goods only, admin-confirmed |
+Payload order documents are a mirror for administration. They are not the settlement ledger.
 
-### Mini App
-Full web storefront inside Telegram: filters, wishlist with cloud sync, search suggestions, product sheets (specs, FAQ, reviews, bundles), persistent cart, TON Connect payments, stock alerts, order history, referral links.
+For growth and multi-process consistency, the preferred direction is shared Postgres plus durable event/outbox processing. Payload officially supports Postgres and migration workflows. https://payloadcms.com/docs/database/postgres
 
-### Admin
-- Telegram-native admin panel (catalog, orders, promos, users, broadcast)
-- Payload CMS web panel for catalog/order/user management
-- Order push from bot → CMS on every placement
+## Security model
 
-### SaaS platform
-Multi-tenant layer: each merchant gets an isolated storefront with their own bot token, catalog, and billing (monthly/yearly plans, Stripe). Tenant lifecycle, grace periods, and audit logging built in.
+### Never trust the client
 
----
+Mini App state, callbacks, prices, quantities, and payment claims are client-controlled inputs. Recalculate important values from server-side state.
 
-## Money safety
+For any future browser HTTP API, validate Telegram's raw initData server-side and never use initDataUnsafe as an authority. https://core.telegram.org/bots/webapps
 
-Every payment path follows these invariants:
+### Never fulfill on “payment intent”
 
-1. **Integer cents everywhere.** No floats in payment math.
-2. **Idempotent payment records.** `UNIQUE(provider, external_id)` — duplicate webhooks can't double-charge.
-3. **Atomic claims.** Stock decrements, promo consumption, deposit claims, and order-status transitions use single-statement conditional writes serialized behind a claim lock — concurrent requests can't oversell or double-fulfill.
-4. **Single fulfillment path.** All goods flow through `fulfill_order()` — never inline.
-5. **Crash recovery.** If the process dies between payment and fulfillment, the retry path re-attempts the atomic claim instead of losing the order.
-6. **Cancelled orders never finalize.** Watchers bail and alert admins.
-7. **Promo claims release** on every cancellation path.
+Only a verified payment observation that satisfies the order's network, asset, recipient, amount and finality policy can enter fulfillment.
 
----
+### Never put secrets in the repository
 
-## Quickstart
+Do not commit:
 
-### 1. The bot
+- BOT_TOKEN;
+- PAYLOAD_SECRET;
+- provider/API keys;
+- database files;
+- wallet recovery material;
+- production environment files.
 
-```bash
-cd bot
-cp .env.example .env        # fill in BOT_TOKEN (required)
-pip install -r requirements.txt
-python app.py
-```
+### Webhooks
 
-Required in `.env`:
-- `BOT_TOKEN` — from [@BotFather](https://t.me/BotFather)
-
-Recommended:
-- `ADMINS` — your numeric Telegram user ID (comma-separated for multiple)
-- `PAYMENTS_PROVIDER_TOKEN` — for card payments (from BotFather → Payments)
-- `CRYPTOBOT_TOKEN` — for CryptoBot payments
-
-Optional tuning: `STARS_PER_USD` (default 60), `CURRENCY` (default USD), `REFERRAL_PERCENT` (default 5), `DELIVERY_FEE_CENTS` (default 0).
-
-Run the smoke tests before going live:
-
-```bash
-python tests/test_smoke.py   # expect: ALL 10 GROUPS PASSED
-```
-
-### 2. The Mini App
-
-The Mini App is a static bundle served inside Telegram. Rebuild it after catalog changes:
-
-```bash
-# From the repo root:
-python tools/sync_payload_to_bot.py     # pull catalog from Payload CMS
-python tools/export_catalog.py          # export to bot data
-python tools/build_miniapp_bundle.py    # → miniapp/dist/index.html
-```
-
-Publish via [@BotFather](https://t.me/BotFather) → `/newapp` → upload `miniapp/dist/index.html`.
-
-For TON Connect payments, host `tonconnect/manifest.json` somewhere public (e.g. jsDelivr via GitHub) and set the manifest URL in the Mini App config.
-
-### 3. The admin panel (Payload CMS)
-
-```bash
-cd admin
-npm install
-npm run dev          # → http://localhost:3001/admin
-```
-
-Create your admin user on first launch. Catalog changes made here need the Mini App rebuild steps above to go live. Orders placed by the bot are pushed here automatically (read/update in CMS; creation only via the bot API).
-
-### 4. Crypto wallets (self-custody)
-
-Direct-crypto payments derive a unique deposit address per order from your HD wallet:
-
-```bash
-cd tools/hdwallet-gen
-node generate.js        # creates encrypted seed (shown once — back it up!)
-```
-
-The seed is AES-256-GCM encrypted to `bot/secrets/seed.enc.json`. Derivation runs through a persistent daemon for sub-10ms address generation at checkout. Chain watchers (60s loop) detect deposits via mempool.space, Blockscout, toncenter, and tronscan.
-
-### 5. SaaS mode (optional)
-
-The SaaS layer lets merchants rent storefronts on your infrastructure:
-
-- Tenants are created with their own bot token, catalog namespace, and billing plan
-- Plans: monthly/yearly, managed via Stripe
-- Tenant isolation is fail-closed: expired or invalid tenants serve nothing
-- Audit log per tenant (survives tenant deletion)
-
-See `bot/saas/tenants.py` for the tenant lifecycle API.
-
----
-
-## Deployment
-
-### Systemd (recommended)
-
-```bash
-# Bot
-sudo cp deploy/nova-shop.service /etc/systemd/system/
-sudo systemctl enable --now nova-shop
-
-# Admin panel
-sudo cp deploy/nova-shop-admin.service /etc/systemd/system/
-sudo systemctl enable --now nova-shop-admin
-```
-
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for webhook mode, reverse proxy, backups, and log rotation.
-
-### Docker
-
-```bash
-cd bot
-docker build -t nova-shop .
-docker run --env-file .env nova-shop
-```
-
----
-
-## Project documentation
-
-| Doc | Contents |
-|-----|----------|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System overview, payment rails, money invariants, background jobs |
-| [docs/SECURITY.md](docs/SECURITY.md) | Threat model, auth, secret handling, audit trail |
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Systemd, Docker, webhook mode, backups |
-| [docs/SPEC.md](docs/SPEC.md) / [SPEC2.md](docs/SPEC2.md) | Original product specifications |
-| [docs/AUDIT-2026-09-30.md](docs/AUDIT-2026-09-30.md) | Independent security audit report |
-| [tools/README.md](tools/README.md) | Wallet tools, sync scripts, bundle builder |
-
----
+Production Telegram webhook ingress should use Telegram's secret_token and verify the X-Telegram-Bot-Api-Secret-Token header. https://core.telegram.org/bots/api#setwebhook
 
 ## Development
 
-```bash
-# Run smoke tests (required before every deploy)
-cd bot && python tests/test_smoke.py
+### Bot
 
-# Code style: Python 3.12, aiogram 2.x patterns
-# - All user-facing text lives in texts.py (English-only)
-# - All keyboards live in keyboards.py (primary CTA first, destructive last)
-# - Money in integer cents; never floats
-# - Every DB write that gates money goes through the claim lock
-```
+~~~bash
+cd bot
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python app.py
+~~~
 
-### Key files
+Run the existing smoke suite:
 
-| File | Purpose |
-|------|---------|
-| `bot/app.py` | Entry point, dispatcher wiring |
-| `bot/database.py` | Async SQLite layer, atomic claim operations |
-| `bot/handlers/checkout.py` | Checkout wizard, order placement |
-| `bot/handlers/payments.py` | Payment webhooks, fulfillment triggers |
-| `bot/handlers/common.py` | `fulfill_order()` — the single fulfillment path |
-| `bot/crypto_payments.py` | CryptoBot, HD-wallet, rate sources |
-| `bot/saas/tenants.py` | Multi-tenant lifecycle and billing |
+~~~bash
+cd bot
+python tests/test_smoke.py
+~~~
 
----
+### Admin
 
-## Status
+Use npm because package-lock.json is tracked:
 
-Continuously audited by an automated Guard+Doctor loop (static analysis + targeted fixes, all gated behind smoke tests). Latest deep audit: 2026-09-30 (53 findings, all criticals resolved).
+~~~bash
+cd admin
+npm ci
+npm run dev
+~~~
+
+CI:
+
+~~~bash
+npm run lint
+npm run build
+npm run test:int
+~~~
+
+### Mini App
+
+Rebuild generated assets:
+
+~~~bash
+python tools/sync_payload_to_bot.py
+python tools/export_catalog.py
+python tools/export_policies.py
+python tools/build_miniapp_bundle.py
+~~~
+
+Do not manually edit miniapp/dist/index.html.
+
+## Target architecture
+
+The codebase is being migrated toward:
+
+~~~text
+presentation
+   ↓
+application services
+   ↓
+domain
+   ↓
+ports/interfaces
+   ↓
+infrastructure adapters
+~~~
+
+Domain code must not import Telegram, Payload, HTTP providers, blockchain SDKs, or the database implementation.
+
+See [docs/CODEBASE-STRUCTURE.md](docs/CODEBASE-STRUCTURE.md).
+
+## Production readiness
+
+Nova Shop is feature-rich but should not be described as externally audited or production-certified.
+
+Before real-money deployment, complete:
+
+1. Telegram payment-rail classification enforcement.
+2. Payload collection and field-level RBAC.
+3. Chain-native payment-event identity.
+4. Transactional/durable fulfillment.
+5. Explicit bot database migrations.
+6. Cluster-safe locking/rate limiting and worker leases.
+7. Secret/dependency scanning.
+8. Reconciliation and restore drills.
+9. Stable HTTPS legal/TON Connect metadata.
+10. External security review.
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Payments](docs/PAYMENTS.md)
+- [Data model](docs/DATA-MODEL.md)
+- [Security](docs/SECURITY.md)
+- [Codebase structure](docs/CODEBASE-STRUCTURE.md)
+- [Operations](docs/OPERATIONS.md)
+- [Release checklist](docs/RELEASE.md)
+- [Deep audit — 2026-10-05](docs/AUDIT-2026-10-05.md)
+- [Deployment](docs/DEPLOYMENT.md)
+- [Product specifications](docs/SPEC.md) / [SPEC2.md](docs/SPEC2.md)
+
+## Current implementation note
+
+The current repository contains a working, flat bot architecture. The target structure is documented before a risky mass-migration. This is intentional: every domain extraction should be accompanied by focused tests and a reversible deployment step.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT.
