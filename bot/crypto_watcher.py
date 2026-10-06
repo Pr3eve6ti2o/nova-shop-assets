@@ -93,10 +93,17 @@ async def finalize_crypto_order(order_id: int, *, provider: str, external_id: st
             return True  # the winner already finalized
         # H13: retry a STALE processing claim (previous attempt died
         # mid-fulfillment); a fresh one means another worker is active.
+        # Atomically steal the stale claim — if the steal fails, another
+        # worker won and we must NOT fulfill.
         if order and order["status"] == "processing" \
                 and await db.order_claim_stale(order_id, minutes=5):
-            logger.warning("finalize: retrying stuck processing order %s",
-                           order_id)
+            if await db.steal_stale_order_claim(order_id, minutes=5):
+                logger.warning("finalize: retrying stuck processing order %s",
+                               order_id)
+            else:
+                logger.warning("finalize: order %s stale claim lost to another worker",
+                               order_id)
+                return False
         else:
             logger.warning("finalize: order %s not claimable (status=%s); "
                            "manual review",
@@ -439,7 +446,7 @@ async def _sweep_cryptobot():
     if not config.CRYPTOBOT_TOKEN:
         return
     try:
-        invoices = await db.active_cryptobot_invoices()
+        invoices = await db.sweepable_cryptobot_invoices()
         if not invoices:
             return
         ids = [inv["invoice_id"] for inv in invoices]
@@ -460,12 +467,14 @@ async def _sweep_cryptobot():
                     amount_cents=order["total_cents"] if order else 0,
                     currency="USDT")
                 # F1: only mark the invoice 'paid' once the order is
-                # finalized. If finalize fails, leave it active so the next
-                # sweep retries it instead of stranding the user's payment.
+                # finalized. If finalize fails, mark 'paid_unfinalized' so the
+                # next sweep retries it (and expiry never touches it) instead
+                # of stranding the user's payment.
                 if not ok:
                     logger.warning(
                         "cryptobot invoice %s paid but finalize failed; "
-                        "keeping active for retry", inv["invoice_id"])
+                        "marking paid_unfinalized for retry", inv["invoice_id"])
+                    await db.set_cryptobot_status(int(inv["invoice_id"]), "paid_unfinalized")
                     continue
                 await db.set_cryptobot_status(int(inv["invoice_id"]), "paid")
                 logger.info("cryptobot invoice %s recovered as paid",
@@ -499,6 +508,11 @@ async def _sweep_tonconnect_pending():
     pendings = await db.tonconnect_pending_list()
     for p in pendings:
         try:
+            if p.get("items_corrupt"):
+                logger.error(
+                    "tonconnect pending %s has corrupt items_json; NOT auto-processing",
+                    p["id"])
+                continue
             matched = await find_tonconnect_tx(merchant, p["sender"], p["amount_nano"],
                                                p.get("claim_code"))
             if not matched:

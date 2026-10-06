@@ -165,56 +165,100 @@ class Database:
             # Migration: add is_active to categories if missing (for older DBs)
             try:
                 await db.execute("ALTER TABLE categories ADD COLUMN is_active INTEGER DEFAULT 1")
-            except Exception:
-                pass  # Column already exists or table doesn't exist yet
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                # "duplicate column name": already migrated; "no such table":
+                # fresh DB, SCHEMA creates the table below. Anything else is real.
+                if "duplicate column name" not in msg and "no such table" not in msg:
+                    raise
             # Migration: add min_subtotal_cents to promos if missing
             try:
                 await db.execute("ALTER TABLE promos ADD COLUMN min_subtotal_cents INTEGER DEFAULT 0")
-            except Exception:
-                pass  # Column already exists or table doesn't exist yet
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                # "duplicate column name": already migrated; "no such table":
+                # fresh DB, SCHEMA creates the table below. Anything else is real.
+                if "duplicate column name" not in msg and "no such table" not in msg:
+                    raise
             # Migration: add balance_cents to users if missing
             try:
                 await db.execute("ALTER TABLE users ADD COLUMN balance_cents INTEGER NOT NULL DEFAULT 0")
-            except Exception:
-                pass  # Column already exists or table doesn't exist yet
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                # "duplicate column name": already migrated; "no such table":
+                # fresh DB, SCHEMA creates the table below. Anything else is real.
+                if "duplicate column name" not in msg and "no such table" not in msg:
+                    raise
             # Migration: add purpose/topup_user_id to crypto_deposits if missing
             try:
                 await db.execute("ALTER TABLE crypto_deposits ADD COLUMN purpose TEXT DEFAULT 'order'")
-            except Exception:
-                pass  # Column already exists or table doesn't exist yet
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                # "duplicate column name": already migrated; "no such table":
+                # fresh DB, SCHEMA creates the table below. Anything else is real.
+                if "duplicate column name" not in msg and "no such table" not in msg:
+                    raise
             try:
                 await db.execute("ALTER TABLE crypto_deposits ADD COLUMN topup_user_id INTEGER")
-            except Exception:
-                pass  # Column already exists or table doesn't exist yet
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                # "duplicate column name": already migrated; "no such table":
+                # fresh DB, SCHEMA creates the table below. Anything else is real.
+                if "duplicate column name" not in msg and "no such table" not in msg:
+                    raise
             # Migration: add purpose/topup_user_id to cryptobot_invoices if missing
             try:
                 await db.execute("ALTER TABLE cryptobot_invoices ADD COLUMN purpose TEXT DEFAULT 'order'")
-            except Exception:
-                pass  # Column already exists or table doesn't exist yet
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                # "duplicate column name": already migrated; "no such table":
+                # fresh DB, SCHEMA creates the table below. Anything else is real.
+                if "duplicate column name" not in msg and "no such table" not in msg:
+                    raise
             try:
                 await db.execute("ALTER TABLE cryptobot_invoices ADD COLUMN topup_user_id INTEGER")
-            except Exception:
-                pass
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                # "duplicate column name": already migrated; "no such table":
+                # fresh DB, SCHEMA creates the table below. Anything else is real.
+                if "duplicate column name" not in msg and "no such table" not in msg:
+                    raise
             # Migration: add fee_pct to cryptobot_invoices if missing
             try:
                 await db.execute("ALTER TABLE cryptobot_invoices ADD COLUMN fee_pct INTEGER")
-            except Exception:
-                pass  # Column already exists or table doesn't exist yet  # Column already exists or table doesn't exist yet
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                # "duplicate column name": already migrated; "no such table":
+                # fresh DB, SCHEMA creates the table below. Anything else is real.
+                if "duplicate column name" not in msg and "no such table" not in msg:
+                    raise
             # Migration: add is_unlimited to products if missing (for older DBs)
             try:
                 await db.execute("ALTER TABLE products ADD COLUMN is_unlimited INTEGER DEFAULT 0")
-            except Exception:
-                pass  # Column already exists or table doesn't exist yet
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                # "duplicate column name": already migrated; "no such table":
+                # fresh DB, SCHEMA creates the table below. Anything else is real.
+                if "duplicate column name" not in msg and "no such table" not in msg:
+                    raise
             # Migration: add claim_code to tonconnect_pending if missing
             try:
                 await db.execute("ALTER TABLE tonconnect_pending ADD COLUMN claim_code TEXT")
-            except Exception:
-                pass  # Column already exists or table doesn't exist yet
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                # "duplicate column name": already migrated; "no such table":
+                # fresh DB, SCHEMA creates the table below. Anything else is real.
+                if "duplicate column name" not in msg and "no such table" not in msg:
+                    raise
             # Migration: add claimed_at to orders if missing
             try:
                 await db.execute("ALTER TABLE orders ADD COLUMN claimed_at TEXT")
-            except Exception:
-                pass  # Column already exists or table doesn't exist yet
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                # "duplicate column name": already migrated; "no such table":
+                # fresh DB, SCHEMA creates the table below. Anything else is real.
+                if "duplicate column name" not in msg and "no such table" not in msg:
+                    raise
             await db.executescript(SCHEMA)
             await db.execute(
                 "INSERT OR IGNORE INTO kv(key, value) VALUES ('maintenance_mode','0')")
@@ -332,15 +376,19 @@ class Database:
                          tx_type: str = "topup", order_id: int = None) -> int:
         """Add to balance (topup/refund). Applies 5% bonus on topups. Returns new balance."""
         import config as cfg
+        if amount_cents <= 0:
+            raise ValueError("amount_cents must be positive")
         # Apply deposit bonus on topups
         bonus = 0
         if tx_type == "topup":
             bonus = amount_cents * cfg.DEPOSIT_BONUS_PERCENT // 100
         total = amount_cents + bonus
         async with self._db() as db:
-            await db.execute(
+            cur = await db.execute(
                 "UPDATE users SET balance_cents = balance_cents + ? WHERE id=?",
                 (total, user_id))
+            if cur.rowcount == 0:
+                raise ValueError("user not found")
             async with db.execute(
                 "SELECT balance_cents FROM users WHERE id=?", (user_id,)) as cur:
                 new_bal = (await cur.fetchone())["balance_cents"]
@@ -652,14 +700,6 @@ class Database:
                 (product_id, order_id, *values))
             await db.commit()
 
-    async def increment_stock(self, product_id: int, qty: int):
-        """Return stock (H16 fulfillment rollback)."""
-        async with self._db() as db:
-            await db.execute(
-                "UPDATE products SET stock = stock + ? WHERE id=? AND stock != -1",
-                (qty, product_id))
-            await db.commit()
-
     async def clear_order_item_values(self, order_id: int):
         """Clear delivered values (H16 fulfillment rollback)."""
         async with self._db() as db:
@@ -776,7 +816,10 @@ class Database:
             try:
                 r["items"] = json.loads(r["items_json"] or "[]")
             except Exception:
+                logger.warning("tonconnect pending %s has corrupt items_json",
+                               r.get("id"))
                 r["items"] = []
+                r["items_corrupt"] = True
         return rows
 
     async def tonconnect_pending_remove(self, pid: int):
@@ -953,7 +996,7 @@ class Database:
         """
         async with self._claim_lock:
             async with self._db() as db:
-                q = ("SELECT 1 FROM orders o JOIN promos p ON p.code = o.promo_code"
+                q = ("SELECT 1 FROM orders o JOIN promos p ON p.code = o.promo_code COLLATE NOCASE"
                      " WHERE p.id=? AND o.user_id=? AND o.status != 'cancelled'")
                 args = [promo_id, user_id]
                 if order_id is not None:
@@ -1151,14 +1194,14 @@ class Database:
     async def list_user_orders(self, user_id: int, limit: int, offset: int):
         async with self._db() as db:
             async with db.execute(
-                "SELECT * FROM orders WHERE user_id=? AND status IN ('confirmed', 'delivered', 'shipped') ORDER BY id DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM orders WHERE user_id=? AND status IN ('confirmed', 'preparing', 'processing', 'delivered', 'shipped') ORDER BY id DESC LIMIT ? OFFSET ?",
                 (user_id, limit, offset)) as cur:
                 return await cur.fetchall()
 
     async def count_user_orders(self, user_id: int) -> int:
         async with self._db() as db:
             async with db.execute(
-                "SELECT COUNT(*) c FROM orders WHERE user_id=? AND status IN ('confirmed', 'delivered', 'shipped')",
+                "SELECT COUNT(*) c FROM orders WHERE user_id=? AND status IN ('confirmed', 'preparing', 'processing', 'delivered', 'shipped')",
                 (user_id,)) as cur:
                 return (await cur.fetchone())["c"]
 
@@ -1254,6 +1297,25 @@ class Database:
             return True
         return datetime.now(timezone.utc) - claimed > timedelta(minutes=minutes)
 
+    async def steal_stale_order_claim(self, order_id: int, minutes: int = 5) -> bool:
+        """Atomically steal a stale processing claim before fulfilling.
+
+        Only one worker can win the steal; the loser must not fulfill.
+        """
+        cutoff = (datetime.now(timezone.utc) -
+                  timedelta(minutes=minutes)).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._db() as db:
+            cur = await db.execute(
+                "UPDATE orders SET claimed_at=?, updated_at=?"
+                " WHERE id=? AND status='processing'"
+                " AND (claimed_at IS NULL OR claimed_at < ?)",
+                (now, now, order_id, cutoff),
+            )
+            n = cur.rowcount
+            await db.commit()
+            return n > 0
+
     async def revenue(self, days: int = None) -> tuple:
         """Returns (revenue_cents, order_count) for paid orders."""
         q = ("SELECT COALESCE(SUM(total_cents),0) s, COUNT(*) c FROM orders"
@@ -1302,7 +1364,12 @@ class Database:
                 await db.commit()
                 return True
         except aiosqlite.IntegrityError:
-            return False
+            # Distinguish a genuine duplicate from other constraint failures:
+            # only report "already exists" if the row is really there.
+            existing = await self.get_payment_by_external_id(provider, external_id)
+            if existing:
+                return False
+            raise
 
     async def get_payments_by_order(self, order_id: int) -> list:
         """All payment rows for an order (order-level idempotency check)."""
@@ -1384,31 +1451,6 @@ class Database:
                 (referrer_id, referee_id, order_id, amount_cents, utcnow_iso()),
             )
             await db.commit()
-
-    async def try_claim_first_referral_credit(self, referee_id: int) -> bool:
-        """Atomically claim the one-time first-paid-order referral credit.
-
-        Returns True only for the winner: the PRIMARY KEY on referee_id makes
-        concurrent first orders serialize — exactly one INSERT wins, so two
-        simultaneous first orders can never double-credit.
-
-        Intended wiring (handlers/common.py::maybe_credit_referral): replace
-        the `user_paid_orders_count(...) != 1` check with
-        `if not await db.try_claim_first_referral_credit(user["id"]): return 0`.
-        """
-        try:
-            async with self._claim_lock:
-                async with self._db() as db:
-                    cur = await db.execute(
-                        "INSERT OR IGNORE INTO referral_claims(referee_id, claimed_at)"
-                        " VALUES (?, ?)",
-                        (referee_id, utcnow_iso()),
-                    )
-                    won = cur.rowcount > 0
-                    await db.commit()
-                    return won
-        except Exception:
-            return False
 
     async def claim_and_record_referral_credit(self, referee_id: int, referrer_id: int,
                                                order_id: int, amount_cents: int) -> bool:
@@ -1586,8 +1628,12 @@ class Database:
                     won = cur.rowcount > 0
                     await db.commit()
                     return won
-        except aiosqlite.IntegrityError:
-            return False
+        except aiosqlite.IntegrityError as e:
+            # UNIQUE(chain, txid) means another worker won the race; any other
+            # constraint failure is real and must surface.
+            if "UNIQUE" in str(e).upper():
+                return False
+            raise
 
     async def list_crypto_deposits(self, status: str = None, limit: int = 50):
         q = "SELECT * FROM crypto_deposits"
@@ -1628,6 +1674,15 @@ class Database:
         async with self._db() as db:
             async with db.execute(
                     "SELECT * FROM cryptobot_invoices WHERE status='active'"
+            ) as cur:
+                return await cur.fetchall()
+
+    async def sweepable_cryptobot_invoices(self):
+        """Invoices the recovery sweep should poll: active + paid-but-unfinalized."""
+        async with self._db() as db:
+            async with db.execute(
+                    "SELECT * FROM cryptobot_invoices"
+                    " WHERE status IN ('active','paid_unfinalized')"
             ) as cur:
                 return await cur.fetchall()
 

@@ -110,6 +110,54 @@ def _details_prompt(kind, phone, address) -> str:
     return "Please share " + " and ".join(need) + "."
 
 
+async def _clear_details_prompt(chat_id: int, mid):
+    """Delete the reply-keyboard prompt message if present."""
+    if not mid:
+        return
+    try:
+        await bot.delete_message(chat_id, mid)
+    except Exception:
+        pass
+
+
+async def _refresh_details(chat_id: int, state: FSMContext, user: dict):
+    """Re-render the details screen after an update.
+
+    Currently a no-op: the details step is disabled (digital-only bot,
+    details_skipped=True), kept so the dead handlers don't NameError.
+    """
+    return
+
+
+async def render_details(target, state: FSMContext, user: dict):
+    """Render the delivery-details step.
+
+    Currently unreachable in the live flow (details_skipped=True), but the
+    back/edit handlers reference it — it must exist and not crash.
+    Renders in place without changing FSM state.
+    """
+    data = await state.get_data()
+    kind, phone, address, phone_saved, address_saved = _details_snapshot(data, user)
+    text = _details_text(kind, phone, address, phone_saved, address_saved)
+    prompt = _details_prompt(kind, phone, address)
+    rows = []
+    if kind == "delivery":
+        rows.append([types.InlineKeyboardButton("🏠 Pickup", callback_data="cod:pickup")])
+    else:
+        rows.append([types.InlineKeyboardButton("🚚 Delivery", callback_data="cod:delivery")])
+    rows.append([types.InlineKeyboardButton("📞 Share phone", callback_data="cod:phone")])
+    if kind == "delivery":
+        rows.append([types.InlineKeyboardButton("📍 Share address", callback_data="cod:addr")])
+    rows.append([types.InlineKeyboardButton("✅ Continue", callback_data="cod:continue")])
+    rows.append([types.InlineKeyboardButton(texts.BTN_BACK, callback_data="co4")])
+    markup = types.InlineKeyboardMarkup(inline_keyboard=rows)
+    full_text = f"{text}\n\n{prompt}"
+    if isinstance(target, types.CallbackQuery):
+        await edit_text_safe(target, full_text, markup)
+    else:
+        await target.answer(full_text, reply_markup=markup, parse_mode="HTML")
+
+
 @dp.callback_query_handler(text="co", state="*")
 async def start_checkout(query: types.CallbackQuery, state: FSMContext):
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)

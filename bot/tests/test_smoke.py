@@ -11,7 +11,6 @@ import os
 import re
 import sys
 import tempfile
-import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -510,6 +509,3 @@ def test_miniapp_payload():
 
 if __name__ == "__main__":
     main()
-
-
-# The focused unit tests in test_webapp_auth.py are run by CI via unittest discovery.

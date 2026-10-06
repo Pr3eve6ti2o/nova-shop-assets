@@ -6,6 +6,7 @@ place-order branches here for 'cryptobot' and 'direct_<chain>'.
 import asyncio
 import logging
 import re
+import secrets
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -33,6 +34,22 @@ def _order_lock(order_id: int) -> asyncio.Lock:
     if lock is None:
         lock = asyncio.Lock()
         _order_locks[order_id] = lock
+    return lock
+
+
+_topup_locks: dict = {}
+
+
+def _topup_lock(user_id: int) -> asyncio.Lock:
+    """Per-user lock serializing CryptoBot top-up invoice creation.
+
+    Single-process only (asyncio locks don't span workers); prevents
+    double-click from creating two active invoices.
+    """
+    lock = _topup_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _topup_locks[user_id] = lock
     return lock
 
 
@@ -248,46 +265,48 @@ async def start_topup_cryptobot(query: types.CallbackQuery, state: FSMContext,
     fee_cents = gross_cents - int(amount_cents)
     # Single active top-up invoice per user: cancel any prior open top-up
     # invoices before creating a new one, so two distinct invoice_ids cannot
-    # both be paid and double-credit the balance.
-    try:
-        priors = await db.active_cryptobot_invoices() or []
-    except Exception as e:
-        logger.warning("list cryptobot invoices failed: %s", e)
-        priors = []
-    for prior in priors:
-        if (prior.get("purpose") or "order") != "topup":
-            continue
-        if prior.get("topup_user_id") != user["id"]:
-            continue
-        if prior.get("status") != "active":
-            continue
-        await db.set_cryptobot_status(prior["invoice_id"], "cancelled")
+    # both be paid and double-credit the balance. Serialized per user to
+    # close the list-then-create race.
+    async with _topup_lock(user["id"]):
         try:
-            await cp.cryptobot_delete_invoice(prior["invoice_id"])
+            priors = await db.active_cryptobot_invoices() or []
         except Exception as e:
-            logger.warning("cryptobot deleteInvoice %s failed: %s",
-                           prior["invoice_id"], e)
-    try:
-        inv = await cp.cryptobot_create_invoice(
-            order_id=0, usd_cents=int(amount_cents),
-            note=f"Nova Shop balance top-up ({fmt_money(amount_cents, config.CURRENCY)})",
-            payload="topup")
-        invoice_id = int(inv["invoice_id"])
-        pay_url = inv["bot_invoice_url"]
-        await db.create_cryptobot_invoice(order_id=None, invoice_id=invoice_id,
-                                          asset=inv.get("asset", "USDT"),
-                                          amount=str(inv.get("amount", "")),
-                                          purpose="topup",
-                                          topup_user_id=user["id"],
-                                          fee_pct=fee_pct)
-    except Exception as e:
-        logger.warning("cryptobot topup createInvoice failed: %s", e)
-        await state.finish()
-        await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
-                             kb.balance_topup_kb())
-        await db.audit(user["tg_id"], "topup_cryptobot_error",
-                       f"amount={amount_cents}: {e}")
-        return
+            logger.warning("list cryptobot invoices failed: %s", e)
+            priors = []
+        for prior in priors:
+            if (prior.get("purpose") or "order") != "topup":
+                continue
+            if prior.get("topup_user_id") != user["id"]:
+                continue
+            if prior.get("status") != "active":
+                continue
+            await db.set_cryptobot_status(prior["invoice_id"], "cancelled")
+            try:
+                await cp.cryptobot_delete_invoice(prior["invoice_id"])
+            except Exception as e:
+                logger.warning("cryptobot deleteInvoice %s failed: %s",
+                               prior["invoice_id"], e)
+        try:
+            inv = await cp.cryptobot_create_invoice(
+                order_id=0, usd_cents=int(amount_cents),
+                note=f"Nova Shop balance top-up ({fmt_money(amount_cents, config.CURRENCY)})",
+                payload="topup")
+            invoice_id = int(inv["invoice_id"])
+            pay_url = inv["bot_invoice_url"]
+            await db.create_cryptobot_invoice(order_id=None, invoice_id=invoice_id,
+                                              asset=inv.get("asset", "USDT"),
+                                              amount=str(inv.get("amount", "")),
+                                              purpose="topup",
+                                              topup_user_id=user["id"],
+                                              fee_pct=fee_pct)
+        except Exception as e:
+            logger.warning("cryptobot topup createInvoice failed: %s", e)
+            await state.finish()
+            await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
+                                 kb.balance_topup_kb())
+            await db.audit(user["tg_id"], "topup_cryptobot_error",
+                           f"amount={amount_cents}: {e}")
+            return
     await db.audit(user["tg_id"], "topup_cryptobot_invoice",
                    f"invoice={invoice_id}")
     await state.finish()
@@ -453,18 +472,13 @@ async def start_direct_deposit(query: types.CallbackQuery, state: FSMContext,
     lock = _order_lock(order_id)
     async with lock:
         try:
-            # If a prior deposit already has seen funds, reuse it instead of
-            # cancelling it and stranding those funds on an unmonitored address.
-            existing = None
-            for _st in ("pending", "underpaid"):
-                for _old in await db.list_crypto_deposits(status=_st, limit=1000):
-                    if _old["order_id"] != order_id:
-                        continue
-                    if int(_old.get("seen_amount_crypto") or 0) > 0:
-                        if existing is None:
-                            existing = _old
-                    else:
-                        await db.update_crypto_deposit(_old["id"], status="cancelled")
+            # Reuse the latest pending/underpaid deposit for this order+chain
+            # rather than cancelling unseen deposits and stranding in-flight
+            # funds on an unmonitored address. Never create a second active
+            # deposit for the same order+chain.
+            existing = await db.get_deposit_by_order(order_id, chain)
+            if existing and existing["status"] not in ("pending", "underpaid"):
+                existing = None
             if existing:
                 await state.finish()
                 memo_line = texts.MSG_DEPOSIT_MEMO_LINE.format(memo=existing["memo"]) if existing["memo"] else ""
@@ -539,24 +553,27 @@ async def start_topup_deposit(query: types.CallbackQuery, state: FSMContext,
                              kb.balance_topup_kb())
         return
     expected = cp.usd_cents_to_base_units(int(amount_cents), price, chain)
-    memo = f"NOVA-TOPUP-{user['id']}" if chain == "ton" else None
     ttl_min = config.CRYPTO_TTL_MINUTES
     expires = (datetime.now(timezone.utc) + timedelta(minutes=ttl_min)).isoformat()
     try:
-        # If a prior top-up deposit already has seen funds, reuse it instead
-        # of cancelling it and stranding those funds on an unmonitored address.
+        # Reuse the latest pending/underpaid top-up deposit for this user+chain
+        # rather than cancelling unseen deposits and stranding in-flight funds.
         existing = None
-        for _st in ("pending", "underpaid"):
-            for _old in await db.list_crypto_deposits(status=_st, limit=1000):
+        for _old in await db.list_crypto_deposits(status="pending", limit=1000):
+            if (_old.get("purpose") or "order") != "topup":
+                continue
+            if _old.get("topup_user_id") != user["id"] or _old["chain"] != chain:
+                continue
+            existing = _old
+            break
+        if existing is None:
+            for _old in await db.list_crypto_deposits(status="underpaid", limit=1000):
                 if (_old.get("purpose") or "order") != "topup":
                     continue
                 if _old.get("topup_user_id") != user["id"] or _old["chain"] != chain:
                     continue
-                if int(_old.get("seen_amount_crypto") or 0) > 0:
-                    if existing is None:
-                        existing = _old
-                else:
-                    await db.update_crypto_deposit(_old["id"], status="cancelled")
+                existing = _old
+                break
         if existing:
             await state.finish()
             memo_line = texts.MSG_DEPOSIT_MEMO_LINE.format(memo=existing["memo"]) if existing["memo"] else ""
@@ -581,6 +598,10 @@ async def start_topup_deposit(query: types.CallbackQuery, state: FSMContext,
         address, index, _ = await cp.next_deposit_address(db, chain)
         if not _valid_deposit_address(chain, address):
             raise ValueError(f"invalid {chain} address derived: {address!r}")
+        # Per-deposit memo generated BEFORE insert so a TON top-up deposit
+        # never exists in the DB with memo=None (a sweeper racing this
+        # await would otherwise match any TON tx to the static address).
+        memo = f"NOVA-TOPUP-{user['id']}-{secrets.token_hex(4).upper()}" if chain == "ton" else None
         dep_id = await db.create_crypto_deposit(
             order_id=None, chain=chain, address=address,
             derivation_index=index, memo=memo, expected_crypto=str(expected),
@@ -657,9 +678,16 @@ async def cb_deposit_check(query: types.CallbackQuery):
     # Single answer for this callback: the scanning toast.
     await query.answer(texts.TOAST_SCANNING)
     user = await db.get_user_by_tg(query.from_user.id)
-    order = await db.get_order(dep["order_id"])
-    if not user or not order or order["user_id"] != user["id"]:
+    if not user:
         return
+    if (dep.get("purpose") or "order") == "topup":
+        # Top-up deposits have no order; verify ownership via topup_user_id.
+        if dep.get("topup_user_id") != user["id"]:
+            return
+    else:
+        order = await db.get_order(dep["order_id"])
+        if not order or order["user_id"] != user["id"]:
+            return
     result = await _manual_deposit_scan(deposit_id)
     if result == "paid":
         await query.message.answer(texts.MSG_CRYPTO_PAID.split("\n\n")[0])
@@ -769,6 +797,18 @@ async def cb_crypto_confirm(query: types.CallbackQuery):
     if not dep or dep["status"] == "paid":
         await query.answer(texts.TOAST_CRYPTO_ALREADY)
         return
+    # Never finalize a deposit with no funds seen — an admin misclick must
+    # not mark an unpaid order as paid.
+    try:
+        seen = float(dep["seen_amount_crypto"] or 0)
+    except (TypeError, ValueError):
+        seen = 0
+    if seen <= 0:
+        await query.answer(
+            "⚠️ No funds seen on this deposit yet — cannot confirm.",
+            show_alert=True)
+        return
+    # Admins who truly must force-confirm can use the admin panel/DB path.
     claimed = await db.claim_crypto_deposit(dep_id, f"manual_{dep_id}",
                                             dep["seen_amount_crypto"] or "0", 999)
     if claimed:
