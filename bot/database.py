@@ -86,6 +86,10 @@ CREATE TABLE IF NOT EXISTS stock_alerts(
 CREATE TABLE IF NOT EXISTS tonconnect_pending(
   id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, sender TEXT NOT NULL,
   amount_nano INTEGER NOT NULL, items_json TEXT NOT NULL, promo_code TEXT,
+  claim_code TEXT,
+  created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS tonconnect_claims(
+  user_id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL,
   created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS audit_log(
   id INTEGER PRIMARY KEY, ts TEXT, actor_tg_id INTEGER, action TEXT, details TEXT);
@@ -198,6 +202,11 @@ class Database:
             # Migration: add is_unlimited to products if missing (for older DBs)
             try:
                 await db.execute("ALTER TABLE products ADD COLUMN is_unlimited INTEGER DEFAULT 0")
+            except Exception:
+                pass  # Column already exists or table doesn't exist yet
+            # Migration: add claim_code to tonconnect_pending if missing
+            try:
+                await db.execute("ALTER TABLE tonconnect_pending ADD COLUMN claim_code TEXT")
             except Exception:
                 pass  # Column already exists or table doesn't exist yet
             await db.executescript(SCHEMA)
@@ -712,13 +721,14 @@ class Database:
 
     async def tonconnect_pending_add(self, user_id: int, sender: str,
                                      amount_nano: int, items: list,
-                                     promo_code: str = None):
+                                     promo_code: str = None,
+                                     claim_code: str = None):
         import json
         async with self._db() as db:
             await db.execute(
-                "INSERT INTO tonconnect_pending(user_id, sender, amount_nano, items_json, promo_code)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (user_id, sender, amount_nano, json.dumps(items), promo_code))
+                "INSERT INTO tonconnect_pending(user_id, sender, amount_nano, items_json, promo_code, claim_code)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, sender, amount_nano, json.dumps(items), promo_code, claim_code))
             await db.commit()
 
     async def tonconnect_pending_list(self):
@@ -738,6 +748,31 @@ class Database:
         async with self._db() as db:
             await db.execute("DELETE FROM tonconnect_pending WHERE id=?", (pid,))
             await db.commit()
+
+    async def tonconnect_claim_code(self, user_id: int) -> str:
+        """Per-user TON Connect claim code (audit C3 memo binding).
+
+        Issued once per user; the Mini App embeds it in the TON transfer
+        comment, and the matcher requires an exact memo match. Fail closed.
+        """
+        import secrets
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT code FROM tonconnect_claims WHERE user_id=?",
+                (user_id,)) as cur:
+                row = await cur.fetchone()
+            if row:
+                return row["code"]
+            code = secrets.token_urlsafe(12)
+            await db.execute(
+                "INSERT OR IGNORE INTO tonconnect_claims(user_id, code)"
+                " VALUES (?, ?)", (user_id, code))
+            await db.commit()
+            async with db.execute(
+                "SELECT code FROM tonconnect_claims WHERE user_id=?",
+                (user_id,)) as cur:
+                row = await cur.fetchone()
+            return row["code"]
 
     async def cart_items(self, user_id: int):
         async with self._db() as db:

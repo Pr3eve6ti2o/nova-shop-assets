@@ -456,7 +456,8 @@ async def _sweep_tonconnect_pending():
     pendings = await db.tonconnect_pending_list()
     for p in pendings:
         try:
-            matched = await find_tonconnect_tx(merchant, p["sender"], p["amount_nano"])
+            matched = await find_tonconnect_tx(merchant, p["sender"], p["amount_nano"],
+                                               p.get("claim_code"))
             if not matched:
                 continue
             user = await db.get_user(p["user_id"])
@@ -465,7 +466,7 @@ async def _sweep_tonconnect_pending():
                 continue
             clean = p.get("items") or []
             order_id, ok = await create_tonconnect_order(
-                user, p["sender"], p["amount_nano"], clean,
+                user, p["sender"], clean,
                 p.get("promo_code"), matched)
             if order_id is None or not ok:
                 # Blocked (e.g. txid already claimed by another user) or
