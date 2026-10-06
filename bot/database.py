@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS orders(
   payment_method TEXT,
   delivery_kind TEXT,
   address TEXT, phone TEXT, promo_code TEXT,
-  created_at TEXT, updated_at TEXT);
+  created_at TEXT, updated_at TEXT,
+  claimed_at TEXT);
 CREATE TABLE IF NOT EXISTS order_items(
   order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
   product_id INTEGER, name TEXT, qty INTEGER, price_cents INTEGER,
@@ -207,6 +208,11 @@ class Database:
             # Migration: add claim_code to tonconnect_pending if missing
             try:
                 await db.execute("ALTER TABLE tonconnect_pending ADD COLUMN claim_code TEXT")
+            except Exception:
+                pass  # Column already exists or table doesn't exist yet
+            # Migration: add claimed_at to orders if missing
+            try:
+                await db.execute("ALTER TABLE orders ADD COLUMN claimed_at TEXT")
             except Exception:
                 pass  # Column already exists or table doesn't exist yet
             await db.executescript(SCHEMA)
@@ -634,6 +640,34 @@ class Database:
                 await db.execute("ROLLBACK")
                 raise
 
+    async def restore_product_values(self, product_id: int, values: list,
+                                     order_id: int):
+        """Return previously-popped values to the unused pool (H16 rollback)."""
+        if not values:
+            return
+        async with self._db() as db:
+            await db.execute(
+                "UPDATE product_values SET is_used=0, used_in_order=NULL"
+                f" WHERE product_id=? AND used_in_order=? AND value IN ({','.join('?' * len(values))})",
+                (product_id, order_id, *values))
+            await db.commit()
+
+    async def increment_stock(self, product_id: int, qty: int):
+        """Return stock (H16 fulfillment rollback)."""
+        async with self._db() as db:
+            await db.execute(
+                "UPDATE products SET stock = stock + ? WHERE id=? AND stock != -1",
+                (qty, product_id))
+            await db.commit()
+
+    async def clear_order_item_values(self, order_id: int):
+        """Clear delivered values (H16 fulfillment rollback)."""
+        async with self._db() as db:
+            await db.execute(
+                "UPDATE order_items SET delivered_value=NULL WHERE order_id=?",
+                (order_id,))
+            await db.commit()
+
     # ----------------------------------------------------------- cart ---
     async def cart_add(self, user_id: int, product_id: int, qty: int = 1):
         if qty <= 0:
@@ -655,8 +689,9 @@ class Database:
             await db.execute(
                 "INSERT INTO cart_items(user_id, product_id, qty) VALUES (?, ?, ?)"
                 " ON CONFLICT(user_id, product_id) DO UPDATE SET"
-                " qty = max(?, min(?, qty + excluded.qty))",
-                (user_id, product_id, max(min_qty, delta), min_qty, max_qty),
+                " qty = max(?, min(?, qty + ?))",
+                (user_id, product_id, max(min_qty, min(delta, max_qty)),
+                 min_qty, max_qty, delta),
             )
             async with db.execute(
                 "SELECT qty FROM cart_items WHERE user_id=? AND product_id=?",
@@ -712,7 +747,7 @@ class Database:
         async with self._db() as db:
             async with db.execute(
                 "SELECT user_id FROM stock_alerts WHERE product_id=?", (product_id,)) as cur:
-                return [r[0] async for r in cur]
+                return [r["user_id"] async for r in cur]
 
     async def stock_alerts_clear_product(self, product_id: int):
         async with self._db() as db:
@@ -1189,6 +1224,35 @@ class Database:
                 won = cur.rowcount > 0
                 await db.commit()
                 return won
+
+    async def claim_order_processing(self, order_id: int) -> bool:
+        """Atomically claim pending->processing with a claim timestamp."""
+        async with self._claim_lock:
+            async with self._db() as db:
+                cur = await db.execute(
+                    "UPDATE orders SET status='processing', claimed_at=?, updated_at=?"
+                    " WHERE id=? AND status='pending'",
+                    (utcnow_iso(), utcnow_iso(), order_id))
+                won = cur.rowcount > 0
+                await db.commit()
+                return won
+
+    async def order_claim_stale(self, order_id: int, minutes: int = 5) -> bool:
+        """True if the processing claim is older than `minutes` (or missing)."""
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT claimed_at FROM orders WHERE id=?", (order_id,)) as cur:
+                row = await cur.fetchone()
+        if not row or not row["claimed_at"]:
+            return True
+        try:
+            claimed = datetime.fromisoformat(
+                str(row["claimed_at"]).replace("Z", "+00:00"))
+            if claimed.tzinfo is None:
+                claimed = claimed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return True
+        return datetime.now(timezone.utc) - claimed > timedelta(minutes=minutes)
 
     async def revenue(self, days: int = None) -> tuple:
         """Returns (revenue_cents, order_count) for paid orders."""

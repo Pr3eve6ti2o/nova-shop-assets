@@ -109,6 +109,33 @@ class MaintenanceMiddleware(BaseMiddleware):
             raise CancelHandler()
 
 
+class BlockedMiddleware(BaseMiddleware):
+    """Blocked users get a notice and nothing else. Runs before other gates."""
+
+    def __init__(self, db):
+        super().__init__()
+        self.db = db
+
+    async def _is_blocked(self, tg_id: int) -> bool:
+        try:
+            user = await self.db.get_user_by_tg(tg_id)
+        except Exception:
+            return False
+        return bool(user and user["is_blocked"])
+
+    async def on_pre_process_message(self, message, data):
+        if not message.from_user:
+            return
+        if await self._is_blocked(message.from_user.id):
+            await message.answer(texts.MSG_ACCOUNT_BLOCKED)
+            raise CancelHandler()
+
+    async def on_pre_process_callback_query(self, query, data):
+        if await self._is_blocked(query.from_user.id):
+            await query.answer(texts.MSG_ACCOUNT_BLOCKED, show_alert=True)
+            raise CancelHandler()
+
+
 class CallbackSafetyMiddleware(BaseMiddleware):
     """Safety net: never leave a callback query unanswered.
 

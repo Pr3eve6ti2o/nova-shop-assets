@@ -9,6 +9,7 @@ import config
 from filters import IsAdmin
 from loader import bot, db, dp
 from middlewares import (
+    BlockedMiddleware,
     CallbackSafetyMiddleware,
     MaintenanceMiddleware,
     RateLimitMiddleware,
@@ -28,6 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 dp.filters_factory.bind(IsAdmin)
+dp.setup_middleware(BlockedMiddleware(db))
 dp.setup_middleware(RateLimitMiddleware(db))
 dp.setup_middleware(MaintenanceMiddleware(db))
 dp.setup_middleware(CallbackSafetyMiddleware())

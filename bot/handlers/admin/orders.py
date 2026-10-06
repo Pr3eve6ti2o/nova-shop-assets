@@ -109,22 +109,31 @@ async def cb_order_set_status(query: types.CallbackQuery):
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
         return
     # COD orders: fulfill stock/keys when first confirmed by admin.
-    # Other rails: never confirm an unpaid order — that releases goods free.
-    if status == "confirmed" and order["status"] in ("pending", "processing"):
+    # Other rails: never move an unpaid order into a fulfillment-bearing
+    # status — that releases goods free. H18: gate EVERY transition into
+    # confirmed (not just from pending/processing). H20: same gate for
+    # delivered/shipped/completed.
+    if status in ("confirmed", "delivered", "shipped", "completed"):
         if (order["payment_method"] or "") != "cod" \
                 and not await _order_is_paid(order):
             await query.answer(texts.MSG_ADMIN_CONFIRM_UNPAID, show_alert=True)
             return
+    if status in ("confirmed", "delivered", "shipped", "completed") \
+            and order["status"] in ("pending", "processing"):
+        # First entry into a fulfillment-bearing status: claim + fulfill.
         # Atomic claim pending -> processing so two concurrent admin confirms
         # cannot both fulfill the same order (double keys/stock/referral).
-        # If already "processing", a previous attempt died mid-fulfillment --
-        # retry it now rather than leaving a paid order undelivered.
-        claimed = await db.set_order_status(oid, "processing",
-                                            only_if_status="pending")
+        claimed = await db.claim_order_processing(oid)
         if not claimed:
             order = await db.get_order(oid)
             if not order or order["status"] != "processing":
                 await query.answer("Order status changed \u2014 please refresh.",
+                                   show_alert=True)
+                return
+            # H13: another admin may be fulfilling RIGHT NOW — only retry a
+            # STALE claim, otherwise report in-flight.
+            if not await db.order_claim_stale(oid, minutes=5):
+                await query.answer("Another admin is fulfilling this order.",
                                    show_alert=True)
                 return
             logger.warning("admin confirm retrying fulfillment of stuck "

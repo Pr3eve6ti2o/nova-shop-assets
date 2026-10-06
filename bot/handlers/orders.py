@@ -1,12 +1,12 @@
 """User order history: list, detail with roadmap, buy-again, self-cancel."""
 from aiogram import types
 from aiogram.dispatcher import FSMContext
-from aiogram.types import InlineKeyboardButton
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 import config
 import keyboards as kb
 import texts
-from loader import db, dp
+from loader import bot, db, dp
 from utils import fmt_money, paginate
 from .common import (
     get_or_register, edit_text_safe, totals_text, render_lines, render_roadmap,
@@ -14,6 +14,17 @@ from .common import (
 )
 
 PER_PAGE = 6
+
+
+_bot_username = None
+
+
+async def _bot_username() -> str:
+    """Cached bot username for deep links (one get_me call ever)."""
+    global _bot_username
+    if not _bot_username:
+        _bot_username = (await bot.get_me()).username
+    return _bot_username
 
 
 async def _try_delete(message):
@@ -64,6 +75,16 @@ async def show_order_detail(target, oid: int, user: dict):
             await target.answer(texts.ERR_NOT_FOUND, show_alert=True)
         else:
             await target.answer(texts.ERR_NOT_FOUND)
+        return
+    # H4: never render delivered keys outside a private chat (group deep links).
+    if isinstance(target, types.Message) and target.chat.type != "private":
+        username = await _bot_username()
+        btn = InlineKeyboardMarkup().add(InlineKeyboardButton(
+            "🔒 Open in private chat",
+            url=f"https://t.me/{username}?start=o_{oid}"))
+        await target.answer(
+            "🔒 For your security, order details with digital keys can only be viewed in a private chat with the bot.",
+            reply_markup=btn)
         return
     items = await db.get_order_items(oid)
     lines = render_lines([{"name": i["name"], "qty": i["qty"],
