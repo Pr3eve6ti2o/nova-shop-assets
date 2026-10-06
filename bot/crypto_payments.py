@@ -537,6 +537,14 @@ async def _get_json(url: str, params: dict = None, timeout: int = 20):
             return await r.json()
 
 
+async def _get_text(url: str, params: dict = None, timeout: int = 20):
+    async with aiohttp.ClientSession() as s:
+        async with s.get(url, params=params, proxy=_proxy(),
+                         timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+            r.raise_for_status()
+            return await r.text()
+
+
 async def fetch_btc_txs(address: str) -> tuple:
     """Return (txs, tip_height). tx: {txid, to, sats, confirmations}."""
     try:
@@ -555,7 +563,7 @@ async def fetch_btc_txs(address: str) -> tuple:
             after = page[-1].get("txid")
             if not after:
                 break
-        tip = await _get_json("https://mempool.space/api/blocks/tip/height")
+        tip = int((await _get_text("https://mempool.space/api/blocks/tip/height")).strip())
     except Exception as e:
         logger.warning("mempool.space failed (%s), trying blockchain.info", e)
         try:
