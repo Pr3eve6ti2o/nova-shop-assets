@@ -294,7 +294,7 @@ async def webapp_data(message: types.Message, state: FSMContext):
         return
     for it in t["items"]:
         p = await db.get_product(it["product_id"])
-        if not product_available(p, it["qty"]):
+        if not await product_available(p, it["qty"]):
             await message.answer(texts.ERR_OUT_OF_STOCK,
                                  reply_markup=await main_reply_kb(message.from_user.id))
             return

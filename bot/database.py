@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS products(
   kind TEXT NOT NULL DEFAULT 'physical',
   stock INTEGER NOT NULL DEFAULT -1,
   rating_sum INTEGER DEFAULT 0, rating_count INTEGER DEFAULT 0,
-  is_active INTEGER DEFAULT 1, created_at TEXT);
+  is_active INTEGER DEFAULT 1,
+  is_unlimited INTEGER DEFAULT 0,
+  created_at TEXT);
 CREATE TABLE IF NOT EXISTS product_values(
   id INTEGER PRIMARY KEY, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE,
   value TEXT NOT NULL, is_used INTEGER DEFAULT 0, used_in_order INTEGER,
@@ -185,6 +187,11 @@ class Database:
                 pass  # Column already exists or table doesn't exist yet
             try:
                 await db.execute("ALTER TABLE cryptobot_invoices ADD COLUMN topup_user_id INTEGER")
+            except Exception:
+                pass  # Column already exists or table doesn't exist yet
+            # Migration: add is_unlimited to products if missing (for older DBs)
+            try:
+                await db.execute("ALTER TABLE products ADD COLUMN is_unlimited INTEGER DEFAULT 0")
             except Exception:
                 pass  # Column already exists or table doesn't exist yet
             await db.executescript(SCHEMA)
@@ -483,14 +490,14 @@ class Database:
 
     async def add_product(self, *, category_id, name, description="", photo_file_id=None,
                           price_cents, old_price_cents=None, kind="physical",
-                          stock=-1) -> int:
+                          stock=-1, is_unlimited=0) -> int:
         async with self._db() as db:
             cur = await db.execute(
                 "INSERT INTO products(category_id, name, description, photo_file_id,"
-                " price_cents, old_price_cents, kind, stock, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " price_cents, old_price_cents, kind, stock, is_unlimited, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (category_id, name, description, photo_file_id, price_cents,
-                 old_price_cents, kind, stock, utcnow_iso()),
+                 old_price_cents, kind, stock, is_unlimited, utcnow_iso()),
             )
             await db.commit()
             return cur.lastrowid
@@ -498,7 +505,7 @@ class Database:
     async def update_product(self, pid: int, **fields):
         allowed = {"category_id", "name", "description", "photo_file_id",
                    "price_cents", "old_price_cents", "kind", "stock",
-                   "is_active", "rating_sum", "rating_count"}
+                   "is_active", "is_unlimited", "rating_sum", "rating_count"}
         sets = [f"{k}=?" for k in fields if k in allowed]
         if not sets:
             return

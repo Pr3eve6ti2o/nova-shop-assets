@@ -119,7 +119,7 @@ async def cb_buy_again(query: types.CallbackQuery):
     added = 0
     for it in await db.get_order_items(oid):
         p = await db.get_product(it["product_id"])
-        if product_available(p, it["qty"]):
+        if await product_available(p, it["qty"]):
             await db.cart_add(user["id"], it["product_id"], it["qty"])
             added += 1
     await query.answer(texts.MSG_REORDER_DONE if added else texts.ERR_OUT_OF_STOCK,

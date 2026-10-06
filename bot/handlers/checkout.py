@@ -119,7 +119,7 @@ async def start_checkout(query: types.CallbackQuery, state: FSMContext):
         return
     for it in t["items"]:
         p = await db.get_product(it["product_id"])
-        if not product_available(p, it["qty"]):
+        if not await product_available(p, it["qty"]):
             await query.answer(texts.ERR_OUT_OF_STOCK, show_alert=True)
             return
     # Digital-only bot: delivery details removed from checkout flow.
@@ -555,7 +555,7 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
         return
     for it in t["items"]:
         p = await db.get_product(it["product_id"])
-        if not product_available(p, it["qty"]):
+        if not await product_available(p, it["qty"]):
             await query.answer(texts.ERR_OUT_OF_STOCK, show_alert=True)
             return
     oid = await db.create_order(

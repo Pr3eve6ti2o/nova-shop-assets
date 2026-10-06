@@ -38,7 +38,7 @@ CHAINS = {
         "name": "USDT (ERC-20)", "symbol": "USDT", "decimals": 6,
         "confirmations": 12, "button": "\u039e USDT (ERC-20)",
         "xpub_env": "XPUB_ETH", "hd": ("bip44", 60),
-        "token_contract": "0xdAC17F958D2e523a2206206994597C13D831ec7",
+        "token_contract": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
     },
     "trx": {
         "name": "USDT (TRC-20)", "symbol": "USDT", "decimals": 6,
@@ -551,14 +551,14 @@ async def fetch_btc_txs(address: str) -> tuple:
         txs = []
         after = None
         while True:
-            params = {"after_txid": after} if after else None
-            page = await _get_json(
-                f"https://mempool.space/api/address/{address}/txs",
-                params=params)
+            url = f"https://mempool.space/api/address/{address}/txs"
+            if after:
+                url += f"/chain/{after}"
+            page = await _get_json(url)
             if not page:
                 break
             txs.extend(page)
-            if len(page) < 50:
+            if sum(1 for tx in page if (tx.get("status") or {}).get("confirmed")) < 25:
                 break
             after = page[-1].get("txid")
             if not after:
@@ -743,7 +743,7 @@ async def fetch_ton_txs(address: str) -> list:
                 base = int(str(in_msg.get("value", "0")))
             except (TypeError, ValueError):
                 continue
-            memo = _decode_ton_comment(in_msg.get("message"))
+            memo = str(in_msg.get("message") or "").strip().strip("\x00")
             txid = tx.get("transaction_id", {}) or {}
             tx_key = f"{txid.get('hash', '')}:{txid.get('lt', '')}"
             if tx_key in seen:
@@ -770,23 +770,6 @@ async def fetch_ton_txs(address: str) -> list:
         await asyncio.sleep(1)
     await asyncio.sleep(1)
     return out
-
-
-def _decode_ton_comment(message) -> str:
-    """Decode a toncenter text-comment body to str. Best effort."""
-    if not message:
-        return ""
-    try:
-        raw = base64.b64decode(message)
-    except Exception:
-        return ""
-    # Text comments: 4 zero bytes (op=0) + UTF-8 payload.
-    if raw[:4] == b"\x00\x00\x00\x00":
-        raw = raw[4:]
-    try:
-        return raw.decode("utf-8", errors="strict").strip().strip("\x00")
-    except Exception:
-        return ""
 
 
 # ---------------------------------------------------------------- matching ---

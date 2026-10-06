@@ -38,6 +38,7 @@ class ProductWizard(StatesGroup):
     kind = State()
     stock = State()
     values = State()
+    unlimited = State()
     category = State()
     confirm = State()
 

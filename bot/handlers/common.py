@@ -154,13 +154,13 @@ async def fulfill_order(order_id: int):
         if not p or not p["is_active"]:
             return False, f"product {it['name']} unavailable"
         if p["kind"] == "digital":
-            total_vals = await db.values_total_count(p["id"])
-            if total_vals > 0:
+            if p["is_unlimited"]:
+                pass  # unlimited digital — nothing to claim
+            else:
                 vals = await db.pop_product_values(p["id"], it["qty"], order_id)
                 if vals is None:
                     return False, f"out of keys: {p['name']}"
                 await db.set_order_item_value(order_id, p["id"], "\n".join(vals))
-            # else: unlimited digital — nothing to claim
         else:
             if p["stock"] != -1:
                 # Atomic conditional decrement: concurrent checkouts can't oversell.
@@ -218,11 +218,14 @@ async def check_stock_line(p) -> str:
     return texts.MSG_STOCK_PHYSICAL.format(n=p["stock"])
 
 
-def product_available(p, qty: int = 1) -> bool:
+async def product_available(p, qty: int = 1) -> bool:
     if not p or not p["is_active"]:
         return False
     if p["kind"] == "physical" and p["stock"] != -1 and p["stock"] < qty:
         return False
+    if p["kind"] == "digital" and not p["is_unlimited"]:
+        if await db.unused_values_count(p["id"]) < qty:
+            return False
     return True
 
 
