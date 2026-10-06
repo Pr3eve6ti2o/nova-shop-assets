@@ -440,8 +440,20 @@ async def get_rates(force: bool = False) -> dict:
             logger.info("rates served: %s",
                         {c: served_by.get(c, "?") for c in sorted(rates)})
         else:
-            logger.info("rates partial (not cached): %s",
-                        {c: served_by.get(c, "?") for c in sorted(rates)})
+            # H7: fill the gaps from usable stale cache entries (age < 30m)
+            # so a partially-failed fetch doesn't drop a chain entirely.
+            # The stale entries keep their original age: the merged result is
+            # NOT re-cached, so they expire on their own schedule.
+            age = now - _rates_cache["ts"]
+            if _rates_cache["rates"] and age < _RATES_STALE_MAX:
+                for c in COINGECKO_IDS:
+                    if c not in rates and c in _rates_cache["rates"]:
+                        rates[c] = _rates_cache["rates"][c]
+                logger.info("rates partial+stale (not cached): %s",
+                            {c: served_by.get(c, "stale") for c in sorted(rates)})
+            else:
+                logger.info("rates partial (not cached): %s",
+                            {c: served_by.get(c, "?") for c in sorted(rates)})
         return rates
 
     age = now - _rates_cache["ts"]

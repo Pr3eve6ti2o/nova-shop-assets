@@ -83,6 +83,30 @@ async def finalize_crypto_order(order_id: int, *, provider: str, external_id: st
         logger.warning("retrying unfulfilled crypto payment: %s/%s",
                        provider, external_id)
 
+    # H8: exclusive order claim before fulfillment. Two workers finalizing
+    # the same order concurrently cannot both win the claim, so keys/stock
+    # can never be double-fulfilled. Mirrors the Stars path.
+    claimed = await db.claim_order_processing(order_id)
+    if not claimed:
+        order = await db.get_order(order_id)
+        if order and order["status"] == "confirmed":
+            return True  # the winner already finalized
+        # H13: retry a STALE processing claim (previous attempt died
+        # mid-fulfillment); a fresh one means another worker is active.
+        if order and order["status"] == "processing" \
+                and await db.order_claim_stale(order_id, minutes=5):
+            logger.warning("finalize: retrying stuck processing order %s",
+                           order_id)
+        else:
+            logger.warning("finalize: order %s not claimable (status=%s); "
+                           "manual review",
+                           order_id, order["status"] if order else "?")
+            await notify_admins(
+                f"⚠️ <b>Order #{order_id}</b> could not be claimed for crypto "
+                f"fulfillment ({provider}/{external_id}). Manual review needed.",
+                min_bit=config.PERM_ORDERS)
+            return False
+
     ok, note = await fulfill_order(order_id)
     # C6: only mark confirmed when fulfillment actually succeeded.
     if not ok:
@@ -175,9 +199,23 @@ async def _sweep_direct_deposits():
 async def _process_deposit(dep, now):
     expires = _parse_iso(dep["expires_at"])
     if expires is None or now > expires:
-        await db.update_crypto_deposit(dep["id"], status="expired")
-        await _notify_expired(dep)
-        await db.audit(0, "crypto_expired", f"deposit={dep['id']}")
+        # H10: money was observed — never silently expire. Route to manual
+        # review so an admin can match the payment instead of the user being
+        # told it expired.
+        if dep["status"] == "claimed" or dep.get("txid") \
+                or dep.get("seen_amount_crypto"):
+            from handlers.common import notify_admins
+            await db.update_crypto_deposit(dep["id"], status="manual_review")
+            await notify_admins(
+                f"⚠️ <b>Deposit #{dep['id']}</b> ({dep['chain']}) expired with "
+                f"an observed payment (txid={str(dep.get('txid'))[:24]}). "
+                f"Manual review needed — do not refund automatically.",
+                min_bit=config.PERM_ORDERS)
+            await db.audit(0, "crypto_manual_review", f"deposit={dep['id']}")
+        else:
+            await db.update_crypto_deposit(dep["id"], status="expired")
+            await _notify_expired(dep)
+            await db.audit(0, "crypto_expired", f"deposit={dep['id']}")
         return
 
     chain = dep["chain"]
@@ -220,7 +258,12 @@ async def _process_deposit(dep, now):
     dust = cp.DUST_BASE_UNITS.get(chain, 0)
     material = [t for t in matches if _tx_amount(t) >= dust] or matches
     conf = min(int(t.get("confirmations", 0) or 0) for t in material)
-    if conf < needed:
+    # H11: authorize settlement on CONFIRMED value only. An unconfirmed
+    # top-up (RBF / double-spend risk) must not push the total over the
+    # tolerance line.
+    confirmed_total = sum(_tx_amount(t) for t in matches
+                          if int(t.get("confirmations", 0) or 0) >= needed)
+    if conf < needed or not cp.meets_tolerance(confirmed_total, expected):
         await db.update_crypto_deposit(dep["id"], confirmations=conf,
                                        seen_amount_crypto=str(total))
         return  # wait for more confirmations
