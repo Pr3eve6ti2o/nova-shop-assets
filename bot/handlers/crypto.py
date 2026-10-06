@@ -201,7 +201,8 @@ async def start_cryptobot_payment(query: types.CallbackQuery, state: FSMContext,
         try:
             await db.create_cryptobot_invoice(order_id=order_id, invoice_id=invoice_id,
                                               asset=inv.get("asset", "USDT"),
-                                              amount=str(inv.get("amount", "")))
+                                              amount=str(inv.get("amount", "")),
+                                              fee_pct=fee_pct)
         except Exception as e:
             logger.error("cryptobot db insert failed: %s", e)
             try:
@@ -277,7 +278,8 @@ async def start_topup_cryptobot(query: types.CallbackQuery, state: FSMContext,
                                           asset=inv.get("asset", "USDT"),
                                           amount=str(inv.get("amount", "")),
                                           purpose="topup",
-                                          topup_user_id=user["id"])
+                                          topup_user_id=user["id"],
+                                          fee_pct=fee_pct)
     except Exception as e:
         logger.warning("cryptobot topup createInvoice failed: %s", e)
         await state.finish()
@@ -379,7 +381,7 @@ async def cb_topup_cryptobot_check(query: types.CallbackQuery):
     # net <= gross * (100 - fee) / 100 < net + 1, hence the floor below
     # yields net precisely (no rounding ambiguity).
     gross_cents = int(round(float(inv["amount"]) * 100))
-    fee_pct = int(config.CRYPTOBOT_FEE_PERCENT)
+    fee_pct = int(inv["fee_pct"] if inv["fee_pct"] is not None else config.CRYPTOBOT_FEE_PERCENT)
     net_cents = (gross_cents * (100 - fee_pct)) // 100
 
     async def _finalize_and_show():

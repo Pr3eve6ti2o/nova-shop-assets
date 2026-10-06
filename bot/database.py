@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS cryptobot_invoices(
   id INTEGER PRIMARY KEY, order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
   invoice_id INTEGER UNIQUE NOT NULL, asset TEXT, amount TEXT,
   status TEXT DEFAULT 'active', created_at TEXT, purpose TEXT DEFAULT 'order',
-  topup_user_id INTEGER);
+  topup_user_id INTEGER,
+  fee_pct INTEGER);
 -- Performance indexes (Step 1b)
 CREATE INDEX IF NOT EXISTS idx_products_category_active ON products(category_id, is_active);
 CREATE INDEX IF NOT EXISTS idx_categories_active ON categories(is_active);
@@ -188,7 +189,12 @@ class Database:
             try:
                 await db.execute("ALTER TABLE cryptobot_invoices ADD COLUMN topup_user_id INTEGER")
             except Exception:
-                pass  # Column already exists or table doesn't exist yet
+                pass
+            # Migration: add fee_pct to cryptobot_invoices if missing
+            try:
+                await db.execute("ALTER TABLE cryptobot_invoices ADD COLUMN fee_pct INTEGER")
+            except Exception:
+                pass  # Column already exists or table doesn't exist yet  # Column already exists or table doesn't exist yet
             # Migration: add is_unlimited to products if missing (for older DBs)
             try:
                 await db.execute("ALTER TABLE products ADD COLUMN is_unlimited INTEGER DEFAULT 0")
@@ -1499,14 +1505,15 @@ class Database:
                                        invoice_id: int,
                                        asset: str, amount: str,
                                        purpose: str = "order",
-                                       topup_user_id: int = None) -> int:
+                                       topup_user_id: int = None,
+                                       fee_pct: int = None) -> int:
         async with self._db() as db:
             cur = await db.execute(
                 "INSERT INTO cryptobot_invoices(order_id, invoice_id, asset,"
-                " amount, status, created_at, purpose, topup_user_id)"
-                " VALUES (?, ?, ?, ?, 'active', ?, ?, ?)",
+                " amount, status, created_at, purpose, topup_user_id, fee_pct)"
+                " VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)",
                 (order_id, invoice_id, asset, amount, utcnow_iso(),
-                 purpose, topup_user_id),
+                 purpose, topup_user_id, fee_pct),
             )
             await db.commit()
             return cur.lastrowid
@@ -1552,15 +1559,64 @@ class Database:
     async def finalize_topup_payment(self, *, provider: str, external_id: str,
                                      user_id: int, amount_cents: int,
                                      currency: str) -> tuple:
-        """Idempotent balance credit for top-ups. Returns (ok, new_balance_cents, bonus_cents)."""
-        is_new = await self.record_payment(
-            provider=provider, external_id=str(external_id),
-            user_id=user_id, order_id=None, amount_cents=amount_cents,
-            currency=currency, status="paid")
-        if not is_new:
-            bal = await self.get_balance(user_id)
-            return (True, bal, 0)
+        """Idempotent balance credit for top-ups. Returns (ok, new_balance_cents, bonus_cents).
+
+        Atomic: the payment row and the balance credit commit in ONE transaction,
+        so a crash can never leave payment-paid-but-uncredited. Retries are safe:
+        a duplicate call either finds the credit already present or heals a row
+        left broken by the old non-atomic code.
+        """
         import config as cfg
         bonus = int(amount_cents) * cfg.DEPOSIT_BONUS_PERCENT // 100
-        new_bal = await self.add_balance(user_id, int(amount_cents), tx_type="topup")
+        total = int(amount_cents) + bonus
+        ext = str(external_id)
+        async with self._claim_lock:
+            async with self._db() as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    try:
+                        await db.execute(
+                            "INSERT INTO payments(provider, external_id, user_id, order_id,"
+                            " amount_cents, currency, status, created_at)"
+                            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (provider, ext, user_id, None, amount_cents,
+                             currency, "paid", utcnow_iso()))
+                        inserted = True
+                    except aiosqlite.IntegrityError:
+                        inserted = False
+                    need_credit = inserted
+                    if not need_credit:
+                        # Retry path: heal rows broken by the old non-atomic code
+                        # (payment recorded, credit never happened).
+                        # datetime() normalizes the two created_at formats in play:
+                        # utcnow_iso() ("...+00:00") vs datetime('now') (" " sep).
+                        async with db.execute(
+                            "SELECT id FROM balance_transactions"
+                            " WHERE user_id=? AND type='topup' AND amount_cents=?"
+                            " AND datetime(created_at) >= datetime((SELECT created_at"
+                            " FROM payments WHERE provider=? AND external_id=?))",
+                            (user_id, total, provider, ext)) as cur:
+                            need_credit = (await cur.fetchone()) is None
+                    if need_credit:
+                        await db.execute(
+                            "UPDATE users SET balance_cents = balance_cents + ? WHERE id=?",
+                            (total, user_id))
+                        async with db.execute(
+                            "SELECT balance_cents FROM users WHERE id=?",
+                            (user_id,)) as cur:
+                            new_bal = (await cur.fetchone())["balance_cents"]
+                        await db.execute(
+                            "INSERT INTO balance_transactions"
+                            "(user_id, type, amount_cents, balance_after_cents, order_id, created_at)"
+                            " VALUES (?, ?, ?, ?, ?, ?)",
+                            (user_id, "topup", total, new_bal, None, utcnow_iso()))
+                    else:
+                        async with db.execute(
+                            "SELECT balance_cents FROM users WHERE id=?",
+                            (user_id,)) as cur:
+                            new_bal = (await cur.fetchone())["balance_cents"]
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    raise
         return (True, new_bal, bonus)

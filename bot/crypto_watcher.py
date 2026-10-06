@@ -395,14 +395,6 @@ async def _sweep_cryptobot():
     """Recovery poller: finalize newly-paid CryptoBot invoices (idempotent)."""
     if not config.CRYPTOBOT_TOKEN:
         return
-    # M5: expire stale invoices server-side so the poll list stays bounded
-    # and dead invoices can't finalize.
-    try:
-        n_exp = await db.expire_stale_cryptobot_invoices()
-        if n_exp:
-            logger.info("expired %d stale cryptobot invoices", n_exp)
-    except Exception as e:
-        logger.warning("cryptobot expiry error: %s", e)
     try:
         invoices = await db.active_cryptobot_invoices()
         if not invoices:
@@ -437,6 +429,15 @@ async def _sweep_cryptobot():
                             inv["invoice_id"])
     except Exception as e:
         logger.warning("cryptobot recovery sweep error: %s", e)
+    # M5: expire stale invoices server-side so the poll list stays bounded
+    # and dead invoices can't finalize. Runs AFTER the paid-poll above so a
+    # paid-but-not-yet-polled invoice is never expired before being credited.
+    try:
+        n_exp = await db.expire_stale_cryptobot_invoices()
+        if n_exp:
+            logger.info("expired %d stale cryptobot invoices", n_exp)
+    except Exception as e:
+        logger.warning("cryptobot expiry error: %s", e)
 
 
 async def _sweep_tonconnect_pending():

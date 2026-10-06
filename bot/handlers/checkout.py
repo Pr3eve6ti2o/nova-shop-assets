@@ -687,6 +687,15 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
                 amount_cents=t["total"], currency=config.CURRENCY, status="paid")
             await db.audit(user["tg_id"], "balance_purchase",
                            f"order={oid} total={t['total']} new_bal={new_bal}")
+        else:
+            # H17: fulfillment failed after deduction — refund and leave a ledger trail
+            await db.add_balance(user["id"], t["total"], tx_type="refund", order_id=oid)
+            await db.record_payment(
+                provider="balance", external_id=f"bal_{oid}_{user['id']}",
+                user_id=user["id"], order_id=oid,
+                amount_cents=t["total"], currency=config.CURRENCY, status="refunded")
+            await db.audit(user["tg_id"], "balance_refund_fulfill_fail",
+                           f"order={oid} total={t['total']} note={note}")
         await state.finish()
         values_block = ""
         for it in await db.get_order_items(oid):
@@ -709,10 +718,20 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
         return
 
     # Direct crypto: fresh address per order, watcher detects the deposit.
-    if method.startswith("direct_"):
+    # (Stablecoin methods like usdt_base are direct-crypto too — they just
+    # don't carry the direct_ prefix.)
+    if method.startswith("direct_") or method in (
+            "usdt_base", "usdc_base", "usdt_op", "usdc_op",
+            "usdt_polygon", "usdc_polygon"):
         from .crypto import start_direct_deposit
-        await start_direct_deposit(query, state, user, oid, t["total"],
-                                   method.split("_", 1)[1])
+        chain = method.split("_", 1)[1] if method.startswith("direct_") else method
+        await start_direct_deposit(query, state, user, oid, t["total"], chain)
+        return
+
+    # Unknown method: fail loudly instead of silently sending a card invoice.
+    if method not in ("card", "stars"):
+        logger.error("unknown payment method %r for order %s", method, oid)
+        await query.answer(texts.MSG_CRYPTO_PROVIDER_DOWN, show_alert=True)
         return
 
     # Card / Stars: send invoice, fulfillment happens on successful_payment.
