@@ -1,4 +1,4 @@
-"""Info and Rent: about the bot/team, and feature rental plans."""
+"""Info: about the bot/team."""
 from aiogram import types
 from aiogram.dispatcher import FSMContext
 
@@ -16,12 +16,6 @@ async def nav_info(message: types.Message, state: FSMContext):
         disable_web_page_preview=True,
     )
 
-
-@dp.message_handler(text=texts.BTN_RENT)
-async def nav_rent(message: types.Message, state: FSMContext):
-    await state.finish()
-    await message.answer(
-        texts.MSG_RENT,
-        reply_markup=kb.rent_kb(),
-        disable_web_page_preview=True,
-    )
+# Note: the Rent button (texts.BTN_RENT) is owned by bot/handlers/rent.py,
+# which renders live plans from the control plane. (The old static rent
+# page was removed to avoid two handlers racing on the same button.)

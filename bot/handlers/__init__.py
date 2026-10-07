@@ -13,7 +13,9 @@ from . import crypto  # noqa: F401  (cryptobot + direct deposits + admin panel)
 from . import miniapp  # noqa: F401  (WebApp sendData bridge)
 from . import shop  # noqa: F401  (SearchFlow states, catalog)
 from . import balance  # noqa: F401  (Balance: /balance, top-up)
-from . import info  # noqa: F401  (Info and Rent pages)
+from . import info  # noqa: F401  (Info page)
+from . import rent  # noqa: F401  (Rent flow: plans via control plane)
+from . import rent_token  # noqa: F401  (Token onboarding: connect merchant's own bot + express setup)
 from . import support  # noqa: F401  (SupportFlow / AdminReplyFlow states)
 from . import orders  # noqa: F401
 from . import profile  # noqa: F401

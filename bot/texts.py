@@ -850,3 +850,33 @@ MSG_ADMIN_PAID_AFTER_CANCEL = (
 # Labels for the payment-method buttons built in crypto_payments.payment_rails().
 # 💎 is reserved for CryptoBot per the emoji lexicon (TON uses 🔷).
 BTN_CRYPTOBOT_RAIL = "\U0001f48e CryptoBot \u2014 {total} (+{fee_pct}% fee)"
+
+
+# --- Rent flow (control-plane plans + token onboarding) ---
+# --- Rent flow ---
+MSG_RENT_PLANS = ("\U0001f4e6 <b>Rent a Nova Bot</b>\n\n"
+                  "Your own shop bot, powered by Nova. One plan, two ways to pay.\n\n"
+                  "<b>Plans</b>\n"
+                  "{plans}")
+MSG_RENT_PLAN_LINE = "\u2022 <b>{name}</b> \u2014 {price}{per}{trial}"
+MSG_RENT_DETAIL = ("<b>{name}</b>\n\n"
+                   "Price: {price}{per}\n"
+                   "Billing period: {period}{trial}")
+MSG_RENT_CONFIRM = ("<b>Confirm rental</b>\n\n"
+                    "Plan: <b>{name}</b>\n"
+                    "Price: {price}{per}\n"
+                    "Pay with: {method}")
+MSG_RENT_TRIAL_ACTIVE = "\u2705 Trial active until {date}. Enjoy your bot."
+MSG_RENT_CHARGED = "\u2705 Charged {amount} from your balance. Your rental is active."
+MSG_RENT_INVOICE = "Invoice created \u2014 complete the payment to activate your rental."
+MSG_RENT_LINK_NEEDED = "Please link your Telegram account on the website first, then come back here."
+MSG_RENT_UNAVAILABLE = "Rentals are temporarily unavailable. Please try again later."
+MSG_RENT_NONE = "You have no active rental yet. Pick a plan to get started."
+MSG_RENT_MINE = ("<b>{plan}</b>\n"
+                 "Status: {status}\n"
+                 "Renews: {until}")
+BTN_RENT_MINE = "\U0001f4cb My Rental"
+BTN_RENT_PAY = "Pay invoice"
+BTN_RENT_CONFIRM = "\u2705 Confirm"
+BTN_RENT_BALANCE = "Balance"
+BTN_RENT_CRYPTOBOT = "\U0001f48e CryptoBot"

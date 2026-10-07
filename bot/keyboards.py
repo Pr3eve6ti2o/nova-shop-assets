@@ -736,3 +736,47 @@ def crypto_chains_kb(chain_states):
             callback_data=cb("cryc", cid)))
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="cry:panel"))
     return kb
+
+
+# --- Rent flow (control-plane plans) ---
+def rent_plans_kb(plan_labels):
+    kb = InlineKeyboardMarkup()
+    for pid, label in plan_labels:
+        kb.add(InlineKeyboardButton(label, callback_data=f"rent:plan:{pid}"))
+    kb.add(InlineKeyboardButton(texts.BTN_RENT_MINE, callback_data="rent:mine"))
+    kb.row(BTN_MENU)
+    return kb
+
+
+def rent_plan_detail_kb(plan_id):
+    kb = InlineKeyboardMarkup()
+    kb.row(
+        InlineKeyboardButton(texts.BTN_RENT_BALANCE, callback_data=f"rent:method:{plan_id}:balance"),
+        InlineKeyboardButton(texts.BTN_RENT_CRYPTOBOT, callback_data=f"rent:method:{plan_id}:cryptobot"),
+    )
+    kb.add(InlineKeyboardButton(texts.BTN_BACK, callback_data="rent:back"))
+    kb.row(BTN_MENU)
+    return kb
+
+
+def rent_confirm_kb(plan_id, provider):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(texts.BTN_RENT_CONFIRM, callback_data=f"rent:confirm:{plan_id}:{provider}"))
+    kb.add(InlineKeyboardButton(texts.BTN_BACK, callback_data="rent:back"))
+    kb.row(BTN_MENU)
+    return kb
+
+
+def rent_back_kb():
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(texts.BTN_BACK, callback_data="rent:back"))
+    kb.row(BTN_MENU)
+    return kb
+
+
+def rent_pay_kb(pay_url):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(texts.BTN_RENT_PAY, url=pay_url))
+    kb.add(InlineKeyboardButton(texts.BTN_BACK, callback_data="rent:back"))
+    kb.row(BTN_MENU)
+    return kb

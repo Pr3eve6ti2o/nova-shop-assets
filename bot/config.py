@@ -144,3 +144,15 @@ PERM_NAMES = {
 
 # Deposit bonus: 5% extra on every top-up
 DEPOSIT_BONUS_PERCENT = 5
+
+# --- Nova control plane (rent flow) ---
+NOVA_API_URL = (os.getenv("NOVA_API_URL", "http://localhost:3002") or "http://localhost:3002").rstrip("/")
+NOVA_API_KEY = os.getenv("NOVA_API_KEY") or None
+RENTAL_TOKEN_ONBOARDING = os.getenv("RENTAL_TOKEN_ONBOARDING", "1") == "1"
+
+# --- Managed bots (Telegram Bot API 9.6) express setup — pilot-gated ---
+# Both must be set for the "Express setup" button to appear. Defaults keep
+# the paste-token UI unchanged until the pilot backend lands
+# (manager bot, provisioning_mode, vault rotation).
+MANAGED_ONBOARDING_ENABLED = os.getenv("MANAGED_ONBOARDING_ENABLED", "0") == "1"
+MANAGER_BOT_USERNAME = (os.getenv("MANAGER_BOT_USERNAME", "") or "").strip().lstrip("@")
