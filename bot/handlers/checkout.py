@@ -110,6 +110,54 @@ def _details_prompt(kind, phone, address) -> str:
     return "Please share " + " and ".join(need) + "."
 
 
+async def _clear_details_prompt(chat_id: int, mid):
+    """Delete the reply-keyboard prompt message if present."""
+    if not mid:
+        return
+    try:
+        await bot.delete_message(chat_id, mid)
+    except Exception:
+        pass
+
+
+async def _refresh_details(chat_id: int, state: FSMContext, user: dict):
+    """Re-render the details screen after an update.
+
+    Currently a no-op: the details step is disabled (digital-only bot,
+    details_skipped=True), kept so the dead handlers don't NameError.
+    """
+    return
+
+
+async def render_details(target, state: FSMContext, user: dict):
+    """Render the delivery-details step.
+
+    Currently unreachable in the live flow (details_skipped=True), but the
+    back/edit handlers reference it — it must exist and not crash.
+    Renders in place without changing FSM state.
+    """
+    data = await state.get_data()
+    kind, phone, address, phone_saved, address_saved = _details_snapshot(data, user)
+    text = _details_text(kind, phone, address, phone_saved, address_saved)
+    prompt = _details_prompt(kind, phone, address)
+    rows = []
+    if kind == "delivery":
+        rows.append([types.InlineKeyboardButton("🏠 Pickup", callback_data="cod:pickup")])
+    else:
+        rows.append([types.InlineKeyboardButton("🚚 Delivery", callback_data="cod:delivery")])
+    rows.append([types.InlineKeyboardButton("📞 Share phone", callback_data="cod:phone")])
+    if kind == "delivery":
+        rows.append([types.InlineKeyboardButton("📍 Share address", callback_data="cod:addr")])
+    rows.append([types.InlineKeyboardButton("✅ Continue", callback_data="cod:continue")])
+    rows.append([types.InlineKeyboardButton(texts.BTN_BACK, callback_data="co4")])
+    markup = types.InlineKeyboardMarkup(inline_keyboard=rows)
+    full_text = f"{text}\n\n{prompt}"
+    if isinstance(target, types.CallbackQuery):
+        await edit_text_safe(target, full_text, markup)
+    else:
+        await target.answer(full_text, reply_markup=markup, parse_mode="HTML")
+
+
 @dp.callback_query_handler(text="co", state="*")
 async def start_checkout(query: types.CallbackQuery, state: FSMContext):
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
@@ -119,7 +167,7 @@ async def start_checkout(query: types.CallbackQuery, state: FSMContext):
         return
     for it in t["items"]:
         p = await db.get_product(it["product_id"])
-        if not product_available(p, it["qty"]):
+        if not await product_available(p, it["qty"]):
             await query.answer(texts.ERR_OUT_OF_STOCK, show_alert=True)
             return
     # Digital-only bot: delivery details removed from checkout flow.
@@ -525,6 +573,17 @@ async def cb_place_order(query: types.CallbackQuery, state: FSMContext):
         lock.release()
 
 
+# Stateless fallback for the confirm button.  After a restart MemoryStorage
+# loses all FSM state, so the state-gated handler above never matches and the
+# button appears dead.  This handler is registered *after* the state-gated one,
+# so the normal path still wins; it simply answers and restarts checkout.
+@dp.callback_query_handler(text="cok", state="*")
+async def cb_place_order_stale(query: types.CallbackQuery, state: FSMContext):
+    # NOTE: no query.answer() here — start_checkout answers on every path
+    # (alert on empty cart, bare answer before rendering payment).
+    await start_checkout(query, state)
+
+
 async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict):
     data = await state.get_data()
     kind = data.get("delivery_kind") or "delivery"
@@ -544,7 +603,7 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
         return
     for it in t["items"]:
         p = await db.get_product(it["product_id"])
-        if not product_available(p, it["qty"]):
+        if not await product_available(p, it["qty"]):
             await query.answer(texts.ERR_OUT_OF_STOCK, show_alert=True)
             return
     oid = await db.create_order(
@@ -663,6 +722,7 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
         new_bal = await db.deduct_balance(user["id"], t["total"], order_id=oid)
         if new_bal is None:
             await db.set_order_status(oid, "cancelled")
+            await db.release_order_promo(oid)  # don't burn promo on failed balance
             await query.answer(texts.MSG_BALANCE_INSUFFICIENT, show_alert=True)
             await render_confirm(query, state, user["id"])
             return
@@ -675,6 +735,15 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
                 amount_cents=t["total"], currency=config.CURRENCY, status="paid")
             await db.audit(user["tg_id"], "balance_purchase",
                            f"order={oid} total={t['total']} new_bal={new_bal}")
+        else:
+            # H17: fulfillment failed after deduction — refund and leave a ledger trail
+            await db.add_balance(user["id"], t["total"], tx_type="refund", order_id=oid)
+            await db.record_payment(
+                provider="balance", external_id=f"bal_{oid}_{user['id']}",
+                user_id=user["id"], order_id=oid,
+                amount_cents=t["total"], currency=config.CURRENCY, status="refunded")
+            await db.audit(user["tg_id"], "balance_refund_fulfill_fail",
+                           f"order={oid} total={t['total']} note={note}")
         await state.finish()
         values_block = ""
         for it in await db.get_order_items(oid):
@@ -697,10 +766,20 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
         return
 
     # Direct crypto: fresh address per order, watcher detects the deposit.
-    if method.startswith("direct_"):
+    # (Stablecoin methods like usdt_base are direct-crypto too — they just
+    # don't carry the direct_ prefix.)
+    if method.startswith("direct_") or method in (
+            "usdt_base", "usdc_base", "usdt_op", "usdc_op",
+            "usdt_polygon", "usdc_polygon"):
         from .crypto import start_direct_deposit
-        await start_direct_deposit(query, state, user, oid, t["total"],
-                                   method.split("_", 1)[1])
+        chain = method.split("_", 1)[1] if method.startswith("direct_") else method
+        await start_direct_deposit(query, state, user, oid, t["total"], chain)
+        return
+
+    # Unknown method: fail loudly instead of silently sending a card invoice.
+    if method not in ("card", "stars"):
+        logger.error("unknown payment method %r for order %s", method, oid)
+        await query.answer(texts.MSG_CRYPTO_PROVIDER_DOWN, show_alert=True)
         return
 
     # Card / Stars: send invoice, fulfillment happens on successful_payment.

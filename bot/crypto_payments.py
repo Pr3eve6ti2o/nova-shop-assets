@@ -38,7 +38,7 @@ CHAINS = {
         "name": "USDT (ERC-20)", "symbol": "USDT", "decimals": 6,
         "confirmations": 12, "button": "\u039e USDT (ERC-20)",
         "xpub_env": "XPUB_ETH", "hd": ("bip44", 60),
-        "token_contract": "0xdAC17F958D2e523a2206206994597C13D831ec7",
+        "token_contract": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
     },
     "trx": {
         "name": "USDT (TRC-20)", "symbol": "USDT", "decimals": 6,
@@ -440,8 +440,20 @@ async def get_rates(force: bool = False) -> dict:
             logger.info("rates served: %s",
                         {c: served_by.get(c, "?") for c in sorted(rates)})
         else:
-            logger.info("rates partial (not cached): %s",
-                        {c: served_by.get(c, "?") for c in sorted(rates)})
+            # H7: fill the gaps from usable stale cache entries (age < 30m)
+            # so a partially-failed fetch doesn't drop a chain entirely.
+            # The stale entries keep their original age: the merged result is
+            # NOT re-cached, so they expire on their own schedule.
+            age = now - _rates_cache["ts"]
+            if _rates_cache["rates"] and age < _RATES_STALE_MAX:
+                for c in COINGECKO_IDS:
+                    if c not in rates and c in _rates_cache["rates"]:
+                        rates[c] = _rates_cache["rates"][c]
+                logger.info("rates partial+stale (not cached): %s",
+                            {c: served_by.get(c, "stale") for c in sorted(rates)})
+            else:
+                logger.info("rates partial (not cached): %s",
+                            {c: served_by.get(c, "?") for c in sorted(rates)})
         return rates
 
     age = now - _rates_cache["ts"]
@@ -537,25 +549,33 @@ async def _get_json(url: str, params: dict = None, timeout: int = 20):
             return await r.json()
 
 
+async def _get_text(url: str, params: dict = None, timeout: int = 20):
+    async with aiohttp.ClientSession() as s:
+        async with s.get(url, params=params, proxy=_proxy(),
+                         timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+            r.raise_for_status()
+            return await r.text()
+
+
 async def fetch_btc_txs(address: str) -> tuple:
     """Return (txs, tip_height). tx: {txid, to, sats, confirmations}."""
     try:
         txs = []
         after = None
         while True:
-            params = {"after_txid": after} if after else None
-            page = await _get_json(
-                f"https://mempool.space/api/address/{address}/txs",
-                params=params)
+            url = f"https://mempool.space/api/address/{address}/txs"
+            if after:
+                url += f"/chain/{after}"
+            page = await _get_json(url)
             if not page:
                 break
             txs.extend(page)
-            if len(page) < 50:
+            if sum(1 for tx in page if (tx.get("status") or {}).get("confirmed")) < 25:
                 break
             after = page[-1].get("txid")
             if not after:
                 break
-        tip = await _get_json("https://mempool.space/api/blocks/tip/height")
+        tip = int((await _get_text("https://mempool.space/api/blocks/tip/height")).strip())
     except Exception as e:
         logger.warning("mempool.space failed (%s), trying blockchain.info", e)
         try:
@@ -735,7 +755,7 @@ async def fetch_ton_txs(address: str) -> list:
                 base = int(str(in_msg.get("value", "0")))
             except (TypeError, ValueError):
                 continue
-            memo = _decode_ton_comment(in_msg.get("message"))
+            memo = str(in_msg.get("message") or "").strip().strip("\x00")
             txid = tx.get("transaction_id", {}) or {}
             tx_key = f"{txid.get('hash', '')}:{txid.get('lt', '')}"
             if tx_key in seen:
@@ -762,23 +782,6 @@ async def fetch_ton_txs(address: str) -> list:
         await asyncio.sleep(1)
     await asyncio.sleep(1)
     return out
-
-
-def _decode_ton_comment(message) -> str:
-    """Decode a toncenter text-comment body to str. Best effort."""
-    if not message:
-        return ""
-    try:
-        raw = base64.b64decode(message)
-    except Exception:
-        return ""
-    # Text comments: 4 zero bytes (op=0) + UTF-8 payload.
-    if raw[:4] == b"\x00\x00\x00\x00":
-        raw = raw[4:]
-    try:
-        return raw.decode("utf-8", errors="strict").strip().strip("\x00")
-    except Exception:
-        return ""
 
 
 # ---------------------------------------------------------------- matching ---

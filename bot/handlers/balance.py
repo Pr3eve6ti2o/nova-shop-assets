@@ -80,6 +80,8 @@ def _parse_usd_to_cents(raw: str) -> int | None:
         d = Decimal(s)
     except InvalidOperation:
         return None
+    if not d.is_finite():
+        return None
     if d <= 0:
         return None
     return int((d * 100).to_integral_value(rounding=ROUND_HALF_UP))

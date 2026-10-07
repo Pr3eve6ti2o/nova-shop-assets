@@ -26,11 +26,14 @@ logger = logging.getLogger(__name__)
 MAX_ITEMS = 50
 
 
-async def find_tonconnect_tx(merchant: str, sender: str, amount_nano: int):
+async def find_tonconnect_tx(merchant: str, sender: str, amount_nano: int,
+                             claim_code: str = None):
     """Find a matching TON tx: from sender, >= amount, within 15 min.
 
-    Shared by the fast path (handle_tonconnect_paid) and the slow path
-    (crypto watcher sweep of tonconnect_pending). Returns the tx dict or None.
+    When claim_code is given, the tx memo must equal it exactly (C3 wallet-
+    ownership binding). Shared by the fast path (handle_tonconnect_paid) and
+    the slow path (crypto watcher sweep of tonconnect_pending). Returns the
+    tx dict or None.
     """
     import time
     import crypto_payments as cp
@@ -56,11 +59,16 @@ async def find_tonconnect_tx(merchant: str, sender: str, amount_nano: int):
         existing = await db.get_payment_by_external_id("tonconnect", txid)
         if existing:
             continue
+        # C3: claim-code binding. The tx memo must equal the claimant's
+        # per-user code — only the wallet owner could have put it there.
+        # Fail closed: no match, no attribution.
+        if claim_code and str(tx.get("memo") or "") != claim_code:
+            continue
         return tx
     return None
 
 
-async def create_tonconnect_order(user: dict, sender: str, amount_nano: int,
+async def create_tonconnect_order(user: dict, sender: str,
                                   clean: list, promo_code: str, matched: dict):
     """Create + fulfill a TON Connect order. Returns (order_id, ok).
 
@@ -98,7 +106,14 @@ async def create_tonconnect_order(user: dict, sender: str, amount_nano: int,
         # Fail closed: cannot verify amount without a rate.
         return None, False
     expected_nano = math.ceil(total / 100 / ton_usd * 1e9)
-    if matched.get("base", 0) < expected_nano * 0.98:
+    # C4: require the FULL amount — no tolerance for underpayment.
+    if matched.get("base", 0) < expected_nano:
+        return None, False
+    # C3: defense in depth — re-verify the claim-code memo binding here too.
+    claim_code = await db.tonconnect_claim_code(user["id"])
+    if str(matched.get("memo") or "") != claim_code:
+        logger.warning("tonconnect memo mismatch: txid=%s user=%s",
+                       matched.get("txid"), user["id"])
         return None, False
     order_id = await db.create_order(
         user_id=user["id"], subtotal_cents=subtotal, discount_cents=discount_cents,
@@ -294,7 +309,7 @@ async def webapp_data(message: types.Message, state: FSMContext):
         return
     for it in t["items"]:
         p = await db.get_product(it["product_id"])
-        if not product_available(p, it["qty"]):
+        if not await product_available(p, it["qty"]):
             await message.answer(texts.ERR_OUT_OF_STOCK,
                                  reply_markup=await main_reply_kb(message.from_user.id))
             return
@@ -324,14 +339,9 @@ async def handle_tonconnect_paid(message: types.Message, user: dict,
     import time
 
     sender = str(payload.get("sender") or "")
-    try:
-        amount_nano = int(str(payload.get("amount_nano") or "0"))
-    except (TypeError, ValueError):
-        amount_nano = 0
-    # C1: promo_code was referenced but never assigned in this function.
     promo_code = str(payload.get("promo") or "").strip().upper()[:32] or None
     items = payload.get("items")
-    if not sender or amount_nano <= 0 or not isinstance(items, list) or not items:
+    if not sender or not isinstance(items, list) or not items:
         await message.answer(texts.MSG_MINIAPP_BAD_PAYLOAD,
                              reply_markup=await main_reply_kb(message.from_user.id))
         return
@@ -360,13 +370,32 @@ async def handle_tonconnect_paid(message: types.Message, user: dict,
                              reply_markup=await main_reply_kb(message.from_user.id))
         return
 
+    # Server-side expected amount: recompute from validated items + promo.
+    # Never trust the client's amount_nano (the Mini App doesn't send one).
+    subtotal = sum(it["qty"] * it["price"] for it in clean)
+    if promo_code:
+        ok_promo, _, promo_discount, _ = await db.validate_promo(
+            promo_code, user["id"], subtotal)
+        if ok_promo:
+            subtotal -= promo_discount
+        else:
+            promo_code = None
+    ton_usd = (await cp.get_rates()).get("ton")
+    if not ton_usd or ton_usd <= 0:
+        await message.answer("TON rate unavailable — please try again in a minute.",
+                             reply_markup=await main_reply_kb(message.from_user.id))
+        return
+    expected_nano = math.ceil(subtotal / 100 / ton_usd * 1e9)
+    # C3: per-user claim code; the on-chain tx memo must equal it.
+    claim_code = await db.tonconnect_claim_code(user["id"])
+
     # Verify the TON transaction via toncenter.
     merchant = config.TON_DEPOSIT_ADDRESS
     if not merchant:
         await message.answer("TON payments are not configured yet.",
                              reply_markup=await main_reply_kb(message.from_user.id))
         return
-    matched = await find_tonconnect_tx(merchant, sender, amount_nano)
+    matched = await find_tonconnect_tx(merchant, sender, expected_nano, claim_code)
     if not matched:
         # Not found yet — the tx may still be propagating. Tell the user
         # we're watching; the 60s crypto watcher will finalize when seen.
@@ -375,10 +404,10 @@ async def handle_tonconnect_paid(message: types.Message, user: dict,
             "under a minute. You'll get your order confirmation here automatically.",
             reply_markup=await main_reply_kb(message.from_user.id))
         # Store as a pending TON Connect deposit for the watcher to pick up.
-        await db.tonconnect_pending_add(user["id"], sender, amount_nano,
-                                        clean, payload.get("promo", ""))
+        await db.tonconnect_pending_add(user["id"], sender, expected_nano,
+                                        clean, promo_code, claim_code)
         await db.audit(user["tg_id"], "tonconnect_pending",
-                       f"sender={sender[:12]}… amount={amount_nano}")
+                       f"sender={sender[:12]}… amount={expected_nano}")
         return
 
     # Matched! Create + fulfill via the shared helper (audit C2/C3).
@@ -395,7 +424,7 @@ async def handle_tonconnect_paid(message: types.Message, user: dict,
         return
 
     order_id, ok = await create_tonconnect_order(
-        user, sender, amount_nano, clean, promo_code, matched)
+        user, sender, clean, promo_code, matched)
     if order_id is None:
         await message.answer(
             "⚠️ Payment amount did not cover the order total. Please contact support.",

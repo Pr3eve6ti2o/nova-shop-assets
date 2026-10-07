@@ -47,6 +47,63 @@ async def pre_checkout(query: types.PreCheckoutQuery):
             query.id, ok=False, error_message=texts.MSG_PRECHECKOUT_FAIL)
 
 
+async def _settle_paid_order(*, oid, order, user, provider, charge_id, message,
+                             audit_amount):
+    """H9: shared confirmation tail after a successful fulfill_order.
+
+    Used by the normal payment path AND the duplicate-recovery path so a
+    recovered fulfillment settles fully: order -> confirmed, payment ->
+    paid, promo accounting, referral credit, and the customer receipt.
+    """
+    await db.set_order_status(oid, "confirmed")
+    await db.update_payment_status(provider, charge_id, "paid")
+
+    if order["promo_code"]:
+        try:
+            promo = await db.get_promo(order["promo_code"])
+            if promo:
+                await db.record_promo_usage(promo["id"], user["id"])
+        except Exception as e:
+            logger.error("failed to record promo usage for order %s: %s", oid, e)
+
+    await db.audit(user["tg_id"], "payment_success",
+                   f"order={oid} provider={provider} amount={audit_amount}")
+    try:
+        await maybe_credit_referral(await db.get_order(oid))
+    except Exception as e:
+        logger.error("referral credit failed for order %s: %s", oid, e)
+        await notify_admins(
+            f"Referral credit failed for order {oid}: {e}",
+            min_bit=config.PERM_ORDERS)
+
+    # Receipt (new message).
+    items = await db.get_order_items(oid)
+    lines = render_lines([{"name": i["name"], "qty": i["qty"],
+                           "price_cents": i["price_cents"]} for i in items])
+    method = texts.PAY_METHOD_LABEL.get(provider, provider)
+    values_block = ""
+    dvals = [(i["name"], i["qty"], i["delivered_value"]) for i in items
+             if i["delivered_value"]]
+    if dvals:
+        values_block = texts.MSG_FULFILL_DIGITAL.format(values="\n".join(
+            texts.MSG_FULFILL_VALUE_LINE.format(name=n, qty=q,
+                                                code=f"<code>{v}</code>")
+            for n, q, v in dvals))
+    else:
+        values_block = texts.MSG_FULFILL_PHYSICAL
+    t = {"subtotal": order["subtotal_cents"], "discount": order["discount_cents"],
+         "promo_code": order["promo_code"],
+         "delivery_fee": order["total_cents"] - order["subtotal_cents"]
+                        + order["discount_cents"],
+         "total": order["total_cents"]}
+    await message.answer(
+        texts.MSG_PAY_OK.format(oid=oid, fulfillment=values_block) + "\n\n" +
+        totals_text(t) + f"\n\n{render_roadmap('confirmed')}",
+        reply_markup=kb.order_success_kb(
+            oid, bot_username=(await bot.get_me()).username),
+        disable_web_page_preview=True)
+
+
 @dp.message_handler(content_types=types.ContentType.SUCCESSFUL_PAYMENT, state="*")
 async def payment_success(message: types.Message, state: FSMContext):
     await state.finish()
@@ -99,6 +156,13 @@ async def payment_success(message: types.Message, state: FSMContext):
                     await notify_admins(
                         f"Recovery fulfillment failed for order {oid}: {note}",
                         min_bit=config.PERM_ORDERS)
+                else:
+                    # H9: the recovery fulfilled the goods — complete the
+                    # settlement (confirm, mark paid, promo/referral, receipt).
+                    await _settle_paid_order(
+                        oid=oid, order=order, user=user, provider=provider,
+                        charge_id=charge_id, message=message,
+                        audit_amount=sp.total_amount)
         elif order and order["status"] == "processing":
             logger.warning("payment %s recorded but order %s stuck in processing",
                            sp.telegram_payment_charge_id, oid)
@@ -140,50 +204,6 @@ async def payment_success(message: types.Message, state: FSMContext):
             min_bit=config.PERM_ORDERS)
         await message.answer(texts.MSG_PAY_PENDING)
         return
-    await db.set_order_status(oid, "confirmed")
-    await db.update_payment_status(provider, charge_id, "paid")
-
-    if order["promo_code"]:
-        try:
-            promo = await db.get_promo(order["promo_code"])
-            if promo:
-                await db.record_promo_usage(promo["id"], user["id"])
-        except Exception as e:
-            logger.error("failed to record promo usage for order %s: %s", oid, e)
-
-    await db.audit(user["tg_id"], "payment_success",
-                   f"order={oid} provider={provider} amount={sp.total_amount}")
-    try:
-        await maybe_credit_referral(await db.get_order(oid))
-    except Exception as e:
-        logger.error("referral credit failed for order %s: %s", oid, e)
-        await notify_admins(
-            f"Referral credit failed for order {oid}: {e}",
-            min_bit=config.PERM_ORDERS)
-
-    # Receipt (new message).
-    items = await db.get_order_items(oid)
-    lines = render_lines([{"name": i["name"], "qty": i["qty"],
-                           "price_cents": i["price_cents"]} for i in items])
-    method = texts.PAY_METHOD_LABEL.get(provider, provider)
-    values_block = ""
-    dvals = [(i["name"], i["qty"], i["delivered_value"]) for i in items
-             if i["delivered_value"]]
-    if dvals:
-        values_block = texts.MSG_FULFILL_DIGITAL.format(values="\n".join(
-            texts.MSG_FULFILL_VALUE_LINE.format(name=n, qty=q,
-                                                code=f"<code>{v}</code>")
-            for n, q, v in dvals))
-    else:
-        values_block = texts.MSG_FULFILL_PHYSICAL
-    t = {"subtotal": order["subtotal_cents"], "discount": order["discount_cents"],
-         "promo_code": order["promo_code"],
-         "delivery_fee": order["total_cents"] - order["subtotal_cents"]
-                        + order["discount_cents"],
-         "total": order["total_cents"]}
-    await message.answer(
-        texts.MSG_PAY_OK.format(oid=oid, fulfillment=values_block) + "\n\n" +
-        totals_text(t) + f"\n\n{render_roadmap('confirmed')}",
-        reply_markup=kb.order_success_kb(
-            oid, bot_username=(await bot.get_me()).username),
-        disable_web_page_preview=True)
+    await _settle_paid_order(oid=oid, order=order, user=user, provider=provider,
+                             charge_id=charge_id, message=message,
+                             audit_amount=sp.total_amount)

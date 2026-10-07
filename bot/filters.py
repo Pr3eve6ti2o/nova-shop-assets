@@ -22,5 +22,7 @@ class IsAdmin(BoundFilter):
         user = await db.get_user_by_tg(tg_id)
         if not user:
             return False
+        if user["is_blocked"]:
+            return False
         mask = user["role_mask"] or 0
         return bool(mask & self.bit)

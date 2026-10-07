@@ -274,7 +274,24 @@ async def pw_values(message: types.Message, state: FSMContext):
             await message.answer(texts.ERR_INVALID_QTY)
             return
     await state.update_data(pw_stock=-1, pw_values=values)
+    data_kind = (await state.get_data()).get("pw_kind")
+    if data_kind == "digital":
+        await ProductWizard.unlimited.set()
+        kb = InlineKeyboardMarkup(row_width=2)
+        kb.insert(InlineKeyboardButton("♾ Unlimited (no keys needed)", callback_data="pwu:1"))
+        kb.insert(InlineKeyboardButton("🔑 Key-based (deliver keys)", callback_data="pwu:0"))
+        await message.answer("Is this digital product unlimited (delivered without keys)?", reply_markup=kb)
+        return
     await _pw_choose_category(message, state)
+
+
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("pwu:"),
+                           state=ProductWizard.unlimited,
+                           is_admin=config.PERM_CATALOG)
+async def pw_unlimited(query: types.CallbackQuery, state: FSMContext):
+    await query.answer()
+    await state.update_data(pw_unlimited=1 if query.data.split(":")[1] == "1" else 0)
+    await _pw_choose_category(query.message, state)
 
 
 async def _pw_choose_category(message: types.Message, state: FSMContext):
@@ -338,7 +355,8 @@ async def pw_confirm(query: types.CallbackQuery, state: FSMContext):
         category_id=data["pw_category"], name=data["pw_name"],
         description=data.get("pw_description", ""),
         photo_file_id=data.get("pw_photo"), price_cents=data["pw_price"],
-        kind=data["pw_kind"], stock=data.get("pw_stock", -1))
+        kind=data["pw_kind"], stock=data.get("pw_stock", -1),
+        is_unlimited=data.get("pw_unlimited", 0))
     if data.get("pw_values"):
         await db.add_product_values(pid, data["pw_values"])
     await db.audit(query.from_user.id, "product_add", f"id={pid} name={data['pw_name']}")
@@ -358,9 +376,10 @@ async def cb_product_detail(query: types.CallbackQuery):
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
         return
     unused = await db.unused_values_count(pid) if p["kind"] == "digital" else 0
+    extra = f" \u00b7 unlimited: {'yes' if p['is_unlimited'] else 'no'}" if p["kind"] == "digital" else ""
     text = (f"<b>{html.escape(p['name'])}</b> (#{p['id']})\n"
             f"\U0001f4b0 {fmt_money(p['price_cents'], config.CURRENCY)}\n"
-            f"\U0001f4e6 {p['kind']} \u00b7 stock: {p['stock']} \u00b7 keys unused: {unused}\n"
+            f"\U0001f4e6 {p['kind']} \u00b7 stock: {p['stock']} \u00b7 keys unused: {unused}{extra}\n"
             f"{'active' if p['is_active'] else 'hidden'}")
     await edit_text_safe(query, text, kb.admin_product_kb(p))
 
@@ -376,9 +395,28 @@ async def cb_product_toggle(query: types.CallbackQuery):
     # re-render
     p = await db.get_product(pid)
     unused = await db.unused_values_count(pid) if p["kind"] == "digital" else 0
+    extra = f" \u00b7 unlimited: {'yes' if p['is_unlimited'] else 'no'}" if p["kind"] == "digital" else ""
     text = (f"<b>{html.escape(p['name'])}</b> (#{p['id']})\n"
             f"\U0001f4b0 {fmt_money(p['price_cents'], config.CURRENCY)}\n"
-            f"\U0001f4e6 {p['kind']} \u00b7 stock: {p['stock']} \u00b7 keys unused: {unused}\n"
+            f"\U0001f4e6 {p['kind']} \u00b7 stock: {p['stock']} \u00b7 keys unused: {unused}{extra}\n"
+            f"{'active' if p['is_active'] else 'hidden'}")
+    await edit_text_safe(query, text, kb.admin_product_kb(p))
+
+
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:pul:"),
+                           is_admin=config.PERM_CATALOG)
+async def cb_product_unlimited_toggle(query: types.CallbackQuery):
+    pid = int(query.data.split(":")[2])
+    p = await db.get_product(pid)
+    await db.update_product(pid, is_unlimited=0 if p["is_unlimited"] else 1)
+    await db.audit(query.from_user.id, "product_unlimited_toggle", f"id={pid}")
+    await query.answer(texts.TOAST_SAVED)
+    p = await db.get_product(pid)
+    unused = await db.unused_values_count(pid) if p["kind"] == "digital" else 0
+    extra = f" \u00b7 unlimited: {'yes' if p['is_unlimited'] else 'no'}" if p["kind"] == "digital" else ""
+    text = (f"<b>{html.escape(p['name'])}</b> (#{p['id']})\n"
+            f"\U0001f4b0 {fmt_money(p['price_cents'], config.CURRENCY)}\n"
+            f"\U0001f4e6 {p['kind']} \u00b7 stock: {p['stock']} \u00b7 keys unused: {unused}{extra}\n"
             f"{'active' if p['is_active'] else 'hidden'}")
     await edit_text_safe(query, text, kb.admin_product_kb(p))
 

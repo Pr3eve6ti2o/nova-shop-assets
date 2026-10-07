@@ -503,6 +503,9 @@ def admin_product_kb(p):
     kb.insert(InlineKeyboardButton(texts.BTN_EDIT_STOCK, callback_data=cb("ac:pst", p["id"])))
     if p["kind"] == "digital":
         kb.insert(InlineKeyboardButton(texts.BTN_ADD_VALUES, callback_data=cb("ac:pv", p["id"])))
+        kb.insert(InlineKeyboardButton(
+            f"{'♾ Unlimited: ON' if p['is_unlimited'] else '♾ Unlimited: OFF'}",
+            callback_data=cb("ac:pul", p["id"])))
     kb.insert(InlineKeyboardButton(texts.BTN_TOGGLE, callback_data=cb("ac:ptog", p["id"])))
     kb.insert(InlineKeyboardButton(texts.BTN_DELETE, callback_data=cb("ac:pdel", p["id"])))
     kb.row(InlineKeyboardButton(texts.BTN_BACK,

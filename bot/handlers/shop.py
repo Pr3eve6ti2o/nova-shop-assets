@@ -166,7 +166,7 @@ async def cb_add_cart(query: types.CallbackQuery, state: FSMContext):
     p = await db.get_product(pid)
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     qty = await _qty_in_view(state, pid)
-    if not product_available(p, qty):
+    if not await product_available(p, qty):
         await query.answer(texts.ERR_OUT_OF_STOCK, show_alert=True)
         return
     await db.cart_add(user["id"], pid, qty)
@@ -179,7 +179,7 @@ async def cb_buy_now(query: types.CallbackQuery, state: FSMContext):
     p = await db.get_product(pid)
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     qty = await _qty_in_view(state, pid)
-    if not product_available(p, qty):
+    if not await product_available(p, qty):
         await query.answer(texts.ERR_OUT_OF_STOCK, show_alert=True)
         return
     await db.cart_clear(user["id"])
