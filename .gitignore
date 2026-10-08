@@ -31,3 +31,5 @@ admin/test-results/
 admin/.next/
 admin/.env.local
 miniapp/.tmp/
+miniapp/catalog.json
+miniapp/policies.json
