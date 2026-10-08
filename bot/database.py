@@ -1207,30 +1207,16 @@ class Database:
             )
             await db.commit()
 
-    async def tonconnect_claim_code(self, user_id: int) -> str:
-        """Per-user TON Connect claim code (audit C3 memo binding).
-
-        Issued once per user; the Mini App embeds it in the TON transfer
-        comment, and the matcher requires an exact memo match. Fail closed.
-        """
-        import secrets
+    async def get_tonconnect_intent_by_code(self, code: str, user_id: int) -> dict | None:
+        """Find an unused per-intent claim by code (P2.17)."""
         async with self._db() as db:
             async with db.execute(
-                "SELECT code FROM tonconnect_claims WHERE user_id=?",
-                (user_id,)) as cur:
+                "SELECT * FROM tonconnect_intent_claims"
+                " WHERE code=? AND user_id=? AND used_at IS NULL",
+                (code, user_id)) as cur:
                 row = await cur.fetchone()
-            if row:
-                return row["code"]
-            code = secrets.token_urlsafe(12)
-            await db.execute(
-                "INSERT OR IGNORE INTO tonconnect_claims(user_id, code)"
-                " VALUES (?, ?)", (user_id, code))
-            await db.commit()
-            async with db.execute(
-                "SELECT code FROM tonconnect_claims WHERE user_id=?",
-                (user_id,)) as cur:
-                row = await cur.fetchone()
-            return row["code"]
+                return dict(row) if row else None
+
 
     async def cart_items(self, user_id: int):
         async with self._db() as db:

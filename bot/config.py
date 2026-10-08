@@ -130,6 +130,7 @@ PERM_USERS = 8
 PERM_BROADCAST = 16
 PERM_PROMOS = 32
 PERM_MAINTENANCE = 64
+PERM_SWAP_APPROVE = 128  # P2.13: dedicated token-swap approval permission
 PERM_ALL = 127
 
 PERM_NAMES = {

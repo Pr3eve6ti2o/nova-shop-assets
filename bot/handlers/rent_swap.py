@@ -211,25 +211,75 @@ async def _create_application(user_db_id: int, tenant_id: str, reason: str) -> i
         return cur.lastrowid
 
 
-async def _set_approval(app_id: int, slot: int, admin_id: int):
-    """Record an approval in slot 1 or 2 (dual control)."""
+async def _set_approval(app_id: int, slot: int, admin_id: int) -> bool:
+    """Record an approval in slot 1 or 2 (dual control).
+
+    P2.14: atomic compare-and-set. The UPDATE is conditional on the current
+    state, so concurrent approvals cannot overwrite each other:
+    - Slot 1: only if status='pending' AND approved_by_1 IS NULL
+    - Slot 2: only if status='approved_1' AND approved_by_2 IS NULL
+              AND approved_by_1 != admin_id (distinct approvers)
+
+    Returns True if this call won the race (row updated), False otherwise.
+    """
     assert slot in (1, 2)
     await _ensure_table()
     async with db._db() as conn:
-        await conn.execute(
-            f"UPDATE rental_swap_applications SET approved_by_{slot}=?,"
-            f" status=? WHERE id=?",
-            (admin_id, "approved_1" if slot == 1 else "approved", app_id),
-        )
+        if slot == 1:
+            cur = await conn.execute(
+                "UPDATE rental_swap_applications SET approved_by_1=?,"
+                " status='approved_1' WHERE id=? AND status='pending'"
+                " AND approved_by_1 IS NULL",
+                (admin_id, app_id),
+            )
+        else:
+            cur = await conn.execute(
+                "UPDATE rental_swap_applications SET approved_by_2=?,"
+                " status='approved' WHERE id=? AND status='approved_1'"
+                " AND approved_by_2 IS NULL AND approved_by_1 != ?",
+                (admin_id, app_id, admin_id),
+            )
         await conn.commit()
+        return cur.rowcount > 0
 
 
 async def _notify_admins_second_approval(app_id: int, first_admin: int):
-    """Tell other admins a second approval is needed (dual control)."""
-    # Best-effort: notify via the admin group/channel if configured.
-    # For now this is a no-op placeholder — the first admin's message
-    # already shows the pending state.
-    pass
+    """Tell eligible second approvers that their approval is needed.
+
+    P2.15: routes to all users with PERM_SWAP_APPROVE (or in ADMINS),
+    excluding the first approver. Best-effort — failures never block.
+    """
+    from config import PERM_SWAP_APPROVE, ADMINS
+    try:
+        # Find eligible approvers: ADMINS + users with the permission bit
+        eligible = set(ADMINS)
+        async with db._db() as conn:
+            async with conn.execute(
+                "SELECT tg_id FROM users WHERE (role_mask & ?) != 0",
+                (PERM_SWAP_APPROVE,)) as cur:
+                async for row in cur:
+                    eligible.add(row[0])
+        eligible.discard(first_admin)
+        if not eligible:
+            return
+        app = await _get_application(app_id)
+        tenant = app.get("tenant_tg_id", "?") if app else "?"
+        text = (
+            f"\U0001f6a8 Token swap #{app_id} needs a second approval\n\n"
+            f"First approved by: {first_admin}\n"
+            f"Tenant: {tenant}\n\n"
+            f"Review in the bot and approve/deny."
+        )
+        from aiogram import Bot
+        import config as cfg
+        bot = Bot.get_current()
+        for tg_id in eligible:
+            try:
+                await bot.send_message(tg_id, text)
+            except Exception:
+                pass  # best-effort
+    except Exception:
+        pass  # never block on notification failure
 
 
 async def _set_status(app_id: int, status: str, decided_by: int = None, swap_id: str = None):
@@ -406,6 +456,23 @@ async def cb_swap_cancel(query: types.CallbackQuery, state: FSMContext):
 # --- Owner: approve / deny ---
 
 
+async def _swap_approver_only(query: types.CallbackQuery) -> bool:
+    """P2.13: dedicated swap-approval permission (not broad admin/RBAC).
+
+    Requires config.ADMINS membership OR the PERM_SWAP_APPROVE bit.
+    A generic non-zero role_mask is NOT sufficient.
+    """
+    from config import PERM_SWAP_APPROVE
+    tg_id = query.from_user.id
+    if _is_admin(tg_id):
+        return True
+    u = await db.get_user_by_tg(tg_id)
+    if u and (u["role_mask"] & PERM_SWAP_APPROVE):
+        return True
+    await query.answer(MSG_ADMIN_DENIED, show_alert=True)
+    return False
+
+
 async def _admin_only(query: types.CallbackQuery) -> bool:
     tg_id = query.from_user.id
     if _is_admin(tg_id):
@@ -419,14 +486,14 @@ async def _admin_only(query: types.CallbackQuery) -> bool:
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("rswap:approve:"))
 async def cb_swap_approve(query: types.CallbackQuery):
-    """Dual-control approval: two DISTINCT admins must approve.
+    """Dual-control approval: two DISTINCT approvers must approve.
 
     First approval -> status 'approved_1', records approved_by_1.
     Second approval (different admin) -> status 'approved', records
     approved_by_2, notifies tenant. Same admin cannot approve twice.
     """
     await query.answer()
-    if not await _admin_only(query):
+    if not await _swap_approver_only(query):
         return
     app_id = int(query.data.split(":")[2])
     app = await _get_application(app_id)
@@ -435,8 +502,10 @@ async def cb_swap_approve(query: types.CallbackQuery):
         return
     admin_id = query.from_user.id
     if app["status"] == "pending":
-        # First approval
-        await _set_approval(app_id, 1, admin_id)
+        # First approval (atomic — False means another approver won the race)
+        if not await _set_approval(app_id, 1, admin_id):
+            await query.answer("Another approver already recorded the first approval.", show_alert=True)
+            return
         await edit_text_safe(
             query,
             f"Swap #{app_id}: first approval recorded.\n"
@@ -450,7 +519,10 @@ async def cb_swap_approve(query: types.CallbackQuery):
             "You already gave the first approval. A different admin "
             "must give the second approval.", show_alert=True)
         return
-    await _set_approval(app_id, 2, admin_id)
+    # Second approval (atomic — False means race lost or same approver)
+    if not await _set_approval(app_id, 2, admin_id):
+        await query.answer("Approval not recorded (already approved or duplicate).", show_alert=True)
+        return
     await _set_status(app_id, "approved", decided_by=admin_id)
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton(BTN_SWAP_CONTINUE, callback_data=f"rswap:continue:{app_id}"))
@@ -470,7 +542,7 @@ async def cb_swap_approve(query: types.CallbackQuery):
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("rswap:deny:"))
 async def cb_swap_deny(query: types.CallbackQuery):
     await query.answer()
-    if not await _admin_only(query):
+    if not await _swap_approver_only(query):
         return
     app_id = int(query.data.split(":")[2])
     app = await _get_application(app_id)

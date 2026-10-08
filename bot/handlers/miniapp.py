@@ -115,12 +115,16 @@ async def create_tonconnect_order(user: dict, sender: str,
     # C4: require the FULL amount — no tolerance for underpayment.
     if matched.get("base", 0) < expected_nano:
         return None, False
-    # C3: defense in depth — re-verify the claim-code memo binding here too.
-    claim_code = await db.tonconnect_claim_code(user["id"])
-    if str(matched.get("memo") or "") != claim_code:
+    # P2.17: per-intent claim verification (legacy per-user path removed).
+    # The memo must match a single-use intent code for this user.
+    memo = str(matched.get("memo") or "")
+    intent = await db.get_tonconnect_intent_by_code(memo, user["id"])
+    if not intent:
         logger.warning("tonconnect memo mismatch: txid=%s user=%s",
                        matched.get("txid"), user["id"])
         return None, False
+    # Mark used only on successful verification (not before order creation).
+    await db.mark_tonconnect_intent_used(memo, matched.get("txid"))
     # P0.6: atomic order + items + payment (re-audit). Single transaction;
     # duplicate txid rolls back everything.
     items = [(it["pid"], it["name"], it["qty"], it["price"]) for it in clean]
@@ -384,8 +388,11 @@ async def handle_tonconnect_paid(message: types.Message, user: dict,
                              reply_markup=await main_reply_kb(message.from_user.id))
         return
     expected_nano = math.ceil(subtotal / 100 / ton_usd * 1e9)
-    # C3: per-user claim code; the on-chain tx memo must equal it.
-    claim_code = await db.tonconnect_claim_code(user["id"])
+    # P2.17: per-intent claim code (single-use, bound to this payment).
+    import uuid
+    intent_id = str(uuid.uuid4())
+    claim_code = await db.tonconnect_intent_claim_code(
+        user["id"], intent_id, expected_nano)
 
     # Verify the TON transaction via toncenter.
     merchant = config.TON_DEPOSIT_ADDRESS

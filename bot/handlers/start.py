@@ -14,13 +14,10 @@ async def home_inline_kb(user_id: int):
     """Slim /start actions: the reply keyboard already covers everything else."""
     k = kb.InlineKeyboardMarkup()
     if config.MINIAPP_URL:
-        # C3: pass the per-user TON claim code to the Mini App via startapp
-        # so it can embed the code in the TON transfer comment.
-        code = await db.tonconnect_claim_code(user_id)
-        sep = "&" if "?" in config.MINIAPP_URL else "?"
-        url = f"{config.MINIAPP_URL}{sep}startapp=tc_{code}"
+        # P2.17: Mini App gets per-intent claim codes from the payment
+        # initiation flow (not a static per-user code in the URL).
         k.add(kb.InlineKeyboardButton(texts.BTN_OPEN_STORE,
-                                      web_app=WebAppInfo(url=url)))
+                                      web_app=WebAppInfo(url=config.MINIAPP_URL)))
     # If the welcome-back text mentions items waiting in the cart, make it
     # actionable: a direct "View cart" button instead of a dead-end reminder.
     try:

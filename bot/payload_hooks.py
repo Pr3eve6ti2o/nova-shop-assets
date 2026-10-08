@@ -38,6 +38,15 @@ def _config():
     """
     url = os.environ.get("PAYLOAD_URL", "").strip().rstrip("/")
     key = os.environ.get("PAYLOAD_API_KEY", "").strip()
+    # Security (re-audit P2.16): Payload API key is sent in Authorization header.
+    # Reject remote http:// to prevent credential leakage in cleartext.
+    if url.startswith("http://"):
+        _host = url[7:].split("/")[0].split(":")[0].lower()
+        if _host not in ("localhost", "127.0.0.1", "::1"):
+            raise RuntimeError(
+                f"PAYLOAD_URL must use https:// for non-localhost hosts (got {url!r}). "
+                "The API key is sent on every request."
+            )
     return url, key
 
 
