@@ -60,7 +60,8 @@ async def _nova(method, path, params=None, json_body=None):
 async def _get_plans():
     data = await _nova("GET", "/api/internal/plans")
     plans = data.get("plans") or []
-    # Single rental plan only: Monthly $8.99 / Yearly $89.99.
+    # Plans and prices come from the control plane (/api/internal/plans).
+    # Never hardcode prices here (audit 26).
     order = {"RENTAL_MONTHLY": 0, "RENTAL_YEARLY": 1}
     rental = [p for p in plans if p.get("name") in order]
     rental.sort(key=lambda p: order.get(p.get("name"), 99))
