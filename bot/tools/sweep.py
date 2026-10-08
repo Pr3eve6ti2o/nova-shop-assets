@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/sweep.py — Offline sweep tool for the Nova shop bot's deposit addresses.
+"""bot/tools/sweep.py — Offline sweep tool for the Nova shop bot's deposit addresses.
 
 The bot derives per-order deposit addresses from the owner's xpub (watch-only;
 the server never sees the seed). Funds accumulate at those derived addresses
@@ -35,10 +35,27 @@ import urllib.error
 BTC_DUST_SATS = 546
 GAP_LIMIT = 20  # BIP44 standard: stop after 20 consecutive empty addresses
 
-# ERC-20 contracts (Ethereum mainnet)
-ERC20_TOKENS = {
-    "USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-    "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+# ERC-20 contracts per chain (chain_id -> {symbol: contract}).
+# Copied from the bot's own bot/crypto_payments.py CHAINS table — the
+# authoritative source. The RPC's eth_chainId selects the right map, so a
+# Polygon RPC sweeps Polygon USDT (not the Ethereum-mainnet contract).
+TOKENS_BY_CHAIN = {
+    1: {  # Ethereum mainnet
+        "USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+        "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    },
+    10: {  # Optimism
+        "USDT": "0x94b008aA00579c1307B0EF2c499aD98a8Ce58e58",
+        "USDC": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+    },
+    137: {  # Polygon
+        "USDT": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+        "USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+    },
+    8453: {  # Base
+        "USDT": "0x102d758f688a4C1C5a80b116bD945d4455460282",
+        "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    },
 }
 ERC20_ABI_BALANCEOF = "70a08231"  # balanceOf(address)
 ERC20_ABI_TRANSFER = "a9059cbb"   # transfer(address,uint256)
@@ -247,6 +264,16 @@ def evm_sweep(args, mnemonic):
         print("ERROR: --rpc is required for EVM sweeps.")
         sys.exit(1)
 
+    chain_id = int(rpc_call(args.rpc, "eth_chainId", []), 16)
+    token_map = TOKENS_BY_CHAIN.get(chain_id)
+    if token_map is None:
+        print(f"warning: chain_id {chain_id} has no known USDT/USDC contracts; "
+              "sweeping native coin only.")
+        token_map = {}
+    else:
+        print(f"Chain ID {chain_id}: token contracts "
+              + ", ".join(f"{s}={c[:10]}..." for s, c in token_map.items()))
+
     print("Scanning EVM deposit addresses (m/44'/60'/0'/0/i)...")
     targets = []  # (index, address, privkey_hex, native_wei, {token: balance})
 
@@ -269,7 +296,7 @@ def evm_sweep(args, mnemonic):
 
         tokens = {}
         if args.tokens:
-            for sym, contract in ERC20_TOKENS.items():
+            for sym, contract in token_map.items():
                 data = (ERC20_ABI_BALANCEOF
                         + address[2:].lower().zfill(64))
                 try:
@@ -298,7 +325,6 @@ def evm_sweep(args, mnemonic):
         print("No funded EVM addresses found.")
         return
 
-    chain_id = int(rpc_call(args.rpc, "eth_chainId", []), 16)
     gas_price = int(rpc_call(args.rpc, "eth_gasPrice", []), 16)
     print(f"\nChain ID: {chain_id}, gas price: {gas_price} wei")
 
