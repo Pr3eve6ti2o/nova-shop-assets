@@ -9,7 +9,10 @@ OWN machine — sweeps funds from used deposit addresses to a destination wallet
 SECURITY MODEL (non-negotiable):
   - The seed phrase is prompted interactively via getpass. It is NEVER passed
     via argv, env vars, files, or logs.
-  - The mnemonic and private keys are wiped from memory after use.
+  - Private key material is overwritten in Python variables after use
+    (best-effort: CPython does not guarantee memory wiping — the OS may
+    have paged copies. Run on a trusted machine, ideally offline except
+    for RPC calls).
   - Dry-run is the DEFAULT. Real broadcast requires --execute.
   - This script is OFFLINE except for the balance/utxo lookups and the final
     broadcast. Run it on a trusted machine.
@@ -325,8 +328,40 @@ def evm_sweep(args, mnemonic):
         print("No funded EVM addresses found.")
         return
 
-    gas_price = int(rpc_call(args.rpc, "eth_gasPrice", []), 16)
-    print(f"\nChain ID: {chain_id}, gas price: {gas_price} wei")
+    # RPC validation (audit): verify we are talking to the right chain
+    # and that it is synced before signing anything.
+    rpc_chain_id = int(rpc_call(args.rpc, "eth_chainId", []), 16)
+    if rpc_chain_id != chain_id:
+        print(f"ERROR: RPC chain ID {rpc_chain_id} != expected {chain_id}. "
+              f"Refusing to sweep on the wrong chain.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        syncing = rpc_call(args.rpc, "eth_syncing", [])
+        if syncing and syncing is not False:
+            print(f"ERROR: RPC node is still syncing: {syncing}. "
+                  f"Refusing to sweep on a syncing node.", file=sys.stderr)
+            sys.exit(1)
+    except Exception:
+        pass  # eth_syncing not supported by all RPCs; non-fatal
+    print(f"RPC validated: chain ID {rpc_chain_id}, node in sync.")
+
+    # EIP-1559 fees (audit): use maxFeePerGas / maxPriorityFeePerGas
+    # instead of legacy gasPrice.
+    fee_hist = rpc_call(args.rpc, "eth_feeHistory",
+                        ["0x5", "latest", [25, 50, 75]])
+    # feeHistory rewards are in wei hex; take the 50th percentile
+    try:
+        rewards = fee_hist.get("reward", [])
+        prio_fees = [int(r[1], 16) for r in rewards if len(r) > 1]
+        max_priority_fee = sorted(prio_fees)[len(prio_fees) // 2] if prio_fees else 0
+    except Exception:
+        max_priority_fee = 0
+    if max_priority_fee < 1_000_000_000:  # floor at 1 gwei
+        max_priority_fee = 1_000_000_000
+    base_fee = int(fee_hist.get("baseFeePerGas", ["0x0"])[-1], 16)
+    max_fee = base_fee * 2 + max_priority_fee
+    print(f"\nChain ID: {chain_id}, base fee: {base_fee} wei, "
+          f"maxPriorityFee: {max_priority_fee} wei, maxFee: {max_fee} wei")
 
     plan = []  # (index, address, priv, tx_dict, description)
     for index, address, priv, native, tokens in targets:
@@ -340,20 +375,24 @@ def evm_sweep(args, mnemonic):
                              + args.destination[2:].lower().zfill(64)
                              + hex(bal)[2:].zfill(64))
             tx = {"to": contract, "data": transfer_data, "value": 0,
-                  "gas": 60000, "gasPrice": gas_price,
-                  "nonce": nonce, "chainId": chain_id}
+                  "gas": 60000,
+                  "maxFeePerGas": max_fee,
+                  "maxPriorityFeePerGas": max_priority_fee,
+                  "nonce": nonce, "chainId": chain_id, "type": 2}
             plan.append((index, address, priv, tx,
                          f"{sym} {bal} -> {args.destination}"))
             nonce += 1
 
         # 2. Sweep native coin (leave gas for the txs above + this one)
         gas_needed = 21000 + 60000 * len(tokens)
-        gas_cost = gas_needed * gas_price
+        gas_cost = gas_needed * max_fee  # worst-case at maxFee
         send_value = native - gas_cost
         if send_value > 0:
             tx = {"to": args.destination, "value": send_value,
-                  "gas": 21000, "gasPrice": gas_price,
-                  "nonce": nonce, "chainId": chain_id}
+                  "gas": 21000,
+                  "maxFeePerGas": max_fee,
+                  "maxPriorityFeePerGas": max_priority_fee,
+                  "nonce": nonce, "chainId": chain_id, "type": 2}
             plan.append((index, address, priv, tx,
                          f"native {send_value} wei -> {args.destination}"))
         elif native > 0:
@@ -377,15 +416,50 @@ def evm_sweep(args, mnemonic):
         print("Aborted.")
         return
 
+    # Transaction journal (audit): append-only record of every sweep.
+    # Written BEFORE broadcast so a crash mid-batch still leaves a record.
+    import datetime
+    journal_path = f"sweep-journal-{chain_id}-{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+    journal = {
+        "chain_id": chain_id,
+        "destination": args.destination,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "mode": "execute",
+        "entries": [],
+    }
     for index, address, priv, tx, desc in plan:
+        journal["entries"].append({
+            "index": index,
+            "from": address,
+            "to": tx["to"],
+            "value_wei": str(tx.get("value", 0)),
+            "data": tx.get("data", "0x"),
+            "nonce": tx["nonce"],
+            "maxFeePerGas": str(tx["maxFeePerGas"]),
+            "maxPriorityFeePerGas": str(tx["maxPriorityFeePerGas"]),
+            "description": desc,
+            "tx_hash": None,
+            "status": "pending",
+        })
+    with open(journal_path, "w") as jf:
+        json.dump(journal, jf, indent=2)
+    print(f"\nJournal written to {journal_path} ({len(plan)} entries).")
+
+    for i, (index, address, priv, tx, desc) in enumerate(plan):
         acct = Account.from_key(priv)
         signed = acct.sign_transaction(tx)
         try:
             tx_hash = rpc_call(args.rpc, "eth_sendRawTransaction",
                                [signed.raw_transaction.hex()])
             print(f"  {address}: broadcast {tx_hash} ({desc})")
+            journal["entries"][i]["tx_hash"] = tx_hash
+            journal["entries"][i]["status"] = "broadcast"
         except Exception as e:
             print(f"  {address}: FAILED: {e}")
+            journal["entries"][i]["status"] = f"failed: {e}"
+        # Update journal after each broadcast (crash-safe)
+        with open(journal_path, "w") as jf:
+            json.dump(journal, jf, indent=2)
 
 
 # ---------------------------------------------------------------------------
