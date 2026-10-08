@@ -1,0 +1,20 @@
+# systemd unit for the standalone blockchain observer (re-audit P3.19).
+# Copy to /etc/systemd/system/ and enable alongside nova-shop.service.
+# Requires: WATCHER_STANDALONE=1 in the bot's environment file so the
+# in-process watcher is disabled (avoid double-scanning).
+[Unit]
+Description=Nova Shop blockchain observer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nova
+WorkingDirectory=/opt/nova-shop/bot
+EnvironmentFile=/opt/nova-shop/.env
+ExecStart=/opt/nova-shop/.venv/bin/python watcher_main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

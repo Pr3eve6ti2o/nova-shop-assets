@@ -113,6 +113,15 @@ CREATE TABLE IF NOT EXISTS outbox_events(
   last_error TEXT,
   processed_at TEXT,
   created_at TEXT NOT NULL);
+
+-- P3.21: distributed rate limit hits (sliding window, multi-replica safe).
+CREATE TABLE IF NOT EXISTS rate_limit_hits(
+  bucket TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  hit_at TEXT NOT NULL,
+  PRIMARY KEY (bucket, user_id, hit_at));
+CREATE INDEX IF NOT EXISTS idx_rate_limit_lookup
+  ON rate_limit_hits(bucket, user_id, hit_at);
 CREATE TABLE IF NOT EXISTS payments(
   id INTEGER PRIMARY KEY, provider TEXT NOT NULL,
   external_id TEXT NOT NULL, user_id INTEGER, order_id INTEGER,
@@ -443,6 +452,10 @@ class Database:
                 (str(config.REFERRAL_PERCENT),),
             )
             await db.commit()
+        # P3.22: run versioned migrations after schema is ensured.
+        # New schema changes go in bot/migrations/mNNN_*.py, not inline.
+        from migrations.runner import run_migrations
+        await run_migrations(self)
 
     # ------------------------------------------------------------- kv ---
     async def kv_get(self, key: str, default=None):
@@ -811,6 +824,80 @@ class Database:
                 n = cur.rowcount
                 await db.commit()
                 return n
+
+    async def reserve_inventory(self, order_id: int, product_id: int,
+                                qty: int, ttl_minutes: int = 30) -> bool:
+        """Reserve physical stock for an order (re-audit P3.23).
+
+        Atomically decrements available stock and creates a reservation.
+        Returns True if reserved, False if insufficient stock.
+        Reservations expire after ttl_minutes (released by cleanup job).
+        """
+        if qty <= 0:
+            raise ValueError("qty must be positive")
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(minutes=ttl_minutes)
+        async with self._claim_lock:
+            async with self._db() as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    # Check available stock (total - active reservations)
+                    async with db.execute(
+                        "SELECT stock FROM products WHERE id=?",
+                        (product_id,)) as cur:
+                        row = await cur.fetchone()
+                    if not row:
+                        await db.execute("ROLLBACK")
+                        return False
+                    stock = row["stock"]
+                    if stock != -1:  # -1 = unlimited
+                        async with db.execute(
+                            "SELECT COALESCE(SUM(qty), 0) AS reserved"
+                            " FROM inventory_reservations"
+                            " WHERE product_id=? AND released_at IS NULL"
+                            " AND expires_at > ?",
+                            (product_id, now.isoformat())) as cur:
+                            rrow = await cur.fetchone()
+                        reserved = rrow["reserved"] or 0
+                        if stock - reserved < qty:
+                            await db.execute("ROLLBACK")
+                            return False
+                    # Create reservation
+                    await db.execute(
+                        "INSERT INTO inventory_reservations"
+                        "(order_id, product_id, qty, reserved_at, expires_at)"
+                        " VALUES (?, ?, ?, ?, ?)",
+                        (order_id, product_id, qty,
+                         now.isoformat(), expires.isoformat()))
+                    await db.execute("COMMIT")
+                    return True
+                except Exception:
+                    await db.execute("ROLLBACK")
+                    raise
+
+    async def release_reservation(self, order_id: int):
+        """Release all reservations for an order (cancel/expiry)."""
+        from database import utcnow_iso
+        async with self._db() as db:
+            await db.execute(
+                "UPDATE inventory_reservations SET released_at=?"
+                " WHERE order_id=? AND released_at IS NULL",
+                (utcnow_iso(), order_id))
+            await db.commit()
+
+    async def release_expired_reservations(self) -> int:
+        """Release expired reservations. Returns count released."""
+        from database import utcnow_iso
+        now = utcnow_iso()
+        async with self._db() as db:
+            cur = await db.execute(
+                "UPDATE inventory_reservations SET released_at=?"
+                " WHERE released_at IS NULL AND expires_at <= ?",
+                (now, now))
+            n = cur.rowcount
+            await db.commit()
+            return n
 
     async def increment_stock(self, product_id: int, qty: int) -> int:
         """Atomically increment physical stock by qty.

@@ -71,9 +71,19 @@ async def on_startup(dp_):
     logger.info("=" * 50)
 
     # Background crypto deposit watcher (SPEC2 §4): 60s sweeps, never crashes.
+    # P3.19: disabled when WATCHER_STANDALONE=1 (watcher runs as its own service).
     global _watcher_task
-    from crypto_watcher import crypto_watcher_loop
-    _watcher_task = asyncio.get_event_loop().create_task(crypto_watcher_loop())
+    if not config.WATCHER_STANDALONE:
+        from crypto_watcher import crypto_watcher_loop
+        _watcher_task = asyncio.get_event_loop().create_task(crypto_watcher_loop())
+    else:
+        logger.info("In-process watcher disabled (WATCHER_STANDALONE=1)")
+
+    # P3.18: outbox worker — durable delivery of order.created events
+    # to Payload CMS with retry/backoff.
+    from outbox_worker import outbox_worker_loop
+    from database import db as _db
+    asyncio.get_event_loop().create_task(outbox_worker_loop(_db))
 
 
 async def on_shutdown(dp_):

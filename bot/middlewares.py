@@ -43,7 +43,11 @@ async def _is_admin(db, tg_id: int, perm: int = None) -> bool:
 
 
 class RateLimitMiddleware(BaseMiddleware):
-    """30 actions/min/user globally; 5 payment attempts/min. Admins bypass."""
+    """30 actions/min/user globally; 5 payment attempts/min. Admins bypass.
+
+    P3.21: database-backed sliding window (multi-replica safe). Falls back
+    to in-memory if the rate_limit_hits table is missing (e.g. old DB).
+    """
 
     def __init__(self, db):
         super().__init__()
@@ -51,7 +55,19 @@ class RateLimitMiddleware(BaseMiddleware):
         self._hits = {}
         self._pay_hits = {}
 
-    def _allowed(self, bucket: dict, user_id: int, limit: int) -> bool:
+    async def _allowed_distributed(self, bucket: str, user_id: int,
+                                   limit: int) -> bool:
+        try:
+            from rate_limit import is_allowed
+            return await is_allowed(self.db, bucket, user_id, limit,
+                                    RATE_WINDOW)
+        except Exception:
+            # Table missing or DB error — fall back to in-memory
+            return self._allowed_memory(
+                self._hits if bucket == "global" else self._pay_hits,
+                user_id, limit)
+
+    def _allowed_memory(self, bucket: dict, user_id: int, limit: int) -> bool:
         now = time.monotonic()
         dq = bucket.setdefault(user_id, deque())
         while dq and now - dq[0] > RATE_WINDOW:
@@ -70,7 +86,7 @@ class RateLimitMiddleware(BaseMiddleware):
         uid = message.from_user.id
         if await _is_admin(self.db, uid):
             return
-        if not self._allowed(self._hits, uid, RATE_GLOBAL):
+        if not await self._allowed_distributed("global", uid, RATE_GLOBAL):
             await message.answer(texts.ERR_RATE_LIMITED)
             raise CancelHandler()
 
@@ -78,11 +94,11 @@ class RateLimitMiddleware(BaseMiddleware):
         uid = query.from_user.id
         if await _is_admin(self.db, uid):
             return
-        if not self._allowed(self._hits, uid, RATE_GLOBAL):
+        if not await self._allowed_distributed("global", uid, RATE_GLOBAL):
             await query.answer(texts.ERR_RATE_LIMITED, show_alert=True)
             raise CancelHandler()
         if (query.data or "").startswith(("pay", "cok", "crypto")) or data.get("state"):
-            if not self._allowed(self._pay_hits, uid, RATE_PAYMENT):
+            if not await self._allowed_distributed("payment", uid, RATE_PAYMENT):
                 await query.answer(texts.ERR_PAY_RATE_LIMITED, show_alert=True)
                 raise CancelHandler()
 

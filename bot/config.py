@@ -180,6 +180,12 @@ ETHERSCAN_API_KEY = (os.getenv("ETHERSCAN_API_KEY", "") or "").strip()
 CRYPTO_TESTNET = (os.getenv("CRYPTO_TESTNET", "0") or "0").strip().lower() in (
     "1", "true", "yes", "on")
 
+# P3.19: set WATCHER_STANDALONE=1 when the blockchain observer runs as its
+# own process (nova-shop-watcher.service). The in-process watcher is then
+# disabled to avoid double-scanning.
+WATCHER_STANDALONE = (os.getenv("WATCHER_STANDALONE", "0") or "0").strip().lower() in (
+    "1", "true", "yes", "on")
+
 # Fresh TESTNET xpub (tpub) used only when CRYPTO_TESTNET is on.
 # NEVER reuse a mainnet xpub here.
 TESTNET_XPUB_ETH = (os.getenv("TESTNET_XPUB_ETH", "") or "").strip()

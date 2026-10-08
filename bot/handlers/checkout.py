@@ -11,7 +11,6 @@ import config
 import keyboards as kb
 import texts
 from loader import bot, db, dp
-from payload_hooks import push_order_to_payload
 from states import Checkout
 from utils import fmt_money
 from .common import (
@@ -640,9 +639,10 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
     await state.update_data(promo_code=None)
     await db.audit(query.from_user.id, "order_create",
                    f"order={oid} total={t['total']} method={method}")
-    # Push order to the Payload CMS admin panel (best-effort, never raises).
-    asyncio.create_task(asyncio.to_thread(
-        push_order_to_payload,
+    # P3.18: durable outbox (replaces fire-and-forget). The worker delivers
+    # to Payload with retry/backoff; failures never lose the event.
+    await db.outbox_emit(
+        "order.created", str(oid),
         {"orderNumber": f"NS-{oid}", "tgUserId": str(query.from_user.id),
          "customerName": user["name"],
          "items": [{"productName": it["name"], "qty": it["qty"],
@@ -653,7 +653,7 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
          "status": "pending",
          "rawPayload": {"bot_order_id": oid, "delivery_kind": kind,
                         "address": data.get("address"),
-                        "phone": data.get("phone")}}))
+                        "phone": data.get("phone")}})
     await query.answer()
 
     # Fully discounted: nothing to charge — fulfill as a free order.
