@@ -23,10 +23,6 @@ import urllib.request
 
 logger = logging.getLogger(__name__)
 
-_ADMIN_ENV = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "admin", ".env")
-
-
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -34,21 +30,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 @functools.lru_cache(maxsize=1)
 def _config():
-    """(PAYLOAD_URL, PAYLOAD_API_KEY) from env, falling back to admin/.env."""
+    """(PAYLOAD_URL, PAYLOAD_API_KEY) from environment only (audit 13).
+
+    The bot no longer reads admin/.env — that couples the bot to the admin
+    panel's filesystem layout. Set PAYLOAD_URL and PAYLOAD_API_KEY in the
+    bot's own environment.
+    """
     url = os.environ.get("PAYLOAD_URL", "").strip().rstrip("/")
     key = os.environ.get("PAYLOAD_API_KEY", "").strip()
-    if (not url or not key) and os.path.exists(_ADMIN_ENV):
-        # Security #11: use python-dotenv instead of hand-parsing (handles
-        # quotes, comments, export prefixes correctly).
-        try:
-            from dotenv import dotenv_values
-            vals = dotenv_values(_ADMIN_ENV)
-            if not url:
-                url = str(vals.get("PAYLOAD_URL", "") or "").strip().rstrip("/")
-            if not key:
-                key = str(vals.get("PAYLOAD_API_KEY", "") or "").strip()
-        except Exception:
-            pass
     return url, key
 
 

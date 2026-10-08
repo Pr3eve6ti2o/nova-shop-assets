@@ -60,10 +60,16 @@ async def find_tonconnect_tx(merchant: str, sender: str, amount_nano: int,
         if existing:
             continue
         # C3: claim-code binding. The tx memo must equal the claimant's
-        # per-user code — only the wallet owner could have put it there.
+        # code — only the wallet owner could have put it there.
         # Fail closed: no match, no attribution.
         if claim_code and str(tx.get("memo") or "") != claim_code:
             continue
+        # Audit 16: if this was a per-intent code, mark it used (single-use).
+        if claim_code and claim_code.startswith("TC-"):
+            try:
+                await db.mark_tonconnect_intent_used(claim_code, txid)
+            except Exception:
+                pass  # best-effort; the txid dedup below is the hard guard
         return tx
     return None
 

@@ -67,6 +67,14 @@ CREATE TABLE IF NOT EXISTS order_items(
   order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
   product_id INTEGER, name TEXT, qty INTEGER, price_cents INTEGER,
   delivered_value TEXT);
+CREATE TABLE IF NOT EXISTS tonconnect_intent_claims(
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  intent_id TEXT NOT NULL UNIQUE,
+  code TEXT NOT NULL UNIQUE,
+  expected_nano INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  used_at TEXT);
 CREATE TABLE IF NOT EXISTS outbox_events(
   id INTEGER PRIMARY KEY,
   event_type TEXT NOT NULL,
@@ -1001,6 +1009,35 @@ class Database:
     async def tonconnect_pending_remove(self, pid: int):
         async with self._db() as db:
             await db.execute("DELETE FROM tonconnect_pending WHERE id=?", (pid,))
+            await db.commit()
+
+    async def tonconnect_intent_claim_code(self, user_id: int, intent_id: str,
+                                             expected_nano: int) -> str:
+        """Per-intent TON claim code (audit 16).
+
+        Unlike the per-user tonconnect_claim_code, this binds a specific
+        on-chain transaction to a specific payment intent. The code is
+        single-use: once a tx matches it, it is marked used and cannot
+        match another intent.
+        """
+        import secrets
+        code = "TC-" + secrets.token_hex(8).upper()
+        async with self._db() as db:
+            await db.execute(
+                "INSERT INTO tonconnect_intent_claims(user_id, intent_id, code,"
+                " expected_nano, created_at) VALUES (?, ?, ?, ?, ?)",
+                (user_id, intent_id, code, expected_nano, utcnow_iso()),
+            )
+            await db.commit()
+        return code
+
+    async def mark_tonconnect_intent_used(self, code: str, txid: str):
+        """Mark a per-intent claim code as used (single-use enforcement)."""
+        async with self._db() as db:
+            await db.execute(
+                "UPDATE tonconnect_intent_claims SET used_at=? WHERE code=?",
+                (utcnow_iso(), code),
+            )
             await db.commit()
 
     async def tonconnect_claim_code(self, user_id: int) -> str:
