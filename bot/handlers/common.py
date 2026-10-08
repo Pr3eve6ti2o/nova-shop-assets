@@ -55,7 +55,13 @@ async def mask_of_tg(tg_id: int) -> int:
 
 
 async def main_reply_kb(tg_id: int):
-    return kb.reply_main_menu(is_admin=await is_admin_tg(tg_id))
+    user = await db.get_user_by_tg(tg_id)
+    try:
+        show_rental = bool(user["has_rental"]) if user else False
+    except (IndexError, KeyError, TypeError):
+        show_rental = False
+    return kb.reply_main_menu(is_admin=await is_admin_tg(tg_id),
+                              show_rental=show_rental)
 
 
 async def refresh_reply_kb(chat_id: int, tg_id: int):

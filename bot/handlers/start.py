@@ -21,6 +21,15 @@ async def home_inline_kb(user_id: int):
         url = f"{config.MINIAPP_URL}{sep}startapp=tc_{code}"
         k.add(kb.InlineKeyboardButton(texts.BTN_OPEN_STORE,
                                       web_app=WebAppInfo(url=url)))
+    # If the welcome-back text mentions items waiting in the cart, make it
+    # actionable: a direct "View cart" button instead of a dead-end reminder.
+    try:
+        cart_n = await db.cart_count(user_id)
+    except Exception:
+        cart_n = 0
+    if cart_n:
+        k.add(kb.InlineKeyboardButton(f"{texts.BTN_CART} ({cart_n})",
+                                      callback_data="cart"))
     k.add(kb.InlineKeyboardButton(texts.BTN_SHOP, callback_data="shop"))
     return k
 
@@ -39,6 +48,14 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
     user, is_new = await get_or_register(tg_id, message.from_user.full_name,
                                          referred_by=referred_by)
+
+    # Backfill the persistent "My Rental" menu button for users who
+    # subscribed before the flag existed.
+    try:
+        from .rent import ensure_rental_flag
+        await ensure_rental_flag(tg_id)
+    except Exception:
+        pass
 
     # Deep link to a product.
     if args.startswith("p_"):

@@ -39,10 +39,14 @@ def main_menu_inline():
     return kb
 
 
-def reply_main_menu(is_admin: bool = False):
+def reply_main_menu(is_admin: bool = False, show_rental: bool = False):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton(texts.BTN_PROFILE), KeyboardButton(texts.BTN_SHOP))
     kb.row(KeyboardButton(texts.BTN_INFO), KeyboardButton(texts.BTN_RENT))
+    if show_rental:
+        # Persistent once the user has ever subscribed (even one time) —
+        # a sort of invoice view for their rental subscription.
+        kb.row(KeyboardButton(texts.BTN_RENT_MINE))
     if is_admin:
         kb.row(KeyboardButton(texts.BTN_ADMIN))
     return kb
@@ -742,16 +746,32 @@ def crypto_chains_kb(chain_states):
 
 
 # --- Rent flow (control-plane plans) ---
-def rent_plans_kb(plan_labels):
+def rent_plans_kb(plan_labels, selected_id):
+    """Plans screen: pick a plan, then Continue to payment (checkout Step-1 style).
+
+    plan_labels: [(plan_id, label), ...]; selected_id: currently chosen plan.
+    """
     kb = InlineKeyboardMarkup()
-    for pid, label in plan_labels:
-        kb.add(InlineKeyboardButton(label, callback_data=f"rent:plan:{pid}"))
-    kb.add(InlineKeyboardButton(texts.BTN_RENT_MINE, callback_data="rent:mine"))
+    kb.add(
+        InlineKeyboardButton(
+            texts.BTN_CONTINUE_TO_PAYMENT, callback_data=f"rent:topay:{selected_id}"
+        )
+    )
     kb.row(BTN_MENU)
+    row = []
+    for pid, label in plan_labels:
+        mark = "\u2705 " if str(pid) == str(selected_id) else ""
+        row.append(
+            InlineKeyboardButton(f"{mark}{label}", callback_data=f"rent:select:{pid}")
+        )
+    if row:
+        kb.row(*row)
+    kb.add(InlineKeyboardButton(texts.BTN_RENT_MINE, callback_data="rent:mine"))
     return kb
 
 
-def rent_plan_detail_kb(plan_id):
+def rent_method_kb(plan_id):
+    """Payment method selection after 'Continue to payment'."""
     kb = InlineKeyboardMarkup()
     kb.row(
         InlineKeyboardButton(texts.BTN_RENT_BALANCE, callback_data=f"rent:method:{plan_id}:balance"),

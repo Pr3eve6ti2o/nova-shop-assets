@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS users(
   phone TEXT, address TEXT, is_blocked INTEGER DEFAULT 0,
   ref_code TEXT UNIQUE, referred_by INTEGER REFERENCES users(id),
   role_mask INTEGER DEFAULT 0, balance_cents INTEGER NOT NULL DEFAULT 0,
+  has_rental INTEGER NOT NULL DEFAULT 0,
   created_at TEXT);
 CREATE TABLE IF NOT EXISTS categories(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, emoji TEXT DEFAULT '\U0001f4e6',
@@ -189,6 +190,16 @@ class Database:
                 # fresh DB, SCHEMA creates the table below. Anything else is real.
                 if "duplicate column name" not in msg and "no such table" not in msg:
                     raise
+            # Migration: add has_rental to users if missing (persistent "My Rental"
+            # menu button once the user has ever subscribed, even one time).
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN has_rental INTEGER NOT NULL DEFAULT 0")
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                # "duplicate column name": already migrated; "no such table":
+                # fresh DB, SCHEMA creates the table below. Anything else is real.
+                if "duplicate column name" not in msg and "no such table" not in msg:
+                    raise
             # Migration: add purpose/topup_user_id to crypto_deposits if missing
             try:
                 await db.execute("ALTER TABLE crypto_deposits ADD COLUMN purpose TEXT DEFAULT 'order'")
@@ -306,6 +317,17 @@ class Database:
             async with db.execute("SELECT * FROM users WHERE id=?",
                                   (user_id,)) as cur:
                 return await cur.fetchone()
+
+    async def set_has_rental(self, tg_id: int):
+        """Mark that this Telegram user has subscribed at least once.
+
+        Drives the persistent "My Rental" main-menu button (a sort of
+        invoice view). Set on every successful subscription; never cleared.
+        """
+        async with self._db() as db:
+            await db.execute("UPDATE users SET has_rental=1 WHERE tg_id=?",
+                             (tg_id,))
+            await db.commit()
 
     async def get_user_by_ref_code(self, code: str):
         async with self._db() as db:

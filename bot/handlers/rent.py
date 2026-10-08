@@ -10,7 +10,7 @@ import config
 import keyboards as kb
 import texts
 from .common import edit_text_safe
-from loader import dp
+from loader import bot, db, dp
 
 logger = logging.getLogger(__name__)
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
@@ -126,8 +126,14 @@ def _fmt_date(v):
         return str(v)
 
 
-def _plan_keyboard(plans):
-    return kb.rent_plans_kb([(p["id"], _plan_label(p)) for p in plans])
+def _plan_keyboard(plans, selected_id):
+    return kb.rent_plans_kb(
+        [(p["id"], _plan_label(p)) for p in plans], selected_id
+    )
+
+
+def _default_plan_id(plans):
+    return str(plans[0]["id"]) if plans else ""
 
 
 def _rent_success_kb():
@@ -168,18 +174,31 @@ def _plans_text(plans):
     return texts.MSG_RENT_PLANS.format(plans="\n".join(lines))
 
 
-async def _render_plans_as_new_message(message, tg_id):
+async def _render_plans_as_new_message(message, tg_id, selected_id=None):
     try:
         plans = await _get_plans()
     except RuntimeError:
         await message.answer(texts.MSG_RENT_UNAVAILABLE)
         return
 
+    if not plans:
+        await message.answer(texts.MSG_RENT_UNAVAILABLE)
+        return
+
+    selected_id = selected_id or _default_plan_id(plans)
     text = _plans_text(plans)
     await message.answer(
         text,
-        reply_markup=_plan_keyboard(plans),
+        reply_markup=_plan_keyboard(plans, selected_id),
         disable_web_page_preview=True,
+    )
+
+
+async def _render_plans_edit(query, plans, selected_id):
+    await edit_text_safe(
+        query,
+        _plans_text(plans),
+        reply_markup=_plan_keyboard(plans, selected_id),
     )
 
 
@@ -198,15 +217,40 @@ async def cb_rent_back(query: types.CallbackQuery):
         await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE)
         return
 
-    await edit_text_safe(
-        query,
-        _plans_text(plans),
-        reply_markup=_plan_keyboard(plans),
-    )
+    if not plans:
+        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE)
+        return
+
+    await _render_plans_edit(query, plans, _default_plan_id(plans))
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:plan:"))
-async def cb_rent_plan(query: types.CallbackQuery):
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:select:"))
+async def cb_rent_select(query: types.CallbackQuery):
+    """Monthly/Yearly sub-buttons: choose the plan (shows a checkmark)."""
+    await query.answer()
+    parts = query.data.split(":", 2)
+    selected_id = parts[2] if len(parts) > 2 else ""
+
+    try:
+        plans = await _get_plans()
+    except RuntimeError:
+        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE)
+        return
+
+    if not plans:
+        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE)
+        return
+
+    valid_ids = {str(p.get("id")) for p in plans}
+    if selected_id not in valid_ids:
+        selected_id = _default_plan_id(plans)
+
+    await _render_plans_edit(query, plans, selected_id)
+
+
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:topay:"))
+async def cb_rent_topay(query: types.CallbackQuery):
+    """Continue to payment (checkout Step-1 style): pick how to pay."""
     await query.answer()
     parts = query.data.split(":", 2)
     plan_id = parts[2] if len(parts) > 2 else ""
@@ -234,7 +278,7 @@ async def cb_rent_plan(query: types.CallbackQuery):
         period=_period(plan),
         trial=_trial(plan),
     )
-    await edit_text_safe(query, text, reply_markup=kb.rent_plan_detail_kb(plan_id))
+    await edit_text_safe(query, text, reply_markup=kb.rent_method_kb(plan_id))
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:method:"))
@@ -318,6 +362,14 @@ async def cb_rent_confirm(query: types.CallbackQuery):
     sub = result.get("subscription") if isinstance(result.get("subscription"), dict) else {}
     status = sub.get("status")
 
+    # The user has now subscribed at least once — the "My Rental" main-menu
+    # button appears from here on (a sort of invoice view). Set before
+    # rendering so the refreshed reply keyboard picks it up.
+    try:
+        await db.set_has_rental(query.from_user.id)
+    except Exception:
+        logger.warning("set_has_rental failed", exc_info=True)
+
     if status == "TRIALING" and sub.get("trialEndsAt"):
         text = texts.MSG_RENT_TRIAL_ACTIVE.format(date=_fmt_date(sub["trialEndsAt"]))
         await edit_text_safe(query, text, reply_markup=_rent_success_kb())
@@ -352,32 +404,25 @@ async def cb_rent_confirm(query: types.CallbackQuery):
     await edit_text_safe(query, texts.MSG_RENT_INVOICE, reply_markup=keyboard)
 
 
-@dp.callback_query_handler(text="rent:mine")
-async def cb_rent_mine(query: types.CallbackQuery):
-    await query.answer()
-
+async def _my_rental_text(tg_id: int):
+    """Shared 'My Rental' invoice view for the inline button and the
+    main-menu reply-keyboard button. Returns (text, reply_markup)."""
     try:
-        user_id = await _get_user_id(query.from_user.id)
+        user_id = await _get_user_id(tg_id)
     except RuntimeError:
-        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE, reply_markup=kb.rent_back_kb())
-        return
+        return texts.MSG_RENT_UNAVAILABLE, kb.rent_back_kb()
 
     if not user_id:
-        await edit_text_safe(
-            query, texts.MSG_RENT_LINK_NEEDED, reply_markup=kb.rent_back_kb()
-        )
-        return
+        return texts.MSG_RENT_LINK_NEEDED, kb.rent_back_kb()
 
     try:
         result = await _nova("GET", f"/api/internal/users/{user_id}/subscriptions")
     except RuntimeError:
-        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE, reply_markup=kb.rent_back_kb())
-        return
+        return texts.MSG_RENT_UNAVAILABLE, kb.rent_back_kb()
 
     subs = result.get("subscriptions") or []
     if not subs:
-        await edit_text_safe(query, texts.MSG_RENT_NONE, reply_markup=kb.rent_back_kb())
-        return
+        return texts.MSG_RENT_NONE, kb.rent_back_kb()
 
     sub = subs[0]
     until = sub.get("trialEndsAt") or sub.get("currentPeriodEnd")
@@ -386,4 +431,49 @@ async def cb_rent_mine(query: types.CallbackQuery):
         status=sub.get("status"),
         until=_fmt_date(until),
     )
-    await edit_text_safe(query, text, reply_markup=_rent_success_kb())
+    return text, _rent_success_kb()
+
+
+@dp.callback_query_handler(text="rent:mine")
+async def cb_rent_mine(query: types.CallbackQuery):
+    await query.answer()
+    text, markup = await _my_rental_text(query.from_user.id)
+    await edit_text_safe(query, text, reply_markup=markup)
+
+
+@dp.message_handler(text=texts.BTN_RENT_MINE)
+async def nav_rent_mine(message: types.Message, state: FSMContext):
+    """Main-menu 'My Rental' button (visible once the user has ever
+    subscribed) — a sort of invoice view for their subscription."""
+    await state.finish()
+    text, markup = await _my_rental_text(message.from_user.id)
+    await message.answer(text, reply_markup=markup, disable_web_page_preview=True)
+
+
+async def ensure_rental_flag(tg_id: int):
+    """Backfill has_rental for users who subscribed before the flag existed.
+
+    Called on /start; cheap (local check first, at most two API calls, and
+    only until the flag is set once).
+    """
+    try:
+        user = await db.get_user_by_tg(tg_id)
+        if user and user["has_rental"]:
+            return
+    except Exception:
+        pass
+    try:
+        user_id = await _get_user_id(tg_id)
+    except RuntimeError:
+        return
+    if not user_id:
+        return
+    try:
+        result = await _nova("GET", f"/api/internal/users/{user_id}/subscriptions")
+    except RuntimeError:
+        return
+    if result.get("subscriptions"):
+        try:
+            await db.set_has_rental(tg_id)
+        except Exception:
+            logger.warning("ensure_rental_flag failed", exc_info=True)
