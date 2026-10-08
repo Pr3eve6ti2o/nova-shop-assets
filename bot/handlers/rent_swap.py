@@ -133,7 +133,8 @@ _SWAP_APP_DDL = (
     " id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL,"
     " tenant_id TEXT NOT NULL, reason TEXT NOT NULL,"
     " status TEXT NOT NULL DEFAULT 'pending', swap_id TEXT,"
-    " created_at TEXT NOT NULL, decided_at TEXT, decided_by INTEGER)"
+    " created_at TEXT NOT NULL, decided_at TEXT, decided_by INTEGER,"
+    " approved_by_1 INTEGER, approved_by_2 INTEGER)"
 )
 
 
@@ -160,6 +161,16 @@ def _cancel_kb() -> InlineKeyboardMarkup:
 async def _ensure_table():
     async with db._db() as conn:
         await conn.execute(_SWAP_APP_DDL)
+        # Migration: add dual-control approver columns to existing tables
+        for _ddl in (
+            "ALTER TABLE rental_swap_applications ADD COLUMN approved_by_1 INTEGER",
+            "ALTER TABLE rental_swap_applications ADD COLUMN approved_by_2 INTEGER",
+        ):
+            try:
+                await conn.execute(_ddl)
+            except Exception as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
         await conn.commit()
 
 
@@ -167,7 +178,8 @@ async def _get_application(app_id: int):
     await _ensure_table()
     async with db._db() as conn:
         async with conn.execute(
-            "SELECT id, user_id, tenant_id, reason, status, swap_id, decided_by"
+            "SELECT id, user_id, tenant_id, reason, status, swap_id, decided_by,"
+            " approved_by_1, approved_by_2"
             " FROM rental_swap_applications WHERE id=?",
             (app_id,),
         ) as cur:
@@ -197,6 +209,27 @@ async def _create_application(user_db_id: int, tenant_id: str, reason: str) -> i
         )
         await conn.commit()
         return cur.lastrowid
+
+
+async def _set_approval(app_id: int, slot: int, admin_id: int):
+    """Record an approval in slot 1 or 2 (dual control)."""
+    assert slot in (1, 2)
+    await _ensure_table()
+    async with db._db() as conn:
+        await conn.execute(
+            f"UPDATE rental_swap_applications SET approved_by_{slot}=?,"
+            f" status=? WHERE id=?",
+            (admin_id, "approved_1" if slot == 1 else "approved", app_id),
+        )
+        await conn.commit()
+
+
+async def _notify_admins_second_approval(app_id: int, first_admin: int):
+    """Tell other admins a second approval is needed (dual control)."""
+    # Best-effort: notify via the admin group/channel if configured.
+    # For now this is a no-op placeholder — the first admin's message
+    # already shows the pending state.
+    pass
 
 
 async def _set_status(app_id: int, status: str, decided_by: int = None, swap_id: str = None):
@@ -386,15 +419,39 @@ async def _admin_only(query: types.CallbackQuery) -> bool:
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("rswap:approve:"))
 async def cb_swap_approve(query: types.CallbackQuery):
+    """Dual-control approval: two DISTINCT admins must approve.
+
+    First approval -> status 'approved_1', records approved_by_1.
+    Second approval (different admin) -> status 'approved', records
+    approved_by_2, notifies tenant. Same admin cannot approve twice.
+    """
     await query.answer()
     if not await _admin_only(query):
         return
     app_id = int(query.data.split(":")[2])
     app = await _get_application(app_id)
-    if not app or app["status"] != "pending":
+    if not app or app["status"] not in ("pending", "approved_1"):
         await query.answer("Already decided.", show_alert=True)
         return
-    await _set_status(app_id, "approved", decided_by=query.from_user.id)
+    admin_id = query.from_user.id
+    if app["status"] == "pending":
+        # First approval
+        await _set_approval(app_id, 1, admin_id)
+        await edit_text_safe(
+            query,
+            f"Swap #{app_id}: first approval recorded.\n"
+            f"Awaiting second approval from a different admin.")
+        # Notify other admins that a second approval is needed
+        await _notify_admins_second_approval(app_id, admin_id)
+        return
+    # Second approval — must be a different admin
+    if app["approved_by_1"] == admin_id:
+        await query.answer(
+            "You already gave the first approval. A different admin "
+            "must give the second approval.", show_alert=True)
+        return
+    await _set_approval(app_id, 2, admin_id)
+    await _set_status(app_id, "approved", decided_by=admin_id)
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton(BTN_SWAP_CONTINUE, callback_data=f"rswap:continue:{app_id}"))
     try:

@@ -147,6 +147,15 @@ DEPOSIT_BONUS_PERCENT = 5
 
 # --- Nova control plane (rent flow) ---
 NOVA_API_URL = (os.getenv("NOVA_API_URL", "http://localhost:3002") or "http://localhost:3002").rstrip("/")
+# Security (audit 12.2): control-plane traffic must use HTTPS unless it is
+# loopback. A remote http:// URL would send the API key in cleartext.
+if NOVA_API_URL.startswith("http://"):
+    _host = NOVA_API_URL[7:].split("/")[0].split(":")[0].lower()
+    if _host not in ("localhost", "127.0.0.1", "::1"):
+        raise RuntimeError(
+            f"NOVA_API_URL must use https:// for non-localhost hosts (got {NOVA_API_URL!r}). "
+            "The API key is sent on every request."
+        )
 NOVA_API_KEY = os.getenv("NOVA_API_KEY") or None
 RENTAL_TOKEN_ONBOARDING = os.getenv("RENTAL_TOKEN_ONBOARDING", "1") == "1"
 
