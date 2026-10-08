@@ -75,6 +75,30 @@ CREATE TABLE IF NOT EXISTS tonconnect_intent_claims(
   expected_nano INTEGER NOT NULL,
   created_at TEXT NOT NULL,
   used_at TEXT);
+CREATE TABLE IF NOT EXISTS payment_observations(
+  id INTEGER PRIMARY KEY,
+  chain TEXT NOT NULL,
+  chain_id INTEGER NOT NULL DEFAULT 0,
+  asset TEXT NOT NULL,
+  token_contract TEXT NOT NULL DEFAULT 'native',
+  tx_hash TEXT NOT NULL,
+  log_index INTEGER NOT NULL DEFAULT 0,
+  block_height INTEGER,
+  block_hash TEXT,
+  amount_atomic TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  memo TEXT,
+  observed_at TEXT NOT NULL,
+  finalized_at TEXT,
+  state TEXT NOT NULL DEFAULT 'observed',
+  UNIQUE(chain_id, token_contract, tx_hash, log_index));
+CREATE INDEX IF NOT EXISTS ix_observations_chain_recipient
+  ON payment_observations(chain, recipient, state);
+CREATE TABLE IF NOT EXISTS reconciliation_cursors(
+  chain TEXT PRIMARY KEY,
+  last_block_height INTEGER,
+  last_observed_at TEXT,
+  updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox_events(
   id INTEGER PRIMARY KEY,
   event_type TEXT NOT NULL,
@@ -1453,6 +1477,59 @@ class Database:
             except Exception:
                 await db.execute("ROLLBACK")
                 raise
+
+    async def record_observation(self, *, chain: str, chain_id: int = 0,
+                               asset: str, token_contract: str = "native",
+                               tx_hash: str, log_index: int = 0,
+                               block_height: int = None, block_hash: str = None,
+                               amount_atomic: str, recipient: str,
+                               memo: str = None) -> int | None:
+        """Record a raw payment observation (audit 4.2).
+
+        Idempotent: the UNIQUE(chain_id, token_contract, tx_hash, log_index)
+        constraint dedups. Returns the observation id, or None if this
+        exact transfer was already observed.
+        """
+        async with self._db() as db:
+            try:
+                cur = await db.execute(
+                    "INSERT INTO payment_observations(chain, chain_id, asset,"
+                    " token_contract, tx_hash, log_index, block_height,"
+                    " block_hash, amount_atomic, recipient, memo, observed_at,"
+                    " state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                    " 'observed')",
+                    (chain, chain_id, asset, token_contract.lower(), tx_hash.lower(),
+                     log_index, block_height, block_hash, str(amount_atomic),
+                     recipient.lower(), memo, utcnow_iso()),
+                )
+                await db.commit()
+                return cur.lastrowid
+            except aiosqlite.IntegrityError as e:
+                if "UNIQUE" in str(e).upper():
+                    return None  # already observed — dedup
+                raise
+
+    async def get_reconciliation_cursor(self, chain: str) -> dict | None:
+        async with self._db() as db:
+            async with db.execute(
+                    "SELECT * FROM reconciliation_cursors WHERE chain=?",
+                    (chain,)) as cur:
+                return await cur.fetchone()
+
+    async def update_reconciliation_cursor(self, chain: str,
+                                           block_height: int = None):
+        """Advance the cursor after a successful observation sweep."""
+        async with self._db() as db:
+            await db.execute(
+                "INSERT INTO reconciliation_cursors(chain, last_block_height,"
+                " last_observed_at, updated_at) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(chain) DO UPDATE SET"
+                " last_block_height=COALESCE(?, last_block_height),"
+                " last_observed_at=?, updated_at=?",
+                (chain, block_height, utcnow_iso(), utcnow_iso(),
+                 block_height, utcnow_iso(), utcnow_iso()),
+            )
+            await db.commit()
 
     async def outbox_emit(self, event_type: str, aggregate_id: str,
                           payload: dict) -> int:

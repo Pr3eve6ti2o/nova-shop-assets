@@ -247,6 +247,27 @@ async def _process_deposit(dep, now):
 
     chain = dep["chain"]
     txs = await _fetch_chain_txs(chain, dep["address"])
+    # Audit 4.2: record every observed transfer in the durable ledger.
+    # Dedup is via UNIQUE(chain_id, token_contract, tx_hash, log_index).
+    _chain_ids = {"eth": 1, "usdt_base": 8453, "usdc_base": 8453,
+                  "usdt_op": 10, "usdc_op": 10,
+                  "usdt_polygon": 137, "usdc_polygon": 137,
+                  "teth": 11155111, "tusdc_base": 84532}
+    for tx in txs:
+        try:
+            await db.record_observation(
+                chain=chain,
+                chain_id=_chain_ids.get(chain, 0),
+                asset=chain,
+                token_contract="native",
+                tx_hash=tx.get("txid", ""),
+                log_index=int(tx.get("log_index", 0) or 0),
+                amount_atomic=str(tx.get("base", tx.get("sats", 0)) or "0"),
+                recipient=tx.get("to", dep["address"]),
+                memo=tx.get("memo"),
+            )
+        except Exception as e:
+            logger.debug("observation record failed: %s", e)
     matches = cp.matching_txs(chain, txs, dep["address"], dep["memo"])
     if not matches:
         return  # still_unpaid — user can hit "Check Again"
