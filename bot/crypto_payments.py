@@ -95,10 +95,45 @@ CHAINS = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# TESTNET chains (enabled with CRYPTO_TESTNET=1).
+# Structure mirrors CHAINS exactly so deposit flow / watcher / formatting work
+# unchanged. All names & buttons carry a TESTNET marker.
+# ---------------------------------------------------------------------------
+TESTNET_CHAINS = {
+    "teth": {
+        "name": "TESTNET tETH (Sepolia)", "symbol": "tETH", "decimals": 18,
+        "confirmations": 3, "button": "\U0001f9ea TESTNET tETH (Sepolia)",
+        "xpub_env": "TESTNET_XPUB_ETH", "hd": ("bip44", 60),
+        "token_contract": None,  # native coin -> watcher uses txlist
+        "chain_id": 11155111,
+        "blockscout": "https://eth-sepolia.blockscout.com/api/v2",
+    },
+    "tusdc_base": {
+        "name": "TESTNET tUSDC (Base Sepolia)", "symbol": "tUSDC", "decimals": 6,
+        "confirmations": 3, "button": "\U0001f9ea TESTNET tUSDC (Base Sepolia)",
+        "xpub_env": "TESTNET_XPUB_ETH", "hd": ("bip44", 60),
+        "token_contract": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "chain_id": 84532,
+        "blockscout": "https://base-sepolia.blockscout.com/api/v2",
+    },
+}
+
+
+def is_testnet() -> bool:
+    """True when the bot runs in CRYPTO_TESTNET mode."""
+    return bool(getattr(config, "CRYPTO_TESTNET", False))
+
+
+def active_chains() -> dict:
+    """Single source of truth for chain metadata used across the bot."""
+    return TESTNET_CHAINS if is_testnet() else CHAINS
+
+
 EVM_CHAINS = frozenset({
     "eth", "usdt_base", "usdc_base", "usdt_op", "usdc_op",
     "usdt_polygon", "usdc_polygon",
-})
+}) | frozenset(TESTNET_CHAINS.keys())
 LEGACY_CHAINS = frozenset({"eth", "trx"})
 STABLECOIN_CHAINS = frozenset({
     "eth", "trx", "usdt_base", "usdc_base", "usdt_op", "usdc_op",
@@ -139,7 +174,7 @@ def chain_configured(chain: str) -> bool:
         return bool(config.TON_DEPOSIT_ADDRESS)
     if chain not in CHAINS:
         return False
-    env_key = CHAINS[chain]["xpub_env"]
+    env_key = active_chains()[chain]["xpub_env"]
     return bool(getattr(config, env_key, None))
 
 
@@ -286,7 +321,7 @@ async def next_deposit_address(db, chain: str):
     """
     if chain == "ton":
         return config.TON_DEPOSIT_ADDRESS, 0, None  # memo set per order
-    xpub = getattr(config, CHAINS[chain]["xpub_env"])
+    xpub = getattr(config, active_chains()[chain]["xpub_env"])
     index = await db.next_xpub_index(chain)
     address = await asyncio.to_thread(derive_address, chain, xpub, index)
     return address, index, None
@@ -297,8 +332,8 @@ def format_crypto(base_units: int, chain: str) -> str:
     """Format integer base units as a human decimal string. No floats."""
     if base_units < 0:
         raise ValueError("base_units must be non-negative")
-    dec = CHAINS[chain]["decimals"]
-    sym = CHAINS[chain]["symbol"]
+    dec = active_chains()[chain]["decimals"]
+    sym = active_chains()[chain]["symbol"]
     whole, frac = divmod(int(base_units), 10 ** dec)
     frac_s = str(frac).zfill(dec).rstrip("0")
     return f"{whole}.{frac_s} {sym}" if frac_s else f"{whole} {sym}"
@@ -312,7 +347,7 @@ def usd_cents_to_base_units(usd_cents: int, price_usd: float, chain: str) -> int
     """
     if price_usd <= 0:
         raise ValueError("bad price")
-    dec = CHAINS[chain]["decimals"]
+    dec = active_chains()[chain]["decimals"]
     price_cents = int(round(price_usd * 100))
     if price_cents <= 0:
         raise ValueError("bad price")
@@ -644,6 +679,220 @@ async def fetch_evm_token_txs(address: str, blockscout_base: str,
                     "base": base, "confirmations": conf})
     await asyncio.sleep(1)
     return out
+
+
+_ETHERSCAN_V2_API = "https://api.etherscan.io/v2/api"
+
+# Etherscan V2 chain ids (one free key covers every chain, selected via
+# `chainid`). Mirrors the blockscout entries in CHAINS.
+ETHERSCAN_CHAIN_IDS = {
+    "usdt_base": 8453,
+    "usdc_base": 8453,
+    "usdt_op": 10,
+    "usdc_op": 10,
+    "usdt_polygon": 137,
+    "usdc_polygon": 137,
+}
+
+
+def _etherscan_api_key() -> str:
+    """Etherscan V2 key: config.py constant first, env as a safety net.
+
+    Local import keeps this module importable without config (same trick as
+    _proxy())."""
+    import os
+    key = ""
+    try:
+        import config
+        key = (getattr(config, "ETHERSCAN_API_KEY", "") or "").strip()
+    except Exception:
+        key = ""
+    return key or (os.getenv("ETHERSCAN_API_KEY", "") or "").strip()
+
+
+async def fetch_etherscan_v2_token_txs(address: str, chain_id: int,
+                                       contract: str, api_key: str) -> list:
+    """ERC-20 token transfers TO address via the Etherscan V2 unified API.
+
+    Fallback for the Blockscout v2 endpoints that Cloudflare 403s
+    (polygon.blockscout.com / base.blockscout.com). Output shape is identical
+    to fetch_evm_token_txs: tx: {txid, to, base, confirmations}.
+    Never raises — returns whatever was collected (possibly [])."""
+    if not api_key:
+        return []
+    out = []
+    offset = 1000
+    for page in range(1, 11):  # max 10 pages x 1000
+        params = {
+            "chainid": chain_id,
+            "module": "account",
+            "action": "tokentx",
+            "address": address,
+            "contractaddress": contract,
+            "page": page,
+            "offset": offset,
+            "sort": "asc",
+            "apikey": api_key,
+        }
+        items = None
+        for attempt in (0, 1):
+            data = None
+            try:
+                data = await _get_json(_ETHERSCAN_V2_API, params=params,
+                                       timeout=30)
+            except Exception as e:
+                logger.warning("etherscan v2 request failed "
+                               "(chainid=%s page=%s): %s", chain_id, page, e)
+            if not isinstance(data, dict):
+                if attempt == 0:
+                    await asyncio.sleep(1)
+                    continue
+                logger.warning("etherscan v2 unreachable (chainid=%s page=%s)",
+                               chain_id, page)
+                return out
+            status = str(data.get("status", "") or "")
+            message = str(data.get("message", "") or "")
+            result = data.get("result")
+            if status == "1" and isinstance(result, list):
+                items = result
+                break
+            if "no transactions found" in message.lower():
+                return out
+            if attempt == 0:
+                # NOTOK / "Max rate limit reached" -> one retry after 1s.
+                await asyncio.sleep(1)
+                continue
+            logger.warning("etherscan v2 error (chainid=%s page=%s): "
+                           "status=%s message=%s result=%s",
+                           chain_id, page, status, message, result)
+            return out
+        if not items:
+            break
+        for it in items:
+            to = it.get("to") or ""
+            tok = it.get("contractAddress") or ""
+            if to.lower() != address.lower() or tok.lower() != contract.lower():
+                continue
+            if str(it.get("txreceipt_status", "1") or "1") == "0":
+                continue
+            try:
+                base = int(it.get("value", "0") or "0")
+            except (TypeError, ValueError):
+                continue
+            try:
+                conf = int(it.get("confirmations", 0) or 0)
+            except (TypeError, ValueError):
+                conf = 0
+            out.append({"txid": it.get("hash", ""), "to": to,
+                        "base": base, "confirmations": conf})
+        if len(items) < offset:
+            break
+        await asyncio.sleep(0.25)
+    return out
+
+
+async def fetch_etherscan_v2_native_txs(address: str, chain_id: int,
+                                        api_key: str) -> list:
+    """Native-coin transfers TO address via Etherscan V2 (txlist).
+
+    Used for testnet tETH. tx: {txid, to, base, confirmations}.
+    Never raises; returns [] on any failure.
+    """
+    if not api_key or not address:
+        return []
+    out = []
+    for page in range(1, 11):
+        params = {
+            "chainid": chain_id,
+            "module": "account",
+            "action": "txlist",
+            "address": address,
+            "page": page,
+            "offset": 1000,
+            "sort": "asc",
+            "apikey": api_key,
+        }
+        items = None
+        for attempt in (0, 1):
+            data = None
+            try:
+                data = await _get_json(_ETHERSCAN_V2_API, params=params,
+                                       timeout=30)
+            except Exception as e:
+                logger.warning("etherscan v2 native request failed "
+                               "(chainid=%s page=%s): %s", chain_id, page, e)
+            if not isinstance(data, dict):
+                if attempt == 0:
+                    await asyncio.sleep(1)
+                    continue
+                logger.warning("etherscan v2 native unreachable "
+                               "(chainid=%s page=%s)", chain_id, page)
+                return out
+            status = str(data.get("status", "") or "")
+            message = str(data.get("message", "") or "")
+            result = data.get("result")
+            if status == "1" and isinstance(result, list):
+                items = result
+                break
+            if "no transactions found" in message.lower():
+                return out
+            if attempt == 0:
+                await asyncio.sleep(1)
+                continue
+            logger.warning("etherscan v2 native error (chainid=%s page=%s): "
+                           "status=%s message=%s",
+                           chain_id, page, status, message)
+            return out
+        if not items:
+            break
+        for it in items:
+            to = it.get("to") or ""
+            if to.lower() != address.lower():
+                continue
+            if str(it.get("txreceipt_status", "1") or "1") == "0":
+                continue
+            if str(it.get("isError", "0") or "0") == "1":
+                continue
+            try:
+                base = int(it.get("value", "0") or "0")
+            except (TypeError, ValueError):
+                continue
+            if base <= 0:
+                continue
+            try:
+                conf = int(it.get("confirmations", 0) or 0)
+            except (TypeError, ValueError):
+                conf = 0
+            out.append({"txid": it.get("hash", ""), "to": to,
+                        "base": base, "confirmations": conf})
+        if len(items) < 1000:
+            break
+        await asyncio.sleep(0.25)
+    return out
+
+
+async def fetch_evm_token_txs_with_fallback(address: str, blockscout_base: str,
+                                            contract: str,
+                                            chain_id: int) -> list:
+    """Blockscout v2 first (keyless), Etherscan V2 as fallback.
+
+    polygon.blockscout.com / base.blockscout.com are 403'd by Cloudflare, so
+    USDT/USDC deposits on Polygon/Base only become visible through Etherscan.
+    Returns non-empty txs or []."""
+    txs = await fetch_evm_token_txs(address, blockscout_base, contract)
+    if txs:
+        return txs
+    api_key = _etherscan_api_key()
+    if not api_key:
+        logger.warning("blockscout empty and ETHERSCAN_API_KEY unset "
+                       "(chainid=%s address=%s)", chain_id, address)
+        return []
+    txs = await fetch_etherscan_v2_token_txs(address, chain_id, contract,
+                                             api_key)
+    if txs:
+        logger.info("etherscan v2 fallback recovered %d tx(s) (chainid=%s)",
+                    len(txs), chain_id)
+    return txs
 
 
 async def fetch_eth_usdt_txs(address: str) -> list:

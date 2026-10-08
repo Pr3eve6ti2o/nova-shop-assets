@@ -162,6 +162,18 @@ async def finalize_crypto_order(order_id: int, *, provider: str, external_id: st
     return True
 
 
+# Etherscan V2 chain ids for the chains whose Blockscout endpoint is 403'd.
+# Kept local so the watcher dispatcher stays the single source of routing.
+_EVM_CHAIN_IDS = {
+    "usdt_base": 8453,
+    "usdc_base": 8453,
+    "usdt_op": 10,
+    "usdc_op": 10,
+    "usdt_polygon": 137,
+    "usdc_polygon": 137,
+}
+
+
 async def _fetch_chain_txs(chain: str, address: str):
     if chain == "btc":
         txs, _ = await cp.fetch_btc_txs(address)
@@ -172,17 +184,25 @@ async def _fetch_chain_txs(chain: str, address: str):
         return await cp.fetch_trx_usdt_txs(address)
     if chain == "ton":
         return await cp.fetch_ton_txs(address)
-    if chain in ("usdt_base", "usdc_base", "usdt_op", "usdc_op",
-                 "usdt_polygon", "usdc_polygon"):
+    if chain in _EVM_CHAIN_IDS:
         entry = cp.CHAINS[chain]
-        return await cp.fetch_evm_token_txs(
-            address, entry["blockscout"], entry["token_contract"])
+        return await cp.fetch_evm_token_txs_with_fallback(
+            address, entry["blockscout"], entry["token_contract"],
+            _EVM_CHAIN_IDS[chain])
+    if chain in cp.TESTNET_EVM_CHAINS:
+        # Testnet mode: Etherscan V2 is the primary source (verified reachable
+        # on Sepolia / Base Sepolia).
+        entry = cp.TESTNET_CHAINS[chain]
+        api_key = getattr(config, "ETHERSCAN_API_KEY", "") or ""
+        if not api_key:
+            logger.warning("testnet %s: ETHERSCAN_API_KEY not set", chain)
+            return []
+        if entry.get("token_contract"):
+            return await cp.fetch_etherscan_v2_token_txs(
+                address, entry["chain_id"], entry["token_contract"], api_key)
+        return await cp.fetch_etherscan_v2_native_txs(
+            address, entry["chain_id"], api_key)
     return []
-
-
-def _tx_amount(tx: dict) -> int:
-    return int(tx.get("base", tx.get("sats", 0)) or 0)
-
 
 async def _sweep_direct_deposits():
     deposits = await db.pending_crypto_deposits()

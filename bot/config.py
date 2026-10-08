@@ -161,3 +161,15 @@ MANAGER_BOT_USERNAME = (os.getenv("MANAGER_BOT_USERNAME", "") or "").strip().lst
 # Public support username shown in-bot and in the bot description.
 # Tenants reach support via this username or the in-bot ticket flow.
 SUPPORT_USERNAME = (os.getenv("SUPPORT_USERNAME", "") or "").strip().lstrip("@")
+
+
+ETHERSCAN_API_KEY = (os.getenv("ETHERSCAN_API_KEY", "") or "").strip()
+
+# CRYPTO_TESTNET=1 switches the bot to TESTNET_CHAINS (Sepolia / Base Sepolia)
+# for end-to-end deposit testing with free funds. Mainnet unchanged when off.
+CRYPTO_TESTNET = (os.getenv("CRYPTO_TESTNET", "0") or "0").strip().lower() in (
+    "1", "true", "yes", "on")
+
+# Fresh TESTNET xpub (tpub) used only when CRYPTO_TESTNET is on.
+# NEVER reuse a mainnet xpub here.
+TESTNET_XPUB_ETH = (os.getenv("TESTNET_XPUB_ETH", "") or "").strip()

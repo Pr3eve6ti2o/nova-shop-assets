@@ -489,7 +489,7 @@ async def start_direct_deposit(query: types.CallbackQuery, state: FSMContext,
                         address=existing["address"],
                         memo_line=memo_line,
                         total=fmt_money(int(existing["expected_usd_cents"]), config.CURRENCY),
-                        confs=cp.CHAINS[existing["chain"]]["confirmations"],
+                        confs=cp.active_chains()[existing["chain"]]["confirmations"],
                         ttl=_ttl_line(existing["expires_at"])),
                     kb.deposit_kb(existing["id"]))
                 return
@@ -513,7 +513,7 @@ async def start_direct_deposit(query: types.CallbackQuery, state: FSMContext,
                    f"order={order_id} chain={chain} addr={address[:12]}…")
     await notify_admins(
         texts.MSG_CRYPTO_ADMIN_DEPOSIT.format(
-            oid=order_id, chain=cp.CHAINS[chain]["name"], address=address,
+            oid=order_id, chain=cp.active_chains()[chain]["name"], address=address,
             amount=cp.format_crypto(expected, chain)),
         min_bit=config.PERM_ORDERS)
     await state.finish()
@@ -524,7 +524,7 @@ async def start_direct_deposit(query: types.CallbackQuery, state: FSMContext,
             amount=cp.format_crypto(expected, chain), address=address,
             memo_line=memo_line,
             total=fmt_money(total_cents, config.CURRENCY),
-            confs=cp.CHAINS[chain]["confirmations"],
+            confs=cp.active_chains()[chain]["confirmations"],
             ttl=_ttl_line(expires)),
         kb.deposit_kb(dep_id))
 
@@ -584,7 +584,7 @@ async def start_topup_deposit(query: types.CallbackQuery, state: FSMContext,
                     address=existing["address"],
                     memo_line=memo_line,
                     total=fmt_money(int(existing["expected_usd_cents"]), config.CURRENCY),
-                    confs=cp.CHAINS[existing["chain"]]["confirmations"],
+                    confs=cp.active_chains()[existing["chain"]]["confirmations"],
                     ttl=_ttl_line(existing["expires_at"])),
                 types.InlineKeyboardMarkup(inline_keyboard=[
                     [types.InlineKeyboardButton(
@@ -617,7 +617,7 @@ async def start_topup_deposit(query: types.CallbackQuery, state: FSMContext,
                    f"chain={chain} addr={address[:12]}…")
     await notify_admins(
         texts.MSG_CRYPTO_ADMIN_DEPOSIT.format(
-            oid="topup", chain=cp.CHAINS[chain]["name"], address=address,
+            oid="topup", chain=cp.active_chains()[chain]["name"], address=address,
             amount=cp.format_crypto(expected, chain)),
         min_bit=config.PERM_ORDERS)
     await state.finish()
@@ -628,7 +628,7 @@ async def start_topup_deposit(query: types.CallbackQuery, state: FSMContext,
             amount=cp.format_crypto(expected, chain), address=address,
             memo_line=memo_line,
             total=fmt_money(amount_cents, config.CURRENCY),
-            confs=cp.CHAINS[chain]["confirmations"],
+            confs=cp.active_chains()[chain]["confirmations"],
             ttl=_ttl_line(expires)),
         types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(
@@ -707,7 +707,7 @@ async def cb_deposit_check(query: types.CallbackQuery):
     else:
         chain = dep["chain"]
         await query.message.answer(texts.MSG_CRYPTO_STILL_UNPAID.format(
-            confs=cp.CHAINS[chain]["confirmations"]))
+            confs=cp.active_chains()[chain]["confirmations"]))
 
 
 # ------------------------------------------------------- admin panel ---
@@ -733,7 +733,7 @@ async def cb_crypto_view(query: types.CallbackQuery):
     await query.answer()
     view = query.data.split(":")[1]
     if view == "chains":
-        states = [(c, await db.crypto_chain_enabled(c)) for c in cp.CHAINS]
+        states = [(c, await db.crypto_chain_enabled(c)) for c in cp.active_chains()]
         await edit_text_safe(query, texts.MSG_CRYPTO_CHAINS,
                              kb.crypto_chains_kb(states))
         return
@@ -769,7 +769,7 @@ async def cb_crypto_detail(query: types.CallbackQuery):
         return
     chain = dep["chain"]
     text = texts.MSG_CRYPTO_DEPOSIT_ROW.format(
-        id=dep["id"], chain=cp.CHAINS[chain]["name"], address=dep["address"],
+        id=dep["id"], chain=cp.active_chains()[chain]["name"], address=dep["address"],
         amount=cp.format_crypto(int(dep["expected_crypto"]), chain),
         oid=dep["order_id"], status=dep["status"])
     if dep["txid"]:
@@ -826,7 +826,7 @@ async def cb_crypto_confirm(query: types.CallbackQuery):
                 dep["order_id"], provider=f"direct_{dep['chain']}",
                 external_id=f"manual_{dep_id}",
                 amount_cents=order["total_cents"],
-                currency=cp.CHAINS[dep["chain"]]["symbol"])
+                currency=cp.active_chains()[dep["chain"]]["symbol"])
             await db.audit(query.from_user.id, "crypto_manual_confirm",
                            f"deposit={dep_id}")
             await query.answer(texts.TOAST_CRYPTO_CONFIRMED)
@@ -887,7 +887,7 @@ async def cb_crypto_chain_toggle(query: types.CallbackQuery):
     except (ValueError, IndexError):
         await query.answer()
         return
-    if chain in cp.CHAINS:
+    if chain in cp.active_chains():
         cur = await db.crypto_chain_enabled(chain)
         await db.set_crypto_chain_enabled(chain, not cur)
         await db.audit(query.from_user.id, "crypto_chain_toggle",
@@ -896,6 +896,6 @@ async def cb_crypto_chain_toggle(query: types.CallbackQuery):
                            else texts.TOAST_CHAIN_OFF.format(chain=chain))
     else:
         await query.answer()
-    states = [(c, await db.crypto_chain_enabled(c)) for c in cp.CHAINS]
+    states = [(c, await db.crypto_chain_enabled(c)) for c in cp.active_chains()]
     await edit_text_safe(query, texts.MSG_CRYPTO_CHAINS,
                          kb.crypto_chains_kb(states))
