@@ -82,7 +82,7 @@ async def on_startup(dp_):
     # P3.18: outbox worker — durable delivery of order.created events
     # to Payload CMS with retry/backoff.
     from outbox_worker import outbox_worker_loop
-    from database import db as _db
+    from loader import db as _db
     asyncio.get_event_loop().create_task(outbox_worker_loop(_db))
 
 
