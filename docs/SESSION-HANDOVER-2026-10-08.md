@@ -1,7 +1,7 @@
 # Session Handover — 2026-10-08 (for another AI)
 
 This document describes everything done on 2026-10-08 so another AI can pick up
-without re-doing work. Branch: `refactor/nova-shop-professional` @ `1ee6dc5` (local; pushed @ `3e70a11`, 8 commits ahead).
+without re-doing work. Branch: `refactor/nova-shop-professional` @ `98192e0` (PUSHED 2026-10-08 ~21:57 IST; was @ `3e70a11`).
 
 ## System state (as of 18:55 IST)
 
