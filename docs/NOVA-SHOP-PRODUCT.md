@@ -299,3 +299,77 @@ nova-shop-repo/                    # Branch: refactor/nova-shop-professional
 | **Outbox** | Durable event table for async delivery with retry |
 | **xpub** | Extended public key for HD wallet address derivation |
 | **Sweep** | Moving funds from deposit addresses using the offline tool |
+
+---
+
+## 11. The Vision — How the Founder Is Building This
+
+> This section is written in the founder's own terms, from what they have
+> said throughout the build. It is the "why" behind every technical decision
+> above.
+
+### Build the best Telegram shop bot that exists
+
+The project started with a simple brief: research the best Telegram shop bots
+on the internet and GitHub, study the top-tier button and UI patterns, and
+build a complete new bot that beats them all. Not a clone. Not "good enough."
+The best.
+
+### English only — no exceptions
+
+English is the primary and main language across every button, message, and
+screen. No mixed languages, no half-translated strings. One language, done
+properly.
+
+### Sleek and minimal — respect the user's time
+
+As a consumer, the founder won't spend time on a bot with too many buttons.
+Every screen is judged by that standard: cut the clutter, reduce the taps,
+no dead buttons. If a path isn't finished, it ships behind a flag — never
+as a dead end the user can tap.
+
+### Company-grade engineering
+
+The bar is not "it works." Technical work is driven with algorithms from
+mathematics, finance, and marketing to reach company grade — a standing
+quality bar beyond feature completion. Money-critical code is verified
+before shipping. The founder tests money paths with real money.
+
+### A rental platform, not just a bot
+
+The bigger vision: anyone should be able to rent their own Nova Shop
+instance. Paste a BotFather token, pick a plan, get a working store —
+merged with a website where tenants manage everything. Login is Email or
+Telegram (the Telegram ecosystem). The API keeps the Nova codebase hidden
+and secure. Professional anti-copy safeguards throughout.
+
+One plan. Simple pricing. No confusion:
+- Monthly $8.99 / Yearly $89.99
+- 7-day trial, first time only
+
+### Self-custody payments — own the rails
+
+Billing runs on the founder's own $0 rails: CryptoBot invoices, direct
+crypto (self-custody HD wallets), Telegram Stars, and internal balance.
+No Merchant of Record. No fiat processor taking a cut. No middleman.
+
+### A professional repo, built to be reused
+
+The repository is being professionalised because it is meant for reuse —
+by others, and by the founder later. Clean structure, real documentation,
+no dead code, no hardcoded secrets. What ships is what they'd hand to
+another engineer with pride.
+
+### How the work gets done
+
+- **External models do the hands-on work.** The founder's standing rule:
+  outside AI does the building; the orchestrator instructs, routes, reviews,
+  verifies, applies, and tests.
+- **Verify before claiming, never after.** Every claim ships with machine
+  receipts — PIDs, log tails, diff-reviewed fixes. Corrections are blunt
+  and fast, so nothing is claimed until it's proven.
+- **Two budgets, never confused.** The project itself stays near-free
+  (~$1 ceiling). Model and research spend is authorised separately and
+  generously.
+- **Straight talk beats comfort.** If a report's numbers were invented, say
+  so. If work was already done, say so instead of redoing it for show.
