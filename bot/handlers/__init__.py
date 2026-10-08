@@ -16,6 +16,7 @@ from . import balance  # noqa: F401  (Balance: /balance, top-up)
 from . import info  # noqa: F401  (Info page)
 from . import rent  # noqa: F401  (Rent flow: plans via control plane)
 from . import rent_token  # noqa: F401  (Token onboarding: connect merchant's own bot + express setup)
+from . import rent_swap  # noqa: F401  (Token swap: tenant applies -> owner approves -> verified swap)
 from . import support  # noqa: F401  (SupportFlow / AdminReplyFlow states)
 from . import orders  # noqa: F401
 from . import profile  # noqa: F401

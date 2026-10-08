@@ -25,6 +25,12 @@ class AdminReplyFlow(StatesGroup):
     waiting_text = State()
 
 
+class SwapFlow(StatesGroup):
+    """Tenant token-swap application: reason -> owner approval -> new token -> challenge."""
+    waiting_reason = State()
+    waiting_token = State()
+
+
 class CategoryWizard(StatesGroup):
     name = State()
     rename = State()

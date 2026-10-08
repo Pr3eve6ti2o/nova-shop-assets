@@ -156,3 +156,8 @@ RENTAL_TOKEN_ONBOARDING = os.getenv("RENTAL_TOKEN_ONBOARDING", "1") == "1"
 # (manager bot, provisioning_mode, vault rotation).
 MANAGED_ONBOARDING_ENABLED = os.getenv("MANAGED_ONBOARDING_ENABLED", "0") == "1"
 MANAGER_BOT_USERNAME = (os.getenv("MANAGER_BOT_USERNAME", "") or "").strip().lstrip("@")
+
+# --- Rental support contact ---
+# Public support username shown in-bot and in the bot description.
+# Tenants reach support via this username or the in-bot ticket flow.
+SUPPORT_USERNAME = (os.getenv("SUPPORT_USERNAME", "") or "").strip().lstrip("@")

@@ -139,6 +139,22 @@ def _rent_success_kb():
         keyboard.add(
             InlineKeyboardButton("\U0001f916 Connect my bot", callback_data="rent:token:start")
         )
+    # Token swap: tenant applies, owner approves (safety gate).
+    from aiogram.types import InlineKeyboardButton
+
+    keyboard.add(
+        InlineKeyboardButton("\U0001f504 Request token swap", callback_data="rswap:start")
+    )
+    # Support contact: in-bot ticket flow + public support username.
+    if getattr(config, "SUPPORT_USERNAME", ""):
+        keyboard.add(
+            InlineKeyboardButton(
+                "\U0001f4ac Contact support: @" + config.SUPPORT_USERNAME,
+                url="https://t.me/" + config.SUPPORT_USERNAME,
+            )
+        )
+    else:
+        keyboard.add(InlineKeyboardButton("\U0001f4ac Contact support", callback_data="sup_list"))
     return keyboard
 
 
