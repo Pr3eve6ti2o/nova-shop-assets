@@ -340,16 +340,26 @@ def format_crypto(base_units: int, chain: str) -> str:
     return f"{whole}.{frac_s} {sym}" if frac_s else f"{whole} {sym}"
 
 
-def usd_cents_to_base_units(usd_cents: int, price_usd: float, chain: str) -> int:
-    """Convert USD cents to integer base units at a float price. Round UP.
+def usd_cents_to_base_units(usd_cents: int, price_usd, chain: str) -> int:
+    """Convert USD cents to integer base units. Round UP. Deterministic.
 
-    price_usd is e.g. 67234.5 (USD per 1 coin). Integer math only after the
-    float->cents conversion.
+    P1.12: price_usd is converted via Decimal (not float) to avoid binary
+    floating-point rounding discrepancies at quote boundaries. Accepts float,
+    str, int, or Decimal — all go through Decimal(str(...)) for exactness.
+
+    price_usd is e.g. 67234.5 (USD per 1 coin). All math is integer after
+    the Decimal->cents conversion.
     """
-    if price_usd <= 0:
+    from decimal import Decimal, ROUND_CEILING
+    try:
+        price_dec = Decimal(str(price_usd))
+    except Exception:
+        raise ValueError("bad price")
+    if price_dec <= 0:
         raise ValueError("bad price")
     dec = active_chains()[chain]["decimals"]
-    price_cents = int(round(price_usd * 100))
+    # Exact cents, rounding UP to avoid under-quoting
+    price_cents = int((price_dec * 100).to_integral_value(rounding=ROUND_CEILING))
     if price_cents <= 0:
         raise ValueError("bad price")
     # ceil(usd_cents * 10^dec / price_cents)
@@ -937,10 +947,13 @@ async def fetch_evm_token_txs_with_fallback(address: str, blockscout_base: str,
 
 
 async def fetch_eth_usdt_txs(address: str) -> list:
-    """USDT-ERC20 transfers TO address. tx: {txid, to, base, confirmations}."""
-    return await fetch_evm_token_txs(
+    """USDT-ERC20 transfers TO address. tx: {txid, to, base, confirmations}.
+
+    P1.9: Blockscout first, Etherscan V2 fallback (chain_id=1).
+    """
+    return await fetch_evm_token_txs_with_fallback(
         address, "https://eth.blockscout.com/api/v2",
-        CHAINS["eth"]["token_contract"])
+        CHAINS["eth"]["token_contract"], chain_id=1)
 
 
 async def fetch_trx_usdt_txs(address: str) -> list:

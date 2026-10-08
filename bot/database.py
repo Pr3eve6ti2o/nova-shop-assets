@@ -91,6 +91,10 @@ CREATE TABLE IF NOT EXISTS payment_observations(
   observed_at TEXT NOT NULL,
   finalized_at TEXT,
   state TEXT NOT NULL DEFAULT 'observed',
+  deposit_id INTEGER REFERENCES crypto_deposits(id),
+  order_id INTEGER REFERENCES orders(id),
+  user_id INTEGER REFERENCES users(id),
+  settled_at TEXT,
   UNIQUE(chain_id, token_contract, tx_hash, log_index));
 CREATE INDEX IF NOT EXISTS ix_observations_chain_recipient
   ON payment_observations(chain, recipient, state);
@@ -113,7 +117,11 @@ CREATE TABLE IF NOT EXISTS payments(
   id INTEGER PRIMARY KEY, provider TEXT NOT NULL,
   external_id TEXT NOT NULL, user_id INTEGER, order_id INTEGER,
   amount_cents INTEGER, currency TEXT, status TEXT DEFAULT 'pending',
-  created_at TEXT, UNIQUE(provider, external_id));
+  created_at TEXT,
+  fiat_amount_minor INTEGER, fiat_currency TEXT,
+  crypto_amount_atomic TEXT, crypto_asset TEXT, crypto_chain TEXT,
+  token_contract TEXT,
+  UNIQUE(provider, external_id));
 CREATE TABLE IF NOT EXISTS reviews(
   user_id INTEGER, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE,
   rating INTEGER CHECK(rating BETWEEN 1 AND 5), text TEXT, created_at TEXT,
@@ -335,6 +343,28 @@ class Database:
                 except Exception:
                     await db.execute("ROLLBACK")
                     raise
+            # Migration: separate fiat/crypto amounts (re-audit P1.8)
+            for _col, _typ in (("fiat_amount_minor", "INTEGER"),
+                               ("fiat_currency", "TEXT"),
+                               ("crypto_amount_atomic", "TEXT"),
+                               ("crypto_asset", "TEXT"),
+                               ("crypto_chain", "TEXT"),
+                               ("token_contract", "TEXT")):
+                try:
+                    await db.execute(f"ALTER TABLE payments ADD COLUMN {_col} {_typ}")
+                except aiosqlite.OperationalError as e:
+                    _m = str(e).lower()
+                    if "duplicate column name" not in _m and "no such table" not in _m:
+                        raise
+            # Migration: link observations to payment intent (re-audit P1.7, P1.11)
+            for _col, _typ in (("deposit_id", "INTEGER"), ("order_id", "INTEGER"),
+                               ("user_id", "INTEGER"), ("settled_at", "TEXT")):
+                try:
+                    await db.execute(f"ALTER TABLE payment_observations ADD COLUMN {_col} {_typ}")
+                except aiosqlite.OperationalError as e:
+                    _m = str(e).lower()
+                    if "duplicate column name" not in _m and "no such table" not in _m:
+                        raise
             # Migration: add purpose/topup_user_id to crypto_deposits if missing
             try:
                 await db.execute("ALTER TABLE crypto_deposits ADD COLUMN purpose TEXT DEFAULT 'order'")
@@ -1644,6 +1674,28 @@ class Database:
             )
             await db.commit()
 
+    async def replay_observations_from(self, chain: str, from_block: int) -> dict:
+        """Reset cursor for replay (re-audit P1.10).
+
+        Sets the reconciliation cursor back to from_block so the next watcher
+        sweep re-ingests observations from that height. Deduplication via
+        UNIQUE(chain_id, token_contract, tx_hash, log_index) makes replay safe:
+        already-observed transfers are skipped, missed ones are picked up.
+
+        Returns {'chain': chain, 'from_block': from_block}.
+        """
+        async with self._db() as db:
+            await db.execute(
+                "INSERT INTO reconciliation_cursors(chain, last_block_height,"
+                " last_observed_at, updated_at) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(chain) DO UPDATE SET"
+                " last_block_height=?, last_observed_at=?, updated_at=?",
+                (chain, from_block, utcnow_iso(), utcnow_iso(),
+                 from_block, utcnow_iso(), utcnow_iso()),
+            )
+            await db.commit()
+        return {"chain": chain, "from_block": from_block}
+
     async def outbox_emit(self, event_type: str, aggregate_id: str,
                           payload: dict) -> int:
         """Write an outbox event (call within a transaction for atomicity)."""
@@ -1889,16 +1941,34 @@ class Database:
         return row
 
     async def record_payment(self, *, provider, external_id, user_id, order_id,
-                             amount_cents, currency, status="paid") -> bool:
-        """Idempotent insert. Returns True if this is a NEW payment."""
+                             amount_cents, currency, status="paid",
+                             fiat_amount_minor=None, fiat_currency=None,
+                             crypto_amount_atomic=None, crypto_asset=None,
+                             crypto_chain=None, token_contract=None) -> bool:
+        """Idempotent insert. Returns True if this is a NEW payment.
+
+        P1.8: fiat and crypto amounts are stored in separate fields.
+        - fiat_amount_minor / fiat_currency: e.g. 1999 / "USD"
+        - crypto_amount_atomic / crypto_asset / crypto_chain / token_contract:
+          e.g. "1000000" / "usdt" / "base" / "0x..."
+
+        amount_cents/currency are kept for backwards compatibility but
+        should not be overloaded for crypto units.
+        """
         try:
             async with self._db() as db:
                 await db.execute(
                     "INSERT INTO payments(provider, external_id, user_id, order_id,"
-                    " amount_cents, currency, status, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " amount_cents, currency, status, created_at,"
+                    " fiat_amount_minor, fiat_currency,"
+                    " crypto_amount_atomic, crypto_asset, crypto_chain,"
+                    " token_contract)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (provider, external_id, user_id, order_id, amount_cents,
-                     currency, status, utcnow_iso()),
+                     currency, status, utcnow_iso(),
+                     fiat_amount_minor, fiat_currency,
+                     crypto_amount_atomic, crypto_asset, crypto_chain,
+                     token_contract),
                 )
                 await db.commit()
                 return True
@@ -2172,6 +2242,18 @@ class Database:
                          deposit_id),
                     )
                     won = cur.rowcount > 0
+                    if won:
+                        # P1.7/P1.11: link all observations for this deposit's
+                        # address to the payment intent (deposit). This creates
+                        # the full audit trail: intent -> observations -> settlement.
+                        now = utcnow_iso()
+                        await db.execute(
+                            "UPDATE payment_observations SET deposit_id=?,"
+                            " settled_at=?, state='settled'"
+                            " WHERE recipient=(SELECT address FROM crypto_deposits WHERE id=?)"
+                            " AND chain_id=? AND state='observed'",
+                            (deposit_id, now, deposit_id, chain_id),
+                        )
                     await db.commit()
                     return won
         except aiosqlite.IntegrityError as e:
