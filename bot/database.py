@@ -286,6 +286,55 @@ class Database:
                     raise
                 if "duplicate column name" not in msg and "no such table" not in msg:
                     raise
+            # Migration: remove legacy UNIQUE(chain, txid) (re-audit 2).
+            # SQLite cannot DROP CONSTRAINT; rebuild the table without it.
+            # The new event identity is ux_crypto_deposits_transfer
+            # (chain_id, token_contract, txid, log_index).
+            try:
+                _cols = await db.execute_fetchall("PRAGMA table_info(crypto_deposits)")
+                _has_old = any(
+                    "unique(chain, txid)" in (await db.execute_fetchall(
+                        "SELECT sql FROM sqlite_master WHERE type='table' "
+                        "AND name='crypto_deposits'"))[0][0].lower().replace(" ", "")
+                    for _ in [1]
+                ) if _cols else False
+            except Exception:
+                _has_old = False
+            if _has_old:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    await db.execute(
+                        "CREATE TABLE crypto_deposits_new ("
+                        "id INTEGER PRIMARY KEY, user_id INTEGER, order_id INTEGER, "
+                        "chain TEXT NOT NULL, address TEXT NOT NULL, "
+                        "derivation_index INTEGER, memo TEXT, "
+                        "expected_crypto TEXT NOT NULL, expected_usd_cents INTEGER NOT NULL, "
+                        "status TEXT DEFAULT 'pending', txid TEXT, "
+                        "confirmations INTEGER DEFAULT 0, seen_amount_crypto TEXT, "
+                        "created_at TEXT, expires_at TEXT, purpose TEXT DEFAULT 'order', "
+                        "topup_user_id INTEGER, chain_id INTEGER, "
+                        "token_contract TEXT NOT NULL DEFAULT 'native', "
+                        "log_index INTEGER NOT NULL DEFAULT 0)")
+                    await db.execute(
+                        "INSERT INTO crypto_deposits_new "
+                        "(id, user_id, order_id, chain, address, derivation_index, memo, "
+                        "expected_crypto, expected_usd_cents, status, txid, confirmations, "
+                        "seen_amount_crypto, created_at, expires_at, purpose, topup_user_id, "
+                        "chain_id, token_contract, log_index) "
+                        "SELECT id, user_id, order_id, chain, address, derivation_index, memo, "
+                        "expected_crypto, expected_usd_cents, status, txid, confirmations, "
+                        "seen_amount_crypto, created_at, expires_at, purpose, topup_user_id, "
+                        "chain_id, token_contract, log_index FROM crypto_deposits")
+                    await db.execute("DROP TABLE crypto_deposits")
+                    await db.execute("ALTER TABLE crypto_deposits_new RENAME TO crypto_deposits")
+                    await db.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS ux_crypto_deposits_transfer "
+                        "ON crypto_deposits (chain_id, token_contract, txid, log_index) "
+                        "WHERE txid IS NOT NULL")
+                    await db.execute("COMMIT")
+                except Exception:
+                    await db.execute("ROLLBACK")
+                    raise
             # Migration: add purpose/topup_user_id to crypto_deposits if missing
             try:
                 await db.execute("ALTER TABLE crypto_deposits ADD COLUMN purpose TEXT DEFAULT 'order'")
@@ -780,6 +829,70 @@ class Database:
                 (product_id,)) as cur:
                 return (await cur.fetchone())["c"]
 
+
+    async def create_tonconnect_order_atomic(self, *, user_id, subtotal_cents,
+                                               discount_cents, total_cents,
+                                               items, txid) -> tuple:
+        """Create TON Connect order + items + payment in one transaction.
+
+        Re-audit P0.6: the old create_tonconnect_order() did create_order(),
+        add_order_item() loop, and record_payment() as separate operations.
+        A crash between them left inconsistent state (order without payment,
+        or payment without order).
+
+        This method wraps all three in a single BEGIN IMMEDIATE transaction.
+        The UNIQUE(provider, external_id) on payments provides idempotency:
+        if the txid was already claimed, the whole transaction rolls back
+        and (None, 'duplicate') is returned.
+
+        items: iterable of (product_id, name, qty, price_cents).
+        Returns (order_id, None) on success, (None, reason) on failure.
+        """
+        items = tuple(items)
+        for product_id, name, qty, price_cents in items:
+            if qty <= 0 or price_cents < 0:
+                return None, "invalid_item"
+        now = utcnow_iso()
+        async with self._db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cur = await db.execute(
+                    "INSERT INTO orders(user_id, status, subtotal_cents,"
+                    " discount_cents, total_cents, payment_method, delivery_kind,"
+                    " address, phone, promo_code, created_at, updated_at)"
+                    " VALUES (?, 'pending', ?, ?, ?, 'tonconnect', 'pickup',"
+                    " '', '', NULL, ?, ?)",
+                    (user_id, subtotal_cents, discount_cents, total_cents,
+                     now, now),
+                )
+                order_id = cur.lastrowid
+
+                for product_id, name, qty, price_cents in items:
+                    await db.execute(
+                        "INSERT INTO order_items(order_id, product_id, name, qty,"
+                        " price_cents) VALUES (?, ?, ?, ?, ?)",
+                        (order_id, product_id, name, qty, price_cents),
+                    )
+
+                # Idempotent payment record; UNIQUE(provider, external_id)
+                # rolls back the whole tx on duplicate.
+                try:
+                    await db.execute(
+                        "INSERT INTO payments(provider, external_id, user_id,"
+                        " order_id, amount_cents, currency, status, created_at)"
+                        " VALUES ('tonconnect', ?, ?, ?, ?, ?, 'completed', ?)",
+                        (txid, user_id, order_id, total_cents,
+                         config.CURRENCY, now),
+                    )
+                except aiosqlite.IntegrityError:
+                    await db.execute("ROLLBACK")
+                    return None, "duplicate"
+
+                await db.execute("COMMIT")
+                return order_id, None
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
 
     async def fulfill_order_atomic(self, order_id: int) -> tuple:
         """Fulfill an order in ONE transaction (audit 3.2).

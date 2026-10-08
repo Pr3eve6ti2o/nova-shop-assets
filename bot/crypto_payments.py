@@ -138,7 +138,7 @@ LEGACY_CHAINS = frozenset({"eth", "trx"})
 STABLECOIN_CHAINS = frozenset({
     "eth", "trx", "usdt_base", "usdc_base", "usdt_op", "usdc_op",
     "usdt_polygon", "usdc_polygon",
-})
+}) | frozenset(TESTNET_CHAINS.keys())
 
 TON_FINALITY_CONFIRMATIONS = 1
 
@@ -172,15 +172,16 @@ def chain_configured(chain: str) -> bool:
     """A chain is usable when its secret is configured (xpub or TON address)."""
     if chain == "ton":
         return bool(config.TON_DEPOSIT_ADDRESS)
-    if chain not in CHAINS:
+    _active = active_chains()
+    if chain not in _active:
         return False
-    env_key = active_chains()[chain]["xpub_env"]
+    env_key = _active[chain]["xpub_env"]
     return bool(getattr(config, env_key, None))
 
 
 def enabled_chains() -> list:
     """Chains that are both configured. Per-chain admin toggles live in kv."""
-    return [c for c in CHAINS if c not in LEGACY_CHAINS and chain_configured(c)]
+    return [c for c in active_chains() if c not in LEGACY_CHAINS and chain_configured(c)]
 
 
 # ------------------------------------------------------------ derivation ---
@@ -642,6 +643,35 @@ async def fetch_btc_txs(address: str) -> tuple:
     return out, tip or 0
 
 
+
+def _assign_deterministic_ordinals(transfers):
+    """Assign log_index deterministically (re-audit 4).
+
+    The token-transfer APIs do not return canonical EVM logIndex. We assign
+    per-transaction ordinals by sorting transfers within each tx by
+    (block, to, value). Same transfers -> same ordinals across restarts,
+    pagination changes, and provider switches.
+
+    NOTE: Synthetic ordinals, not canonical log indices. Stable for
+    deduplication; not authoritative event positions.
+    """
+    from collections import defaultdict
+    by_tx = defaultdict(list)
+    for t in transfers:
+        by_tx[t["txid"]].append(t)
+    out = []
+    for txid, group in by_tx.items():
+        group.sort(key=lambda x: (str(x.get("_blk", "")),
+                                   str(x.get("to", "")),
+                                   str(x.get("base", ""))))
+        for idx, t in enumerate(group):
+            t = dict(t)
+            t["log_index"] = idx
+            t.pop("_blk", None)
+            out.append(t)
+    return out
+
+
 async def fetch_evm_token_txs(address: str, blockscout_base: str,
                               contract: str) -> list:
     """ERC-20 token transfers TO address via Blockscout v2.
@@ -664,7 +694,6 @@ async def fetch_evm_token_txs(address: str, blockscout_base: str,
         logger.warning("blockscout failed (%s): %s", blockscout_base, e)
         return []
     out = []
-    _li_counters = {}
     for it in items:
         to = (it.get("to") or {}).get("hash", "")
         tok = (it.get("token") or {}).get("address", "")
@@ -676,17 +705,12 @@ async def fetch_evm_token_txs(address: str, blockscout_base: str,
             continue
         blk = it.get("block_number") or 0
         conf = (tip - int(blk) + 1) if blk and tip else 0
-        # Synthesized log_index: Blockscout doesn't return the EVM log index.
-        # Per-tx ordinal makes multiple Transfer events in one tx distinct.
         txh = it.get("transaction_hash", "")
-        _li_counters[txh] = _li_counters.get(txh, 0)
-        log_index = _li_counters[txh]
-        _li_counters[txh] += 1
         out.append({"txid": txh, "to": to,
                     "base": base, "confirmations": conf,
-                    "log_index": log_index})
+                    "_blk": blk})
     await asyncio.sleep(1)
-    return out
+    return _assign_deterministic_ordinals(out)
 
 
 _ETHERSCAN_V2_API = "https://api.etherscan.io/v2/api"
@@ -729,7 +753,6 @@ async def fetch_etherscan_v2_token_txs(address: str, chain_id: int,
     if not api_key:
         return []
     out = []
-    _li_counters = {}
     offset = 1000
     for page in range(1, 11):  # max 10 pages x 1000
         params = {
@@ -792,18 +815,15 @@ async def fetch_etherscan_v2_token_txs(address: str, chain_id: int,
                 conf = int(it.get("confirmations", 0) or 0)
             except (TypeError, ValueError):
                 conf = 0
-            # Synthesized log_index (Etherscan tokentx has no log index).
             txh = it.get("hash", "")
-            _li_counters[txh] = _li_counters.get(txh, 0)
-            log_index = _li_counters[txh]
-            _li_counters[txh] += 1
+            blk = it.get("blockNumber", "")
             out.append({"txid": txh, "to": to,
                         "base": base, "confirmations": conf,
-                        "log_index": log_index})
+                        "_blk": blk})
         if len(items) < offset:
             break
         await asyncio.sleep(0.25)
-    return out
+    return _assign_deterministic_ordinals(out)
 
 
 async def fetch_etherscan_v2_native_txs(address: str, chain_id: int,
@@ -816,7 +836,6 @@ async def fetch_etherscan_v2_native_txs(address: str, chain_id: int,
     if not api_key or not address:
         return []
     out = []
-    _li_counters = {}
     for page in range(1, 11):
         params = {
             "chainid": chain_id,

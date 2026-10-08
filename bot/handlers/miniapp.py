@@ -121,24 +121,16 @@ async def create_tonconnect_order(user: dict, sender: str,
         logger.warning("tonconnect memo mismatch: txid=%s user=%s",
                        matched.get("txid"), user["id"])
         return None, False
-    order_id = await db.create_order(
-        user_id=user["id"], subtotal_cents=subtotal, discount_cents=discount_cents,
-        total_cents=total, payment_method="tonconnect",
-        delivery_kind="pickup", address="", phone="",
-        promo_code=promo_code)
-    for it in clean:
-        await db.add_order_item(order_id, it["pid"], it["name"],
-                                it["qty"], it["price"])
-    # NOTE: stock is decremented exactly once, atomically, in
-    # handlers/common.py::fulfill_order after payment. Do NOT decrement here.
-    claimed = await db.record_payment(provider="tonconnect",
-                                      external_id=matched["txid"],
-                                      user_id=user["id"], order_id=order_id,
-                                      amount_cents=total,
-                                      currency=config.CURRENCY)
-    if not claimed:
-        await db.set_order_status(order_id, "cancelled")
-        return order_id, False
+    # P0.6: atomic order + items + payment (re-audit). Single transaction;
+    # duplicate txid rolls back everything.
+    items = [(it["pid"], it["name"], it["qty"], it["price"]) for it in clean]
+    order_id, reason = await db.create_tonconnect_order_atomic(
+        user_id=user["id"], subtotal_cents=subtotal,
+        discount_cents=discount_cents, total_cents=total,
+        items=items, txid=matched["txid"])
+    if order_id is None:
+        # Duplicate or invalid — nothing was persisted.
+        return None, False
     from handlers.common import fulfill_order, maybe_credit_referral, notify_admins
     ok, note = await fulfill_order(order_id)
     if ok:

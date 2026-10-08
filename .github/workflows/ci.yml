@@ -74,7 +74,9 @@ jobs:
           python-version: "3.12"
 
       - name: Build bundle
-        run: python tools/build_miniapp_bundle.py
+        run: bash tools/build_miniapp.sh
+        env:
+          MINIAPP_FAIL_CLOSED: "1"
 
       - name: Ensure browser bundle does not use localStorage
         run: |

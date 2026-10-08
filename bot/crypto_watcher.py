@@ -255,11 +255,16 @@ async def _process_deposit(dep, now):
                   "teth": 11155111, "tusdc_base": 84532}
     for tx in txs:
         try:
+            # Use the real token contract for token transfers (re-audit 3).
+            # "native" is only for native-coin transfers.
+            _tcontract = (cp.CHAINS.get(chain, {}).get("token_contract")
+                          or cp.TESTNET_CHAINS.get(chain, {}).get("token_contract")
+                          or "native")
             await db.record_observation(
                 chain=chain,
                 chain_id=_chain_ids.get(chain, 0),
                 asset=chain,
-                token_contract="native",
+                token_contract=_tcontract,
                 tx_hash=tx.get("txid", ""),
                 log_index=int(tx.get("log_index", 0) or 0),
                 amount_atomic=str(tx.get("base", tx.get("sats", 0)) or "0"),
