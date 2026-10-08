@@ -1,7 +1,7 @@
 # Session Handover — 2026-10-08 (for another AI)
 
 This document describes everything done on 2026-10-08 so another AI can pick up
-without re-doing work. Branch: `refactor/nova-shop-professional` @ `3e70a11` (pushed).
+without re-doing work. Branch: `refactor/nova-shop-professional` @ `1ee6dc5` (local; pushed @ `3e70a11`, 8 commits ahead).
 
 ## System state (as of 18:55 IST)
 
@@ -65,6 +65,61 @@ Key lessons (also in `~/AGENTS.md`):
 - Proxy: `~/workspace/shop-bot/.proxy.env` (600)
 - Venv: `~/workspace/nova-shop/.venv` (has bip-utils, embit, eth-account installed)
 - Identity: `~/workspace/nova-platform/nova-private/identity/` (not git-tracked; rebuild after adding routes: `npm run build`)
+
+
+## Deep audit fixes (2026-10-08 evening, all on `refactor/nova-shop-professional`, local commits)
+
+User uploaded `~/workspace/user/files/nova-shop-deep-audit-2026-10-08.txt` (another AI's file-by-file audit).
+Orion verified each claim against the real code, split into P0–P4. DeepSeek was briefed for P1 but produced
+ungrounded code (invented tables/APIs); Orion implemented directly per the disclosed exception.
+
+### P0 — release blockers (`edd93d2`, `44aa41b`, `2209f2a`)
+- `bot/requirements.txt`: pinned `aiohttp==3.8.6` (aiogram 2.25.2 breaks on aiohttp 3.9+).
+- `.github/workflows/ci.yml`: rewrote secret-check steps (`set -euo pipefail`, explicit fail-on-find).
+- `tools/build_miniapp.sh` (new): export catalog/policies → bundle; tolerates missing DB.
+- `tools/export_catalog.py`: writes empty catalog instead of crashing on missing DB.
+- `tools/build_miniapp_bundle.py`: tolerant CSS + idempotent rebuild. Pipeline verified → `miniapp/dist/index.html` builds.
+- `miniapp/catalog.json` / `policies.json` gitignored (build artifacts).
+- `admin/package-lock.json`: regenerated (`npm install --package-lock-only`); `npm ci --dry-run` passes.
+
+### P1 — money-critical (`3a990b4`)
+- **4.1 EVM transfer identity:** `crypto_deposits` gains `chain_id`, `token_contract`, `log_index` columns (migration in `create_tables`);
+  new `UNIQUE(chain_id, token_contract, txid, log_index)` index. Fetch functions synthesize per-tx log ordinal;
+  `crypto_watcher.py` passes full identity to `claim_crypto_deposit` (now accepts `chain_id`, `token_contract`, `log_index` kwargs).
+- **2.1 Stars backend enforcement:** `_place_order` rejects non-Stars payment for digital-goods carts before order creation.
+  Balance deliberately excluded (crypto top-up bypass).
+- **3.1 Atomic checkout:** new `db.create_checkout_atomic` wraps order + items + promo claim + cart clear in one
+  `BEGIN IMMEDIATE`; `_place_order` uses it. Stock still decrements at fulfillment per existing design.
+
+### 3.2 — transactional fulfillment (`3bd3320`)
+- New `db.fulfill_order_atomic`: claims digital keys, decrements physical stock, writes delivered values, marks order
+  fulfilled — all under one `BEGIN IMMEDIATE`. `handlers/common.py::fulfill_order` delegates to it; old compensation-based
+  `_rollback_fulfill` removed. Verified with in-memory test (overstock → atomic rollback, stock unchanged).
+
+### P2 — security (`bce834a`)
+- **14.1/14.2 True dual control for swaps:** `rental_swap_applications` gains `approved_by_1`/`approved_by_2` columns (migration).
+  First approval → `approved_1`; second approval must be a DIFFERENT admin → `approved` + tenant notified.
+- **12.2 HTTPS enforcement:** `NOVA_API_URL` with remote `http://` host raises at startup (localhost exempt).
+- Verified already sound: 13.1 (no hardcoded secrets), 10.1 (TON memo binding + expiry→manual review), 10.2 (`validate_init_data`
+  exists; no HTTP API edge in bot to wire it to), 8.1 (Payload push best-effort, never raises).
+
+### P3 — sweep tool hardening (`82a4b99`, `bot/tools/sweep.py`)
+- EIP-1559: `maxFeePerGas`/`maxPriorityFeePerGas` from `eth_feeHistory` (1 gwei floor); all txs type 2.
+- RPC validation: `eth_chainId` must match expected; refuse on syncing node or wrong chain.
+- Tx journal: append-only JSON written before broadcast, updated per-tx (crash-safe).
+- Doc fix (7.4): memory-wipe claim corrected to best-effort (CPython cannot guarantee wiping).
+
+### P4 — platform (`1ee6dc5`)
+- **12.x `has_rental` → `has_rental_history`:** clarifies UI-convenience-only, never authorisation. Migration backfills;
+  old `set_has_rental` kept as deprecated alias. Callers in `handlers/rent.py`, `handlers/common.py` updated.
+- **21.x Outbox pattern:** new `outbox_events` table; `order.created` event written in same tx as order in
+  `create_checkout_atomic`. Methods: `outbox_emit`, `outbox_claim_pending` (5-min retry backoff),
+  `outbox_mark_processed`, `outbox_mark_failed`.
+
+### Test bot status (21:56 IST)
+- RUNNING (PID 12626) @ `1ee6dc5` — restarted 21:48 IST with P1–P4 code. Proxy creds rotating ~minutely;
+  if it dies, use a getMe-verified credential from the current shell env (file creds often dead).
+- Smoke tests: 10/10 pass on all commits.
 
 ## Pending items (need the user)
 
