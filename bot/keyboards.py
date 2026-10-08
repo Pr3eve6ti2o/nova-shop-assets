@@ -747,17 +747,25 @@ def crypto_chains_kb(chain_states):
 
 # --- Rent flow (control-plane plans) ---
 def rent_plans_kb(plan_labels, selected_id):
-    """Plans screen: pick a plan, then Continue to payment (checkout Step-1 style).
+    """Rent entry screen: just Continue to Payment + Menu (checkout Step-1 style).
 
-    plan_labels: [(plan_id, label), ...]; selected_id: currently chosen plan.
+    Plan selection (Monthly/Yearly) lives BEHIND the Continue button.
+    plan_labels/selected_id kept for signature compatibility.
     """
     kb = InlineKeyboardMarkup()
     kb.add(
         InlineKeyboardButton(
-            texts.BTN_CONTINUE_TO_PAYMENT, callback_data=f"rent:topay:{selected_id}"
+            texts.BTN_CONTINUE_TO_PAYMENT, callback_data="rent:plans"
         )
     )
     kb.row(BTN_MENU)
+    kb.add(InlineKeyboardButton(texts.BTN_RENT_MINE, callback_data="rent:mine"))
+    return kb
+
+
+def rent_plan_kb(plan_labels, selected_id=None):
+    """Plan selection screen (behind Continue to Payment): Monthly / Yearly."""
+    kb = InlineKeyboardMarkup()
     row = []
     for pid, label in plan_labels:
         mark = "\u2705 " if str(pid) == str(selected_id) else ""
@@ -766,16 +774,20 @@ def rent_plans_kb(plan_labels, selected_id):
         )
     if row:
         kb.row(*row)
-    kb.add(InlineKeyboardButton(texts.BTN_RENT_MINE, callback_data="rent:mine"))
+    kb.add(InlineKeyboardButton(texts.BTN_BACK, callback_data="rent:back"))
+    kb.row(BTN_MENU)
     return kb
 
 
 def rent_method_kb(plan_id):
-    """Payment method selection after 'Continue to payment'."""
+    """Payment method selection: Balance, CryptoBot, Crypto payments."""
     kb = InlineKeyboardMarkup()
     kb.row(
         InlineKeyboardButton(texts.BTN_RENT_BALANCE, callback_data=f"rent:method:{plan_id}:balance"),
         InlineKeyboardButton(texts.BTN_RENT_CRYPTOBOT, callback_data=f"rent:method:{plan_id}:cryptobot"),
+    )
+    kb.add(
+        InlineKeyboardButton(texts.BTN_RENT_CRYPTO, callback_data=f"rent:method:{plan_id}:crypto"),
     )
     kb.add(InlineKeyboardButton(texts.BTN_BACK, callback_data="rent:back"))
     kb.row(BTN_MENU)

@@ -68,7 +68,8 @@ async def _get_plans():
     return rental
 
 
-async def _get_user_id(tg_id):
+async def _get_user_id(tg_id, username=None, first_name=None):
+    """Get or auto-provision the user (no website linking required)."""
     try:
         data = await _nova(
             "GET",
@@ -76,9 +77,18 @@ async def _get_user_id(tg_id):
             params={"telegram_id": str(tg_id)},
         )
     except RuntimeError as exc:
-        if "http_404" in str(exc):
-            return None
-        raise
+        if "http_404" not in str(exc):
+            raise
+        # Not found → auto-provision
+        data = await _nova(
+            "POST",
+            "/api/internal/users/ensure",
+            json_body={
+                "telegram_id": str(tg_id),
+                "username": username,
+                "first_name": first_name,
+            },
+        )
     if not isinstance(data, dict):
         return None
     return data.get("user_id")
@@ -225,9 +235,31 @@ async def cb_rent_back(query: types.CallbackQuery):
     await _render_plans_edit(query, plans, _default_plan_id(plans))
 
 
+@dp.callback_query_handler(lambda q: q.data == "rent:plans")
+async def cb_rent_plans(query: types.CallbackQuery):
+    """Continue to Payment -> show Monthly/Yearly plan selection."""
+    await query.answer()
+    try:
+        plans = await _get_plans()
+    except RuntimeError:
+        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE)
+        return
+
+    if not plans:
+        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE)
+        return
+
+    plan_labels = [(str(p.get("id")), _plan_label(p)) for p in plans]
+    await edit_text_safe(
+        query,
+        texts.MSG_RENT_CHOOSE_PLAN,
+        reply_markup=kb.rent_plan_kb(plan_labels),
+    )
+
+
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:select:"))
 async def cb_rent_select(query: types.CallbackQuery):
-    """Monthly/Yearly sub-buttons: choose the plan (shows a checkmark)."""
+    """Monthly/Yearly buttons: choose the plan, go to payment methods."""
     await query.answer()
     parts = query.data.split(":", 2)
     selected_id = parts[2] if len(parts) > 2 else ""
@@ -246,30 +278,14 @@ async def cb_rent_select(query: types.CallbackQuery):
     if selected_id not in valid_ids:
         selected_id = _default_plan_id(plans)
 
-    await _render_plans_edit(query, plans, selected_id)
-
-
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:topay:"))
-async def cb_rent_topay(query: types.CallbackQuery):
-    """Continue to payment (checkout Step-1 style): pick how to pay."""
-    await query.answer()
-    parts = query.data.split(":", 2)
-    plan_id = parts[2] if len(parts) > 2 else ""
-
-    try:
-        plans = await _get_plans()
-    except RuntimeError:
-        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE, reply_markup=kb.rent_back_kb())
-        return
-
     plan = None
     for p in plans:
-        if str(p.get("id")) == str(plan_id):
+        if str(p.get("id")) == str(selected_id):
             plan = p
             break
 
     if plan is None:
-        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE, reply_markup=kb.rent_back_kb())
+        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE)
         return
 
     text = texts.MSG_RENT_DETAIL.format(
@@ -279,7 +295,7 @@ async def cb_rent_topay(query: types.CallbackQuery):
         period=_period(plan),
         trial=_trial(plan),
     )
-    await edit_text_safe(query, text, reply_markup=kb.rent_method_kb(plan_id))
+    await edit_text_safe(query, text, reply_markup=kb.rent_method_kb(selected_id))
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:method:"))
@@ -305,7 +321,7 @@ async def cb_rent_method(query: types.CallbackQuery):
         await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE, reply_markup=kb.rent_back_kb())
         return
 
-    method_label = "Balance" if provider == "balance" else "CryptoBot"
+    method_label = {"balance": "Balance", "cryptobot": "CryptoBot", "crypto": "Crypto payments"}.get(provider, provider)
     text = texts.MSG_RENT_CONFIRM.format(
         name=_plan_label(plan),
         price=_price(plan),
@@ -323,14 +339,14 @@ async def cb_rent_confirm(query: types.CallbackQuery):
     provider = parts[3] if len(parts) > 3 else "balance"
 
     try:
-        user_id = await _get_user_id(query.from_user.id)
+        user_id = await _get_user_id(query.from_user.id, query.from_user.username, query.from_user.first_name)
     except RuntimeError:
         await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE, reply_markup=kb.rent_back_kb())
         return
 
     if not user_id:
         await edit_text_safe(
-            query, texts.MSG_RENT_LINK_NEEDED, reply_markup=kb.rent_back_kb()
+            query, texts.MSG_RENT_UNAVAILABLE, reply_markup=kb.rent_back_kb()
         )
         return
 
@@ -348,7 +364,7 @@ async def cb_rent_confirm(query: types.CallbackQuery):
         error = str(exc)
         if "http_404" in error:
             await edit_text_safe(
-                query, texts.MSG_RENT_LINK_NEEDED, reply_markup=kb.rent_back_kb()
+                query, texts.MSG_RENT_UNAVAILABLE, reply_markup=kb.rent_back_kb()
             )
         elif "http_400" in error and "insufficient" in error.lower():
             await edit_text_safe(
@@ -414,7 +430,7 @@ async def _my_rental_text(tg_id: int):
         return texts.MSG_RENT_UNAVAILABLE, kb.rent_back_kb()
 
     if not user_id:
-        return texts.MSG_RENT_LINK_NEEDED, kb.rent_back_kb()
+        return texts.MSG_RENT_UNAVAILABLE, kb.rent_back_kb()
 
     try:
         result = await _nova("GET", f"/api/internal/users/{user_id}/subscriptions")
