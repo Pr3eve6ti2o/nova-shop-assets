@@ -366,7 +366,7 @@ async def cb_rent_confirm(query: types.CallbackQuery):
     # button appears from here on (a sort of invoice view). Set before
     # rendering so the refreshed reply keyboard picks it up.
     try:
-        await db.set_has_rental(query.from_user.id)
+        await db.set_has_rental_history(query.from_user.id)
     except Exception:
         logger.warning("set_has_rental failed", exc_info=True)
 
@@ -451,14 +451,14 @@ async def nav_rent_mine(message: types.Message, state: FSMContext):
 
 
 async def ensure_rental_flag(tg_id: int):
-    """Backfill has_rental for users who subscribed before the flag existed.
+    """Backfill has_rental_history for users who subscribed before the flag existed.
 
     Called on /start; cheap (local check first, at most two API calls, and
     only until the flag is set once).
     """
     try:
         user = await db.get_user_by_tg(tg_id)
-        if user and user["has_rental"]:
+        if user and user["has_rental_history"]:
             return
     except Exception:
         pass
@@ -474,6 +474,6 @@ async def ensure_rental_flag(tg_id: int):
         return
     if result.get("subscriptions"):
         try:
-            await db.set_has_rental(tg_id)
+            await db.set_has_rental_history(tg_id)
         except Exception:
             logger.warning("ensure_rental_flag failed", exc_info=True)

@@ -57,7 +57,7 @@ async def mask_of_tg(tg_id: int) -> int:
 async def main_reply_kb(tg_id: int):
     user = await db.get_user_by_tg(tg_id)
     try:
-        show_rental = bool(user["has_rental"]) if user else False
+        show_rental = bool(user["has_rental_history"]) if user else False
     except (IndexError, KeyError, TypeError):
         show_rental = False
     return kb.reply_main_menu(is_admin=await is_admin_tg(tg_id),

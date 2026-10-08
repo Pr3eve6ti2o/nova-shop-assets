@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users(
   ref_code TEXT UNIQUE, referred_by INTEGER REFERENCES users(id),
   role_mask INTEGER DEFAULT 0, balance_cents INTEGER NOT NULL DEFAULT 0,
   has_rental INTEGER NOT NULL DEFAULT 0,
+  has_rental_history INTEGER NOT NULL DEFAULT 0,
   created_at TEXT);
 CREATE TABLE IF NOT EXISTS categories(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, emoji TEXT DEFAULT '\U0001f4e6',
@@ -66,6 +67,16 @@ CREATE TABLE IF NOT EXISTS order_items(
   order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
   product_id INTEGER, name TEXT, qty INTEGER, price_cents INTEGER,
   delivered_value TEXT);
+CREATE TABLE IF NOT EXISTS outbox_events(
+  id INTEGER PRIMARY KEY,
+  event_type TEXT NOT NULL,
+  aggregate_id TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  last_error TEXT,
+  processed_at TEXT,
+  created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS payments(
   id INTEGER PRIMARY KEY, provider TEXT NOT NULL,
   external_id TEXT NOT NULL, user_id INTEGER, order_id INTEGER,
@@ -198,6 +209,18 @@ class Database:
                 msg = str(e).lower()
                 # "duplicate column name": already migrated; "no such table":
                 # fresh DB, SCHEMA creates the table below. Anything else is real.
+            # Migration: rename has_rental -> has_rental_history (audit 12).
+            # The field is UI convenience only, never an authorisation source.
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN has_rental_history INTEGER NOT NULL DEFAULT 0")
+            except aiosqlite.OperationalError as e:
+                msg = str(e).lower()
+                if "duplicate column name" not in msg and "no such table" not in msg:
+                    raise
+            try:
+                await db.execute("UPDATE users SET has_rental_history = has_rental WHERE has_rental_history = 0")
+            except aiosqlite.OperationalError:
+                pass  # column may not exist on very old DBs; harmless
 
             # Migration: EVM transfer identity (audit 4.1). UNIQUE(chain, txid)
             # cannot distinguish two ERC-20 Transfer events in one transaction.
@@ -349,7 +372,18 @@ class Database:
                                   (user_id,)) as cur:
                 return await cur.fetchone()
 
+    async def set_has_rental_history(self, tg_id: int):
+        """Mark that the user has had a rental (UI convenience, NOT authorisation)."""
+        async with self._db() as db:
+            await db.execute(
+                "UPDATE users SET has_rental_history=1, has_rental=1 WHERE tg_id=?",
+                (tg_id,),
+            )
+            await db.commit()
+
     async def set_has_rental(self, tg_id: int):
+        """Deprecated: use set_has_rental_history."""
+        await self.set_has_rental_history(tg_id)
         """Mark that this Telegram user has subscribed at least once.
 
         Drives the persistent "My Rental" main-menu button (a sort of
@@ -1365,11 +1399,77 @@ class Database:
                 await db.execute("DELETE FROM cart_items WHERE user_id = ?",
                                  (user_id,))
 
+                # Outbox: Payload push event in the same transaction (audit 21).
+                import json as _json
+                await db.execute(
+                    "INSERT INTO outbox_events(event_type, aggregate_id,"
+                    " payload, created_at) VALUES (?, ?, ?, ?)",
+                    ("order.created", f"order:{order_id}",
+                     _json.dumps({"order_id": order_id, "user_id": user_id,
+                                  "total_cents": total_cents,
+                                  "payment_method": payment_method}),
+                     now),
+                )
+
                 await db.execute("COMMIT")
                 return order_id, None
             except Exception:
                 await db.execute("ROLLBACK")
                 raise
+
+    async def outbox_emit(self, event_type: str, aggregate_id: str,
+                          payload: dict) -> int:
+        """Write an outbox event (call within a transaction for atomicity)."""
+        import json
+        async with self._db() as db:
+            cur = await db.execute(
+                "INSERT INTO outbox_events(event_type, aggregate_id, payload,"
+                " created_at) VALUES (?, ?, ?, ?)",
+                (event_type, str(aggregate_id), json.dumps(payload),
+                 utcnow_iso()),
+            )
+            await db.commit()
+            return cur.lastrowid
+
+    async def outbox_claim_pending(self, limit: int = 10) -> list:
+        """Claim pending outbox events for delivery (single worker)."""
+        now = utcnow_iso()
+        async with self._db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                async with db.execute(
+                    "SELECT * FROM outbox_events"
+                    " WHERE processed_at IS NULL"
+                    " AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
+                    " ORDER BY id LIMIT ?",
+                    (now, limit)) as cur:
+                    rows = await cur.fetchall()
+                ids = [r["id"] for r in rows]
+                if ids:
+                    await db.execute(
+                        f"UPDATE outbox_events SET attempts = attempts + 1,"
+                        f" next_attempt_at = datetime('now', '+5 minutes')"
+                        f" WHERE id IN ({','.join('?' * len(ids))})",
+                        tuple(ids))
+                await db.execute("COMMIT")
+                return rows
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+
+    async def outbox_mark_processed(self, event_id: int):
+        async with self._db() as db:
+            await db.execute(
+                "UPDATE outbox_events SET processed_at=? WHERE id=?",
+                (utcnow_iso(), event_id))
+            await db.commit()
+
+    async def outbox_mark_failed(self, event_id: int, error: str):
+        async with self._db() as db:
+            await db.execute(
+                "UPDATE outbox_events SET last_error=? WHERE id=?",
+                (error[:500], event_id))
+            await db.commit()
 
     async def add_order_item(self, order_id: int, product_id: int, name: str,
                              qty: int, price_cents: int):
