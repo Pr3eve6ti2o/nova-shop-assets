@@ -295,7 +295,20 @@ async def _process_deposit(dep, now):
                                        seen_amount_crypto=str(total))
         return  # wait for more confirmations
 
-    claimed = await db.claim_crypto_deposit(dep["id"], best["txid"], str(total), conf)
+    # Transfer identity (audit 4.1): pass chain_id/token_contract/log_index
+    # so two ERC-20 Transfer events in one tx are distinct.
+    _chain_ids = {"eth": 1, "usdt_base": 8453, "usdc_base": 8453,
+                  "usdt_op": 10, "usdc_op": 10,
+                  "usdt_polygon": 137, "usdc_polygon": 137,
+                  "teth": 11155111, "tusdc_base": 84532}
+    _cid = _chain_ids.get(chain, 0)
+    _tcontract = (cp.CHAINS.get(chain, {}).get("token_contract")
+                  or cp.TESTNET_CHAINS.get(chain, {}).get("token_contract")
+                  or "native")
+    claimed = await db.claim_crypto_deposit(
+        dep["id"], best["txid"], str(total), conf,
+        chain_id=_cid, token_contract=_tcontract,
+        log_index=int(best.get("log_index", 0) or 0))
     if not claimed:
         if dep["status"] != "claimed":
             logger.info("deposit %s already claimed by another worker; skipping", dep["id"])

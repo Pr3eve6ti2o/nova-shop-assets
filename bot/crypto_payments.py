@@ -664,6 +664,7 @@ async def fetch_evm_token_txs(address: str, blockscout_base: str,
         logger.warning("blockscout failed (%s): %s", blockscout_base, e)
         return []
     out = []
+    _li_counters = {}
     for it in items:
         to = (it.get("to") or {}).get("hash", "")
         tok = (it.get("token") or {}).get("address", "")
@@ -675,8 +676,15 @@ async def fetch_evm_token_txs(address: str, blockscout_base: str,
             continue
         blk = it.get("block_number") or 0
         conf = (tip - int(blk) + 1) if blk and tip else 0
-        out.append({"txid": it.get("transaction_hash", ""), "to": to,
-                    "base": base, "confirmations": conf})
+        # Synthesized log_index: Blockscout doesn't return the EVM log index.
+        # Per-tx ordinal makes multiple Transfer events in one tx distinct.
+        txh = it.get("transaction_hash", "")
+        _li_counters[txh] = _li_counters.get(txh, 0)
+        log_index = _li_counters[txh]
+        _li_counters[txh] += 1
+        out.append({"txid": txh, "to": to,
+                    "base": base, "confirmations": conf,
+                    "log_index": log_index})
     await asyncio.sleep(1)
     return out
 
@@ -721,6 +729,7 @@ async def fetch_etherscan_v2_token_txs(address: str, chain_id: int,
     if not api_key:
         return []
     out = []
+    _li_counters = {}
     offset = 1000
     for page in range(1, 11):  # max 10 pages x 1000
         params = {
@@ -783,8 +792,14 @@ async def fetch_etherscan_v2_token_txs(address: str, chain_id: int,
                 conf = int(it.get("confirmations", 0) or 0)
             except (TypeError, ValueError):
                 conf = 0
-            out.append({"txid": it.get("hash", ""), "to": to,
-                        "base": base, "confirmations": conf})
+            # Synthesized log_index (Etherscan tokentx has no log index).
+            txh = it.get("hash", "")
+            _li_counters[txh] = _li_counters.get(txh, 0)
+            log_index = _li_counters[txh]
+            _li_counters[txh] += 1
+            out.append({"txid": txh, "to": to,
+                        "base": base, "confirmations": conf,
+                        "log_index": log_index})
         if len(items) < offset:
             break
         await asyncio.sleep(0.25)
@@ -801,6 +816,7 @@ async def fetch_etherscan_v2_native_txs(address: str, chain_id: int,
     if not api_key or not address:
         return []
     out = []
+    _li_counters = {}
     for page in range(1, 11):
         params = {
             "chainid": chain_id,
@@ -863,8 +879,14 @@ async def fetch_etherscan_v2_native_txs(address: str, chain_id: int,
                 conf = int(it.get("confirmations", 0) or 0)
             except (TypeError, ValueError):
                 conf = 0
-            out.append({"txid": it.get("hash", ""), "to": to,
-                        "base": base, "confirmations": conf})
+            # Synthesized log_index (Etherscan tokentx has no log index).
+            txh = it.get("hash", "")
+            _li_counters[txh] = _li_counters.get(txh, 0)
+            log_index = _li_counters[txh]
+            _li_counters[txh] += 1
+            out.append({"txid": txh, "to": to,
+                        "base": base, "confirmations": conf,
+                        "log_index": log_index})
         if len(items) < 1000:
             break
         await asyncio.sleep(0.25)

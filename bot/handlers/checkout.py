@@ -597,6 +597,15 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
         await query.answer("🚚 Cash on delivery isn't available for this "
                            "order.", show_alert=True)
         return
+    # Backend enforcement: digital goods sold inside Telegram MUST be paid
+    # with Telegram Stars (XTR). A forged callback cannot bypass this.
+    # "balance" is deliberately rejected: balance can be topped up with crypto,
+    # which would be an indirect Stars bypass.
+    if await _cart_has_digital(user["id"]) and method != "stars":
+        await query.answer(
+            "Digital goods must be paid with Telegram Stars.",
+            show_alert=True)
+        return
     t = await totals(user["id"], state, with_delivery=True)
     if not t["items"]:
         await query.answer(texts.MSG_CART_EMPTY, show_alert=True)
@@ -606,36 +615,28 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
         if not await product_available(p, it["qty"]):
             await query.answer(texts.ERR_OUT_OF_STOCK, show_alert=True)
             return
-    oid = await db.create_order(
+    # Atomic checkout: order + items + promo claim + cart clear commit
+    # together. A crash can never leave a partial order.
+    # NOTE: stock is decremented exactly once, atomically, in
+    # handlers/common.py::fulfill_order after payment. Do NOT decrement here.
+    promo_id = None
+    if t["promo_code"]:
+        promo = await db.get_promo(t["promo_code"])
+        promo_id = promo["id"] if promo else None
+    oid, reason = await db.create_checkout_atomic(
         user_id=user["id"], subtotal_cents=t["subtotal"],
         discount_cents=t["discount"], total_cents=t["total"],
         payment_method=method, delivery_kind=kind,
         address=data.get("address") if kind == "delivery" else None,
         phone=data.get("phone"),
-        promo_code=t["promo_code"])
-    # Claim the promo use only AFTER the order row exists, so a failure while
-    # creating the order can no longer burn the promo with no order to show.
-    # If the claim fails (max_uses lost in a race / already used), the promo
-    # is dead — cancel the just-created order and re-render confirm at full
-    # price instead of placing.
-    if t["promo_code"]:
-        promo = await db.get_promo(t["promo_code"])
-        claimed = await db.record_promo_usage(promo["id"], user["id"]) if promo else False
-        if not claimed:
-            await db.set_order_status(oid, "cancelled")
-            await state.update_data(promo_code=None)
-            await query.answer(texts.MSG_PROMO_INVALID, show_alert=True)
-            await render_confirm(query, state, user["id"])
-            return
-
-    for it in t["items"]:
-        await db.add_order_item(oid, it["product_id"], it["name"],
-                                it["qty"], it["price_cents"])
-    # NOTE: stock is decremented exactly once, atomically, in
-    # handlers/common.py::fulfill_order after payment. Do NOT decrement here —
-    # a placement-time decrement would double-count (fulfill_order also
-    # decrements) and unpaid cancelled orders never restore stock.
-    await db.cart_clear(user["id"])
+        promo_code=t["promo_code"], promo_id=promo_id,
+        items=[(it["product_id"], it["name"], it["qty"], it["price_cents"])
+               for it in t["items"]])
+    if reason:
+        await state.update_data(promo_code=None)
+        await query.answer(texts.MSG_PROMO_INVALID, show_alert=True)
+        await render_confirm(query, state, user["id"])
+        return
     await state.update_data(promo_code=None)
     await db.audit(query.from_user.id, "order_create",
                    f"order={oid} total={t['total']} method={method}")

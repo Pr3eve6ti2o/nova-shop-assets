@@ -198,6 +198,37 @@ class Database:
                 msg = str(e).lower()
                 # "duplicate column name": already migrated; "no such table":
                 # fresh DB, SCHEMA creates the table below. Anything else is real.
+
+            # Migration: EVM transfer identity (audit 4.1). UNIQUE(chain, txid)
+            # cannot distinguish two ERC-20 Transfer events in one transaction.
+            # New identity: (chain_id, token_contract, txid, log_index).
+            for _ddl in (
+                "ALTER TABLE crypto_deposits ADD COLUMN chain_id INTEGER",
+                "ALTER TABLE crypto_deposits ADD COLUMN token_contract TEXT NOT NULL DEFAULT 'native'",
+                "ALTER TABLE crypto_deposits ADD COLUMN log_index INTEGER NOT NULL DEFAULT 0",
+            ):
+                try:
+                    await db.execute(_ddl)
+                except aiosqlite.OperationalError as e:
+                    _m = str(e).lower()
+                    if "duplicate column name" not in _m and "no such table" not in _m:
+                        raise
+            try:
+                await db.execute(
+                    "UPDATE crypto_deposits SET chain_id = CASE lower(chain) "
+                    "WHEN 'eth' THEN 1 WHEN 'ethereum' THEN 1 "
+                    "WHEN 'usdt_base' THEN 8453 WHEN 'usdc_base' THEN 8453 "
+                    "WHEN 'usdt_op' THEN 10 WHEN 'usdc_op' THEN 10 "
+                    "WHEN 'usdt_polygon' THEN 137 WHEN 'usdc_polygon' THEN 137 "
+                    "ELSE 0 END WHERE chain_id IS NULL")
+                await db.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_crypto_deposits_transfer "
+                    "ON crypto_deposits (chain_id, token_contract, txid, log_index) "
+                    "WHERE txid IS NOT NULL")
+            except aiosqlite.OperationalError as e:
+                _m = str(e).lower()
+                if "no such table" not in _m:
+                    raise
                 if "duplicate column name" not in msg and "no such table" not in msg:
                     raise
             # Migration: add purpose/topup_user_id to crypto_deposits if missing
@@ -1181,6 +1212,76 @@ class Database:
                     await db.execute("ROLLBACK")
                     raise
 
+
+    async def create_checkout_atomic(self, *, user_id, subtotal_cents,
+                                     discount_cents, total_cents, payment_method,
+                                     delivery_kind, address, phone, promo_code=None,
+                                     promo_id=None, items=()) -> tuple:
+        """Create order + items + promo claim + cart clear in one transaction.
+
+        Unlike create_order_atomic, this does NOT decrement stock — stock
+        decrements at fulfillment time (handlers/common.py::fulfill_order)
+        after payment, per the existing design.
+
+        items: iterable of (product_id, name, qty, price_cents).
+        Returns (order_id, None) on success, or (None, reason) on failure
+        where reason is 'promo_used' or 'promo_exhausted'. Nothing is
+        persisted on failure.
+        """
+        items = tuple(items)
+        for product_id, name, qty, price_cents in items:
+            if qty <= 0 or price_cents < 0:
+                return None, "invalid_item"
+        now = utcnow_iso()
+        async with self._db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cur = await db.execute(
+                    "INSERT INTO orders(user_id, status, subtotal_cents,"
+                    " discount_cents, total_cents, payment_method, delivery_kind,"
+                    " address, phone, promo_code, created_at, updated_at)"
+                    " VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (user_id, subtotal_cents, discount_cents, total_cents,
+                     payment_method, delivery_kind, address, phone, promo_code,
+                     now, now),
+                )
+                order_id = cur.lastrowid
+
+                for product_id, name, qty, price_cents in items:
+                    await db.execute(
+                        "INSERT INTO order_items(order_id, product_id, name, qty,"
+                        " price_cents) VALUES (?, ?, ?, ?, ?)",
+                        (order_id, product_id, name, qty, price_cents),
+                    )
+
+                if promo_id is not None:
+                    cur = await db.execute(
+                        "INSERT INTO promo_usages(promo_id, user_id,"
+                        " used_at) VALUES (?, ?, ?)"
+                        " ON CONFLICT(promo_id, user_id) DO NOTHING",
+                        (promo_id, user_id, now),
+                    )
+                    if cur.rowcount == 0:
+                        await db.execute("ROLLBACK")
+                        return None, "promo_used"
+                    cur = await db.execute(
+                        "UPDATE promos SET used_count = used_count + 1"
+                        " WHERE id=? AND (max_uses = 0 OR used_count < max_uses)",
+                        (promo_id,),
+                    )
+                    if cur.rowcount == 0:
+                        await db.execute("ROLLBACK")
+                        return None, "promo_exhausted"
+
+                await db.execute("DELETE FROM cart_items WHERE user_id = ?",
+                                 (user_id,))
+
+                await db.execute("COMMIT")
+                return order_id, None
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+
     async def add_order_item(self, order_id: int, product_id: int, name: str,
                              qty: int, price_cents: int):
         async with self._db() as db:
@@ -1627,7 +1728,10 @@ class Database:
 
     async def claim_crypto_deposit(self, deposit_id: int, txid: str,
                                    seen_amount_crypto: str,
-                                   confirmations: int) -> bool:
+                                   confirmations: int, *,
+                                   chain_id: int = 0,
+                                   token_contract: str = "native",
+                                   log_index: int = 0) -> bool:
         """Atomically claim a deposit for finalization. Returns True only for
         the winner of the race.
 
@@ -1636,16 +1740,20 @@ class Database:
         sees status='claimed' and gets rowcount 0. It is deliberately NOT
         txid-IS-NULL: the first underpaid detection already writes a txid, and
         a top-up that brings the total over tolerance must still claim.
-        UNIQUE(chain, txid) violations also return False.
+        UNIQUE(chain_id, token_contract, txid, log_index) violations also
+        return False (two Transfer events in one tx are distinct).
         """
         try:
             async with self._claim_lock:
                 async with self._db() as db:
                     cur = await db.execute(
                         "UPDATE crypto_deposits SET txid=?, seen_amount_crypto=?,"
-                        " confirmations=?, status='claimed'"
+                        " confirmations=?, status='claimed',"
+                        " chain_id=?, token_contract=?, log_index=?"
                         " WHERE id=? AND status IN ('pending','underpaid','late')",
-                        (txid, seen_amount_crypto, confirmations, deposit_id),
+                        (txid, seen_amount_crypto, confirmations,
+                         chain_id, token_contract.lower(), log_index,
+                         deposit_id),
                     )
                     won = cur.rowcount > 0
                     await db.commit()
