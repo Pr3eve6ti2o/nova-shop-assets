@@ -154,52 +154,12 @@ async def notify_admins(text: str, min_bit: int = 0, reply_markup=None):
 async def fulfill_order(order_id: int):
     """Claim digital values / decrement stock. Returns (ok, note).
 
-    H16: tracks every mutation; on any failure, restores popped keys and
-    decremented stock before returning False, so a partial fulfillment
-    never strands inventory.
+    Audit 3.2: the whole fulfillment runs in ONE database transaction
+    (db.fulfill_order_atomic). Any failure rolls back atomically — no
+    compensation rollback needed, so inventory can never be stranded by
+    a failed rollback.
     """
-    order = await db.get_order(order_id)
-    items = await db.get_order_items(order_id)
-    undone = []  # (kind, product_id, qty_or_values) to roll back on failure
-    for it in items:
-        p = await db.get_product(it["product_id"])
-        if not p or not p["is_active"]:
-            await _rollback_fulfill(order_id, undone)
-            return False, f"product {it['name']} unavailable"
-        if p["kind"] == "digital":
-            if p["is_unlimited"]:
-                pass  # unlimited digital — nothing to claim
-            else:
-                vals = await db.pop_product_values(p["id"], it["qty"], order_id)
-                if vals is None:
-                    await _rollback_fulfill(order_id, undone)
-                    return False, f"out of keys: {p['name']}"
-                await db.set_order_item_value(order_id, p["id"], "\n".join(vals))
-                undone.append(("keys", p["id"], vals))
-        else:
-            if p["stock"] != -1:
-                # Atomic conditional decrement: concurrent checkouts can't oversell.
-                if await db.decrement_stock(p["id"], it["qty"]) == 0:
-                    await _rollback_fulfill(order_id, undone)
-                    return False, f"out of stock: {p['name']}"
-                undone.append(("stock", p["id"], it["qty"]))
-    return True, ""
-
-
-async def _rollback_fulfill(order_id: int, undone: list):
-    """Best-effort inverse of fulfill_order's mutations."""
-    for kind, pid, payload in reversed(undone):
-        try:
-            if kind == "keys":
-                await db.restore_product_values(pid, payload, order_id)
-            else:
-                await db.increment_stock(pid, payload)
-        except Exception as e:
-            logger.warning("fulfill rollback failed: %s %s: %s", kind, pid, e)
-    try:
-        await db.clear_order_item_values(order_id)
-    except Exception as e:
-        logger.warning("fulfill rollback clear values failed: %s", e)
+    return await db.fulfill_order_atomic(order_id)
 
 
 async def maybe_credit_referral(order) -> int:

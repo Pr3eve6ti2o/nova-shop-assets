@@ -714,6 +714,95 @@ class Database:
                 (product_id,)) as cur:
                 return (await cur.fetchone())["c"]
 
+
+    async def fulfill_order_atomic(self, order_id: int) -> tuple:
+        """Fulfill an order in ONE transaction (audit 3.2).
+
+        Claims digital values, decrements physical stock, writes delivered
+        values, and marks the order fulfilled — all under a single
+        BEGIN IMMEDIATE. Any failure rolls back the whole thing atomically,
+        so partial fulfillment can never persist and no compensation
+        rollback is needed.
+
+        Returns (True, "") on success, or (False, reason) where reason is
+        one of 'not_found', 'already_fulfilled', 'product_unavailable',
+        'out_of_keys', 'out_of_stock'. Nothing is persisted on failure.
+        """
+        now = utcnow_iso()
+        async with self._claim_lock:
+            async with self._db() as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    async with db.execute(
+                            "SELECT * FROM orders WHERE id=?", (order_id,)) as cur:
+                        order = await cur.fetchone()
+                    if not order:
+                        await db.execute("ROLLBACK")
+                        return False, "not_found"
+                    if order["status"] == "fulfilled":
+                        await db.execute("ROLLBACK")
+                        return False, "already_fulfilled"
+
+                    async with db.execute(
+                            "SELECT * FROM order_items WHERE order_id=?",
+                            (order_id,)) as cur:
+                        items = await cur.fetchall()
+
+                    for it in items:
+                        async with db.execute(
+                                "SELECT * FROM products WHERE id=?",
+                                (it["product_id"],)) as cur:
+                            p = await cur.fetchone()
+                        if not p or not p["is_active"]:
+                            await db.execute("ROLLBACK")
+                            return False, f"product {it['name']} unavailable"
+                        if p["kind"] == "digital":
+                            if not p["is_unlimited"]:
+                                async with db.execute(
+                                        "SELECT id, value FROM product_values"
+                                        " WHERE product_id=? AND is_used=0"
+                                        " ORDER BY id LIMIT ?",
+                                        (p["id"], it["qty"])) as cur:
+                                    rows = await cur.fetchall()
+                                if len(rows) < it["qty"]:
+                                    await db.execute("ROLLBACK")
+                                    return False, f"out of keys: {p['name']}"
+                                ids = [r["id"] for r in rows]
+                                await db.execute(
+                                    "UPDATE product_values SET is_used=1,"
+                                    " used_in_order=? WHERE id IN (%s)"
+                                    % ",".join("?" * len(ids)),
+                                    (order_id, *ids),
+                                )
+                                vals = "\n".join(r["value"] for r in rows)
+                                await db.execute(
+                                    "UPDATE order_items SET delivered_value=?"
+                                    " WHERE rowid=(SELECT rowid FROM order_items"
+                                    " WHERE order_id=? AND product_id=?"
+                                    " ORDER BY rowid LIMIT 1)",
+                                    (vals, order_id, p["id"]),
+                                )
+                        else:
+                            if p["stock"] != -1:
+                                cur = await db.execute(
+                                    "UPDATE products SET stock = stock - ?"
+                                    " WHERE id=? AND stock >= ?",
+                                    (it["qty"], p["id"], it["qty"]),
+                                )
+                                if cur.rowcount == 0:
+                                    await db.execute("ROLLBACK")
+                                    return False, f"out of stock: {p['name']}"
+
+                    await db.execute(
+                        "UPDATE orders SET status='fulfilled', updated_at=?"
+                        " WHERE id=?", (now, order_id),
+                    )
+                    await db.execute("COMMIT")
+                    return True, ""
+                except Exception:
+                    await db.execute("ROLLBACK")
+                    raise
+
     async def pop_product_values(self, product_id: int, qty: int, order_id: int):
         """Atomically claim `qty` unused values. Returns list or None if short."""
         if qty <= 0:
