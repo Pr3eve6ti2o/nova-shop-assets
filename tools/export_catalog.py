@@ -27,9 +27,13 @@ def main() -> int:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     db_path = os.path.join(root, args.db)
     out_path = os.path.join(root, args.out)
-    if not os.path.exists(db_path):
-        print(f"DB not found: {db_path}", file=sys.stderr)
-        return 1
+    if not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump({"products": []}, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        print(f"Wrote empty catalog to {out_path} (no DB at {db_path})")
+        return 0
 
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row

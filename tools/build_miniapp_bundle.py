@@ -35,14 +35,18 @@ def main() -> int:
     js = read("app.js")
     catalog = json.loads(read("catalog.json"))
 
-    # Inline the stylesheet.
+    # Inline the stylesheet (if not already inline).
     link_tag = '<link rel="stylesheet" href="styles.css">'
-    if link_tag not in html:
-        print(f"ERROR: expected {link_tag!r} in index.html", file=sys.stderr)
+    if link_tag in html:
+        # Guard against a literal </style> inside the CSS.
+        css_safe = css.replace("</style", "<\\/style")
+        html = html.replace(link_tag, "<style>\n" + css_safe + "\n</style>")
+    elif "<style>" in html:
+        print("NOTE: styles already inline in index.html; skipping CSS inlining")
+    else:
+        print(f"ERROR: expected {link_tag!r} or inline <style> in index.html",
+              file=sys.stderr)
         return 1
-    # Guard against a literal </style> inside the CSS.
-    css_safe = css.replace("</style", "<\\/style")
-    html = html.replace(link_tag, "<style>\n" + css_safe + "\n</style>")
 
     # Inline the catalog data BEFORE the app script.
     catalog_json = json.dumps(catalog, ensure_ascii=False, separators=(",", ":"))
@@ -58,12 +62,44 @@ def main() -> int:
                     + ";</script>")
 
     # Inline the app script (escape any literal </script> inside strings).
-    script_tag = '<script src="app.js"></script>'
-    if script_tag not in html:
-        print(f"ERROR: expected {script_tag!r} in index.html", file=sys.stderr)
-        return 1
+    # Idempotent: strips any previously-inlined NOVA_POLICIES / NOVA_CATALOG
+    # blocks and the inline app.js, then re-inlines fresh.
+    import re
+    html = re.sub(r'<script>window\.NOVA_POLICIES=.*?</script>\n?', '',
+                  html, flags=re.DOTALL)
+    html = re.sub(r'<script>window\.NOVA_CATALOG=.*?</script>\n?', '',
+                  html, flags=re.DOTALL)
     js_safe = js.replace("</script", "<\\/script")
-    html = html.replace(script_tag, policies_tag + "\n" + catalog_tag + "\n<script>\n" + js_safe + "\n</script>")
+    script_tag = '<script src="app.js"></script>'
+    inline_marker = "Nova Shop Mini App \u2014 storefront SPA"
+    if script_tag in html:
+        html = html.replace(
+            script_tag,
+            policies_tag + "\n" + catalog_tag + "\n<script>\n"
+            + js_safe + "\n</script>")
+    elif inline_marker in html:
+        # Already-bundled index.html: replace the inline app.js block.
+        # Find the last <script> block containing the marker and swap it.
+        def _swap_app(m):
+            return "<script>\n" + js_safe + "\n</script>"
+        html, n = re.subn(
+            r'<script>\n/\* =+\n   Nova Shop Mini App \u2014 storefront SPA.*?</script>',
+            _swap_app, html, flags=re.DOTALL)
+        if n == 0:
+            print("WARN: could not locate inline app.js; appending fresh copy",
+                  file=sys.stderr)
+            html = html.replace("</body>",
+                                policies_tag + "\n" + catalog_tag + "\n<script>\n"
+                                + js_safe + "\n</script>\n</body>")
+        else:
+            # Insert policies/catalog before the (now fresh) app script.
+            html = html.replace("<script>\n" + js_safe[:50],
+                                policies_tag + "\n" + catalog_tag
+                                + "\n<script>\n" + js_safe[:50], 1)
+    else:
+        print(f"ERROR: expected {script_tag!r} or bundled app.js in index.html",
+              file=sys.stderr)
+        return 1
 
     # Sanity: no external local refs may remain (telegram-web-app.js is allowed).
     for bad in ('href="styles.css"', 'src="app.js"', '"catalog.json"'):

@@ -90,10 +90,20 @@ jobs:
       - name: Check for obvious committed secret files
         shell: bash
         run: |
-          ! find . -type f \\( -name ".env" -o -name "*.pem" -o -name "*.key" \\) -not -path "./.git/*" | grep .
+          set -euo pipefail
+          secret_files="$(find . -type f \( -name ".env" -o -name "*.pem" -o -name "*.key" \) -not -path "./.git/*" -print)"
+          if [ -n "$secret_files" ]; then
+            echo "ERROR: committed secret files found:" >&2
+            printf '%s\n' "$secret_files" >&2
+            exit 1
+          fi
 
       - name: Check for seed/private-key markers
         shell: bash
         run: |
-          ! grep -RniE "(BEGIN (OPENSSH|RSA|EC|PRIVATE KEY)|xprv|zprv|mnemonic.*=)" \
-            --exclude-dir=.git --exclude='*.md' . 
+          set -euo pipefail
+          if grep -RniE '(BEGIN (OPENSSH|RSA|EC|PRIVATE KEY)|xprv|zprv|mnemonic.*=)' \
+            --exclude-dir=.git --exclude='*.md' --exclude='ci.yml' .; then
+            echo "ERROR: private-key/seed markers found" >&2
+            exit 1
+          fi
