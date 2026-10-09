@@ -121,6 +121,75 @@ ungrounded code (invented tables/APIs); Orion implemented directly per the discl
   if it dies, use a getMe-verified credential from the current shell env (file creds often dead).
 - Smoke tests: 10/10 pass on all commits.
 
+## Second re-audit fixes (2026-10-08 late evening, `refactor/nova-shop-professional`, 8 LOCAL commits — NOT yet pushed, awaiting user's PAT)
+
+### Rent-flow corrections (`1977e1c`, pushed 22:33 IST)
+User corrected the rent UI: (1) rent screen shows ONLY "Continue to Payment" + Menu — Monthly/Yearly
+selector appears AFTER tapping it (plans were wrongly shown as sub-buttons on the entry screen);
+(2) payment screen now has Balance / CryptoBot / **Crypto payments** (direct-crypto option was missing);
+(3) removed the "link your Telegram on the website first" gate (was never the user's spec) — bot now
+auto-provisions users silently via new identity endpoint `/api/internal/users/ensure`.
+
+### Re-audit P0 — release blockers (`fd77354`)
+1. CI now runs `tools/build_miniapp.sh` (was: bundler directly, bypassing exporters); `MINIAPP_FAIL_CLOSED=1` in CI.
+2. Legacy `UNIQUE(chain, txid)` dropped via SQLite table-rebuild migration; event identity is solely
+   `(chain_id, token_contract, tx_hash, log_index)`.
+3. Observations record the REAL token contract from the chain registry (was hardcoded `'native'`).
+4. Deterministic `log_index`: per-tx ordinals sorted by (block, recipient, value); documented as synthetic.
+5. Testnet routing: `chain_configured()`/`enabled_chains()` use `active_chains()`; testnet chains in stablecoin set.
+6. TON Connect: `create_tonconnect_order_atomic()` — order+items+payment in one tx; duplicate txid rolls back all.
+
+### Re-audit P1 — financial integrity (`3f85748`)
+7. Payment-intent model: observations link to `deposit_id`/`order_id`/`user_id` with `settled_at` (intent → observations → settlement).
+8. Fiat/crypto separated: `fiat_amount_minor`/`fiat_currency` vs `crypto_amount_atomic`/`crypto_asset`/`crypto_chain`/`token_contract`.
+9. ETH USDT fallback: Blockscout → Etherscan V2 (was single-source).
+10. Replay: `replay_observations_from(chain, from_block)` resets cursor; dedup makes replay safe.
+11. Decimal quotes: `usd_cents_to_base_units` uses `Decimal(str(price))`, no float rounding.
+
+### Product documentation (`bf3c47f`) + founder's vision (`0c27703`)
+- `docs/NOVA-SHOP-PRODUCT.md` (301 lines): what is being built (shop bot + rental SaaS), components, payment rails
+  incl. Stars-exclusivity rule, rental plans/lifecycle/dual-control swaps, data model, architectural decisions,
+  exact rent button flow, repo layout, glossary. Written so another AI can produce user guides/API docs/runbooks.
+- §11 "The Vision — How the Founder Is Building This": best Telegram shop bot that exists; English-only;
+  sleek/minimal; company-grade engineering (verify before claiming; money paths tested with real money);
+  rental platform not just a bot; self-custody $0 rails; professional reusable repo; external-models-build /
+  Orion-verifies division of labor; two budgets never confused; straight talk beats comfort.
+
+### Re-audit P2 — security (`994a844`)
+13. `PERM_SWAP_APPROVE` (128): swap approve/deny requires it specifically (generic role_mask no longer grants it).
+14. Atomic dual-approval: conditional `UPDATE ... WHERE` on state; concurrent approvals can't overwrite each other.
+15. Second-approver routing: `_notify_admins_second_approval` actually DMs eligible approvers (was a no-op).
+16. `PAYLOAD_URL` HTTPS enforcement for remote hosts (same rule as `NOVA_API_URL`).
+17. Legacy per-user TON claim path deleted; all flows use per-intent `TC-` codes.
+
+### Re-audit P3 — production architecture (`5774ae8`)
+18. `bot/outbox_worker.py`: exponential backoff 5min→24h, max 10 attempts; wired into `app.py`.
+19. `bot/watcher_main.py` standalone entry + `nova-shop-watcher.service`; `WATCHER_STANDALONE=1` disables in-process watcher.
+20. PostgreSQL path: `bot/db/` factory (`DATABASE_URL` selects backend), `PostgresDB` scaffold, `docs/P3-POSTGRESQL-MIGRATION.md` 4-phase plan. SQLite remains default.
+21. DB-backed sliding-window rate limits (`bot/rate_limit.py`, `rate_limit_hits` table), multi-replica safe.
+22. Versioned migrations: `bot/migrations/` + runner (m001 baseline, m002 rate_limit_hits, m003 inventory_reservations).
+23. Inventory reservations: `reserve_inventory()`/`release_reservation()`/`release_expired_reservations()` — no overselling.
+24. `bot/product_dto.py`: whitelisted fields, availability status instead of raw stock (anti-probing).
+
+### Re-audit P4 — platform verification (`0e3bcb8`, docs only)
+25–31 verified already built in R0–R10: identity reproducible, better-auth + Telegram login, API-key lifecycle + docs,
+quota enforcement, HMAC billing webhooks, customer dashboard, public website. Documented in `docs/P4-PLATFORM-VERIFICATION.md`.
+
+### Bot import fix (`612c710`)
+- `app.py`: correct `db` import from `loader`, not `database`.
+
+### Test bot status (2026-10-09 01:44 UTC)
+- RUNNING (PID 5182) @ `612c710` — restarted 01:44 UTC after proxy-credential expiry killed the previous instance.
+  Launched with a getMe-verified credential exported into the process env (NOT from the file: the minutely
+  `shop-bot-proxy-refresh` cron keeps writing dead credentials — 407 on most file creds; running process is
+  unaffected until its own credential rotates, then it dies and must be relaunched the same way).
+- The 8 commits above are LOCAL ONLY — `git log 1977e1c..HEAD`. Push needs the user's PAT (asked 23:02 IST, awaiting).
+- Deposit detection verified healthy 2026-10-09 ~09:05 IST: Polygon Blockscout 403s (Cloudflare, expected) →
+  Etherscan V2 fallback engages and responds live; deposit #9 (user's 1 USDT Polygon test) has zero on-chain
+  transfers — the top-up never hit the chain, nothing to sweep. Fallback is silent on empty results by design
+  (no log when Etherscan returns "No transactions found"); the per-minute Blockscout 403 warnings are harmless.
+  Late-sweep of deposit #9 stops after 2026-10-09 09:08 UTC (24h window).
+
 ## Pending items (need the user)
 
 - [ ] `SUPPORT_USERNAME` in bot `.env` + BotFather description (text in `docs/TOKEN-SWAP-FLOW.md`)
