@@ -80,6 +80,13 @@ if WEBHOOK_HOST and WEBHOOK_PATH:
         raise RuntimeError("WEBHOOK_SECRET_TOKEN must be set to a strong value when webhook mode is enabled")
 else:
     WEBHOOK_URL = None
+# P1-4: Warn loudly when webhook is half-configured — silent
+# fallback to polling is confusing in production.
+if bool(WEBHOOK_HOST) != bool(WEBHOOK_PATH):
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "WEBHOOK_HOST set without WEBHOOK_PATH (or vice versa) — "
+        "falling back to polling. Set both for webhook mode.")
 
 # --- Crypto payments (all optional) ---
 CRYPTOBOT_TOKEN = os.getenv("CRYPTOBOT_TOKEN") or None

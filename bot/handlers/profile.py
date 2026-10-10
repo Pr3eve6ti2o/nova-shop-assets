@@ -134,9 +134,13 @@ async def cb_purchases(query: types.CallbackQuery):
         dvals = [(i["name"], i["delivered_value"]) for i in items if i["delivered_value"]]
         # P0-2: Always show the order, even if nothing delivered yet.
         if dvals:
+            # P1-5: Escape key values — HTML metachars would break rendering.
+            import html as _html
             blocks.append(texts.MSG_PURCHASE_BLOCK.format(oid=o["id"]) + "\n" +
                           "\n".join(
-                              texts.MSG_PURCHASE_KEY_LINE.format(name=n, value=v)
+                              texts.MSG_PURCHASE_KEY_LINE.format(
+                                  name=_html.escape(str(n)),
+                                  value=_html.escape(str(v)))
                               for n, v in dvals))
         else:
             blocks.append(texts.MSG_PURCHASE_BLOCK.format(oid=o["id"]) + "\n" +
@@ -154,13 +158,26 @@ async def cb_purchases(query: types.CallbackQuery):
 
 @dp.callback_query_handler(text="ref")
 async def cb_referral(query: types.CallbackQuery):
+    # P1-1: Fail-closed chat guard — referral links contain keys, private only.
+    if query.message.chat.type != "private":
+        await query.answer(
+            "Referral links contain sensitive info — open me in a private chat.",
+            show_alert=True)
+        return
     await query.answer()
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     me = await bot.get_me()
     if not me.username:
         await edit_text_safe(query, texts.ERR_NOT_FOUND, kb.profile_kb())
         return
-    link = f"https://t.me/{me.username}?start=ref_{user['ref_code']}"
+    # P1-6: ref_code may be NULL — do not emit a live ?start=ref_None link.
+    ref_code = user.get("ref_code")
+    if not ref_code:
+        await edit_text_safe(
+            query, "⚠️ Referral code not available. Contact support.",
+            kb.profile_kb())
+        return
+    link = f"https://t.me/{me.username}?start=ref_{ref_code}"
     percent = await db.referral_percent()
     count = await db.referral_count(user["id"])
     earned = await db.referral_earnings_total(user["id"])
