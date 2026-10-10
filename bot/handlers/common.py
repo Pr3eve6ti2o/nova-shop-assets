@@ -51,7 +51,11 @@ async def mask_of_tg(tg_id: int) -> int:
     # Fail-closed like admin.mask_of: reject negative/non-int, strip unknown bits.
     if tg_id in config.ADMINS:
         return config.PERM_ALL
-    user = await db.get_user_by_tg(tg_id)
+    # P1-3: Fail closed on DB exception.
+    try:
+        user = await db.get_user_by_tg(tg_id)
+    except Exception:
+        return 0
     if not user or user.get("is_banned"):
         return 0
     mask = user.get("role_mask") or 0

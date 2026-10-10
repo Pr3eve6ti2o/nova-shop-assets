@@ -54,7 +54,9 @@ def _parse_id_list(raw: str) -> list:
     return ids
 
 
-ADMINS: list = _parse_id_list(os.getenv("ADMINS", ""))
+# P1-2: frozenset for O(1) membership test; _parse_id_list validates ints
+# and raises on garbage so misconfiguration fails fast, not silently.
+ADMINS: frozenset = frozenset(_parse_id_list(os.getenv("ADMINS", "")))
 
 PAYMENTS_PROVIDER_TOKEN = os.getenv("PAYMENTS_PROVIDER_TOKEN") or None
 

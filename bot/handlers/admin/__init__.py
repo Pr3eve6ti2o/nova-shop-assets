@@ -22,7 +22,13 @@ async def mask_of(tg_id: int) -> int:
         except Exception:
             pass  # audit failure must not block admin access
         return config.PERM_ALL
-    user = await db.get_user_by_tg(tg_id)
+    # P1-3: Fail closed on DB exception — do not propagate, do not grant.
+    try:
+        user = await db.get_user_by_tg(tg_id)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("mask_of DB error for %s: %s", tg_id, e)
+        return 0
     if not user:
         return 0
     # Banned users get nothing, even with a stored mask.
