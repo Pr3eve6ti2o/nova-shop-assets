@@ -344,6 +344,12 @@ async def _is_application_valid(app_id: int) -> tuple[bool, str]:
 
 
 def _is_admin(tg_id: int) -> bool:
+    """Root admin check (config.ADMINS only).
+
+    P1-1: This is NOT the swap-approval check. For swap approval, use
+    _swap_approver_only() which is the single source of truth
+    (ADMINS ∪ PERM_SWAP_APPROVE). This function is for root-only operations.
+    """
     return tg_id in config.ADMINS
 
 
