@@ -90,7 +90,14 @@ if bool(WEBHOOK_HOST) != bool(WEBHOOK_PATH):
 
 # --- Crypto payments (all optional) ---
 CRYPTOBOT_TOKEN = os.getenv("CRYPTOBOT_TOKEN") or None
-CRYPTOBOT_TESTNET = (os.getenv("CRYPTOBOT_TESTNET", "0") or "0").strip() == "1"
+# P1-3: Single truthiness parser for all boolean flags. Previously
+# three conventions coexisted (== "1" vs .lower() in {...}), so
+# CRYPTOBOT_TESTNET=true was False while CRYPTO_TESTNET=true was True.
+def _flag(name: str, default: str = "0") -> bool:
+    return (os.getenv(name, default) or default).strip().lower() in (
+        "1", "true", "yes", "on")
+
+CRYPTOBOT_TESTNET = _flag("CRYPTOBOT_TESTNET", "0")
 CRYPTOBOT_FEE_PERCENT: int = int(os.getenv("CRYPTOBOT_FEE_PERCENT", "3") or 3)
 if CRYPTOBOT_FEE_PERCENT < 0:
     raise RuntimeError("CRYPTOBOT_FEE_PERCENT must be >= 0")
@@ -185,13 +192,13 @@ if not NOVA_API_KEY:
     if not _is_local_url:
         raise RuntimeError(
             "NOVA_API_KEY is required for non-localhost NOVA_API_URL.")
-RENTAL_TOKEN_ONBOARDING = os.getenv("RENTAL_TOKEN_ONBOARDING", "1") == "1"
+RENTAL_TOKEN_ONBOARDING = _flag("RENTAL_TOKEN_ONBOARDING", "1")
 
 # --- Managed bots (Telegram Bot API 9.6) express setup — pilot-gated ---
 # Both must be set for the "Express setup" button to appear. Defaults keep
 # the paste-token UI unchanged until the pilot backend lands
 # (manager bot, provisioning_mode, vault rotation).
-MANAGED_ONBOARDING_ENABLED = os.getenv("MANAGED_ONBOARDING_ENABLED", "0") == "1"
+MANAGED_ONBOARDING_ENABLED = _flag("MANAGED_ONBOARDING_ENABLED", "0")
 MANAGER_BOT_USERNAME = (os.getenv("MANAGER_BOT_USERNAME", "") or "").strip().lstrip("@")
 
 # --- Rental support contact ---
@@ -204,14 +211,12 @@ ETHERSCAN_API_KEY = (os.getenv("ETHERSCAN_API_KEY", "") or "").strip()
 
 # CRYPTO_TESTNET=1 switches the bot to TESTNET_CHAINS (Sepolia / Base Sepolia)
 # for end-to-end deposit testing with free funds. Mainnet unchanged when off.
-CRYPTO_TESTNET = (os.getenv("CRYPTO_TESTNET", "0") or "0").strip().lower() in (
-    "1", "true", "yes", "on")
+CRYPTO_TESTNET = _flag("CRYPTO_TESTNET", "0")
 
 # P3.19: set WATCHER_STANDALONE=1 when the blockchain observer runs as its
 # own process (nova-shop-watcher.service). The in-process watcher is then
 # disabled to avoid double-scanning.
-WATCHER_STANDALONE = (os.getenv("WATCHER_STANDALONE", "0") or "0").strip().lower() in (
-    "1", "true", "yes", "on")
+WATCHER_STANDALONE = _flag("WATCHER_STANDALONE", "0")
 
 # Fresh TESTNET xpub (tpub) used only when CRYPTO_TESTNET is on.
 # NEVER reuse a mainnet xpub here.
