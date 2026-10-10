@@ -37,6 +37,14 @@ def validate_init_data(init_data: str, bot_token: str,
             return None
     except (TypeError, ValueError):
         return None
+    # Parse the nested user JSON so callers get a usable dict, not a string.
+    # (P0: test asserts dict structure.)
+    if "user" in pairs and isinstance(pairs["user"], str):
+        try:
+            import json
+            pairs["user"] = json.loads(pairs["user"])
+        except (json.JSONDecodeError, TypeError):
+            return None
     return pairs
 
 
