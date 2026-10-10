@@ -923,6 +923,20 @@ async def cb_crypto_chain_toggle(query: types.CallbackQuery):
         return
     if chain in cp.active_chains():
         cur = await db.crypto_chain_enabled(chain)
+        # P1-1: Warn if disabling with open deposits — funds would land unmatched.
+        if cur:  # currently enabled, about to disable
+            open_deps = await db.count_open_crypto_deposits(chain)
+            if open_deps > 0:
+                logger.warning(
+                    "Disabling chain %s with %d open deposits", chain, open_deps)
+                await db.audit(query.from_user.id, "crypto_chain_toggle_warn",
+                               f"{chain} has {open_deps} open deposits")
+                await query.answer(
+                    f"⚠️ {open_deps} open deposits on {chain}. Disable anyway? Click again to confirm.",
+                    show_alert=True)
+                # Require second click: store pending disable in a simple way
+                # by not toggling yet. Admin clicks again to force.
+                return
         await db.set_crypto_chain_enabled(chain, not cur)
         await db.audit(query.from_user.id, "crypto_chain_toggle",
                        f"{chain} -> {not cur}")

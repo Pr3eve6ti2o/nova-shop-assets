@@ -1,5 +1,6 @@
 """Profile: card, wishlist, purchases, referral, redeem promo."""
 import asyncio
+import html
 from aiogram import types
 from aiogram.dispatcher import FSMContext
 
@@ -27,7 +28,8 @@ async def render_profile(target, user):
     earned = await db.referral_earnings_total(user["id"])
     balance = await db.get_balance(user["id"])
     text = texts.MSG_PROFILE.format(
-        name=user["name"] or "?", tg_id=user["tg_id"], orders=orders_n,
+        # P1-4: Escape user-controlled name to prevent HTML injection.
+        name=html.escape(user["name"] or "?"), tg_id=user["tg_id"], orders=orders_n,
         spent=fmt_money(spent, config.CURRENCY),
         earnings=fmt_money(earned, config.CURRENCY),
         balance=fmt_money(balance, config.CURRENCY))
@@ -112,7 +114,21 @@ async def cb_purchases(query: types.CallbackQuery):
     orders = await db.list_user_orders(user["id"], PAGE_SIZE + 1, page * PAGE_SIZE)
     has_more = len(orders) > PAGE_SIZE
     orders = orders[:PAGE_SIZE]
-    items_list = await asyncio.gather(*(db.get_order_items(o["id"]) for o in orders))
+    # P1-8: return_exceptions=True — one DB hiccup must not hide all keys.
+    items_list = await asyncio.gather(
+        *(db.get_order_items(o["id"]) for o in orders),
+        return_exceptions=True,
+    )
+    # Filter out failed fetches, log them
+    filtered = []
+    for o, items in zip(orders, items_list):
+        if isinstance(items, Exception):
+            import logging
+            logging.getLogger(__name__).warning(
+                "Failed to fetch items for order %s: %s", o["id"], items)
+            continue
+        filtered.append((o, items))
+    orders, items_list = zip(*filtered) if filtered else ([], [])
     blocks = []
     for o, items in zip(orders, items_list):
         dvals = [(i["name"], i["delivered_value"]) for i in items if i["delivered_value"]]

@@ -2303,6 +2303,16 @@ class Database:
             await db.commit()
             return cur.rowcount > 0
 
+    async def count_open_crypto_deposits(self, chain: str) -> int:
+        """P1-1: Count open deposits on a chain before disabling it."""
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM crypto_deposits WHERE chain=? AND status IN ('pending','late','underpaid')",
+                (chain,),
+            ) as cur:
+                row = await cur.fetchone()
+                return row[0] if row else 0
+
     async def claim_crypto_deposit(self, deposit_id: int, txid: str,
                                    seen_amount_crypto: str,
                                    confirmations: int, *,
