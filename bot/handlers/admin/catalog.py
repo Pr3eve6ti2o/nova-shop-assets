@@ -109,7 +109,10 @@ async def cb_cat_delete_ask(query: types.CallbackQuery):
     cid = int(query.data.split(":")[2])
     n = await db.count_products_in_category(cid)
     if n:
-        await query.answer(texts.MSG_CAT_DELETE_GUARD.format(n=n), show_alert=True)
+        await edit_text_safe(
+            query,
+            f"\U0001f5d1\ufe0f <b>Delete this category and all {n} product(s) in it?</b>",
+            kb.confirm_generic_kb(f"ac:cdely:{cid}", f"ac:cl:{cid}"))
         return
     await edit_text_safe(
         query, f"\U0001f5d1\ufe0f <b>Delete this category?</b>",
@@ -120,6 +123,10 @@ async def cb_cat_delete_ask(query: types.CallbackQuery):
                            is_admin=config.PERM_CATALOG)
 async def cb_cat_delete_yes(query: types.CallbackQuery):
     cid = int(query.data.split(":")[2])
+    # Delete all products in the category first (force delete)
+    products = await db.list_products(cid, 10000, 0)
+    for p in products:
+        await db.delete_product(p["id"])
     await db.delete_category(cid)
     await db.audit(query.from_user.id, "category_delete", f"id={cid}")
     await query.answer(texts.MSG_CAT_DELETED)
