@@ -61,7 +61,12 @@ async def cmd_profile(message: types.Message, state: FSMContext):
 
 
 @dp.callback_query_handler(text="prof")
-async def cb_profile(query: types.CallbackQuery):
+async def cb_profile(query: types.CallbackQuery, state: FSMContext):
+    # P1-3: Clear stale promo state — navigation, not a promo flow.
+    try:
+        await state.finish()
+    except Exception:
+        pass
     await query.answer()
     # Fail closed: refuse if there's no message context (e.g. inline mode).
     chat_type = query.message.chat.type if query.message else None
@@ -93,7 +98,12 @@ async def cb_wishlist(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(text="pur")
-async def cb_purchases(query: types.CallbackQuery):
+async def cb_purchases(query: types.CallbackQuery, state: FSMContext):
+    # P1-3: Clear stale promo state.
+    try:
+        await state.finish()
+    except Exception:
+        pass
     await query.answer()
     # Never render delivered keys outside a private chat: in a group,
     # anyone present could read and steal the user's license keys.
@@ -157,7 +167,12 @@ async def cb_purchases(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(text="ref")
-async def cb_referral(query: types.CallbackQuery):
+async def cb_referral(query: types.CallbackQuery, state: FSMContext):
+    # P1-3: Clear stale promo state.
+    try:
+        await state.finish()
+    except Exception:
+        pass
     # P1-1: Fail-closed chat guard — referral links contain keys, private only.
     if query.message.chat.type != "private":
         await query.answer(

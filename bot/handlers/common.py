@@ -48,10 +48,16 @@ async def is_admin_tg(tg_id: int) -> bool:
 
 
 async def mask_of_tg(tg_id: int) -> int:
+    # Fail-closed like admin.mask_of: reject negative/non-int, strip unknown bits.
     if tg_id in config.ADMINS:
         return config.PERM_ALL
     user = await db.get_user_by_tg(tg_id)
-    return user["role_mask"] if user else 0
+    if not user or user.get("is_banned"):
+        return 0
+    mask = user.get("role_mask") or 0
+    if not isinstance(mask, int) or mask < 0:
+        return 0
+    return mask & config.PERM_ALL
 
 
 async def main_reply_kb(tg_id: int):
