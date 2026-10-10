@@ -1932,6 +1932,30 @@ class Database:
                 await db.commit()
                 return won
 
+    async def cancel_order_atomic(self, order_id: int) -> bool:
+        """P1-3: Atomically cancel order AND release promo in one transaction.
+
+        Prevents order-cancelled-but-promo-not-released (or vice versa)
+        if the process crashes between the two writes.
+        """
+        async with self._db() as db:
+            try:
+                await db.execute(
+                    "UPDATE orders SET status='cancelled', updated_at=? WHERE id=?",
+                    (utcnow_iso(), order_id),
+                )
+                # Release promo: increment uses_remaining
+                await db.execute(
+                    """UPDATE promos SET uses_remaining = uses_remaining + 1
+                       WHERE code = (SELECT promo_code FROM orders WHERE id=?)""",
+                    (order_id,),
+                )
+                await db.commit()
+                return True
+            except Exception:
+                await db.rollback()
+                raise
+
     async def claim_order_processing(self, order_id: int) -> bool:
         """Atomically claim pending->processing with a claim timestamp."""
         async with self._claim_lock:

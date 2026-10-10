@@ -900,8 +900,8 @@ async def cb_crypto_reject(query: types.CallbackQuery):
         return
     await db.audit(query.from_user.id, "crypto_manual_reject", f"deposit={dep_id}")
     if order:
-        await db.set_order_status(order["id"], "cancelled")
-        await db.release_order_promo(order["id"])  # M2
+        # P1-3: Atomic cancel + promo release in one transaction.
+        await db.cancel_order_atomic(order["id"])
         user = await db.get_user(order["user_id"])
         if user:
             try:
