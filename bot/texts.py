@@ -138,13 +138,13 @@ PAY_METHOD_LABEL = {
     "card": "\U0001f4b3 Card",
     "stars": "\u2b50 Telegram Stars",
     "telegram": "\u2b50 Telegram Stars",  # m10: provider="telegram" fell through to raw text
-    "tonconnect": "\U0001f48e TON (TON Connect)",
+    "tonconnect": "\U0001f48e Gram(Ton) (TON Connect)",
     "cod": "\U0001f4b5 Cash on Delivery",
     "cryptobot": "\U0001f48e CryptoBot",
     "direct_btc": "\U0001fa99 BTC (direct)",
     "direct_eth": "\U0001fa99 USDT-ERC20 (direct)",
     "direct_trx": "\U0001fa99 USDT-TRC20 (direct)",
-    "direct_ton": "\U0001fa99 TON (direct)",
+    "direct_ton": "\U0001fa99 Gram(Ton) (direct)",
     "usdt_base": "\U0001fa99 USDT (Base)",
     "usdc_base": "\U0001fa99 USDC (Base)",
     "usdt_op": "\U0001fa99 USDT (Optimism)",
@@ -231,7 +231,7 @@ MSG_HELP = (
     "<b>How do I order?</b>\nBrowse the catalog \u2192 add items to cart \u2192 checkout. "
     "One tap per step, and you can go back and edit anything before paying.\n\n"
     "<b>How can I pay?</b>\n\U0001f4b3 Card (Telegram Payments) \u00b7 \u2b50 Telegram Stars "
-    "\u00b7 \U0001f48e CryptoBot \u00b7 \U0001fa99 direct crypto (BTC, USDT, TON \u2014 no platform fee; network fees apply) "
+    "\u00b7 \U0001f48e CryptoBot \u00b7 \U0001fa99 direct crypto (BTC, USDT, Gram(Ton) \u2014 no platform fee; network fees apply) "
     "\u00b7 \U0001f4b5 cash on delivery.\n\n"
     "<b>Where is my order?</b>\nOpen \U0001f4e6 Orders for the live status of every order.\n\n"
     "<b>Digital goods?</b>\nLicense keys are delivered instantly, right in this chat, after payment.\n\n"
@@ -758,7 +758,7 @@ MSG_TERMS = (
     "payments have 0% shop fees; you only pay the network (miner) fee to send.\n\n"
     "<b>4. Payment finality.</b> Telegram Stars payments are final and non-refundable "
     "under Telegram's own rules \u2014 we cannot reverse them. On-chain crypto transfers "
-    "(BTC, ETH, TRX, TON) are irreversible once confirmed on the network. Card payments "
+    "(BTC, ETH, TRX, Gram(Ton)) are irreversible once confirmed on the network. Card payments "
     "follow your card issuer's dispute process.\n\n"
     "<b>5. Delivery.</b> Digital goods are delivered in this chat instantly after payment "
     "confirmation. Physical goods ship within 24 hours of confirmation; delivery times "

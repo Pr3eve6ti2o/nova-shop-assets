@@ -264,7 +264,7 @@ def crypto_menu_kb(prefix: str = "cop"):
     kb.add(InlineKeyboardButton("\u20bf BTC", callback_data=f"{prefix}:direct_btc"))
     kb.add(InlineKeyboardButton(texts.BTN_USDT_MENU, callback_data=f"{prefix}:usdt_menu"))
     kb.add(InlineKeyboardButton(texts.BTN_USDC_MENU, callback_data=f"{prefix}:usdc_menu"))
-    kb.add(InlineKeyboardButton("TON", callback_data=f"{prefix}:direct_ton"))
+    kb.add(InlineKeyboardButton("Gram(Ton)", callback_data=f"{prefix}:direct_ton"))
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data=f"{prefix}:back_to_payment"))
     return kb
 
