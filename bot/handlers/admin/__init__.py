@@ -1,6 +1,9 @@
 """Admin package: permission-filtered console + management flows."""
 from filters import IsAdmin  # noqa: F401  (re-exported for admin handlers)
 
+# P2-3: Explicit exports instead of noqa comment.
+__all__ = ["IsAdmin", "mask_of"]
+
 import config
 from loader import db
 
