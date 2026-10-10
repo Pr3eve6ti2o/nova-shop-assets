@@ -190,6 +190,13 @@ async def cb_referral(query: types.CallbackQuery):
 
 @dp.callback_query_handler(text="pm3")
 async def cb_redeem(query: types.CallbackQuery, state: FSMContext):
+    # P1-1: Fail-closed chat guard — promo codes are sensitive, private only.
+    # P1-2: Single query.answer() — guard returns before the main answer.
+    if query.message.chat.type != "private":
+        await query.answer(
+            "Promo codes are sensitive — open me in a private chat.",
+            show_alert=True)
+        return
     await query.answer()
     await CartPromo.waiting_code.set()
     await state.update_data(promo_origin="redeem")

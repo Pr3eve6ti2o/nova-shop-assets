@@ -853,8 +853,12 @@ async def cb_crypto_confirm(query: types.CallbackQuery):
             external_id=stable_key,
             amount_cents=received_cents,
             currency=currency)
-        await db.audit(query.from_user.id, "crypto_manual_confirm",
-                       f"deposit={dep_id} received={received_cents} total={total_cents}")
+        # P1-4: Audit failure must not break the callback contract.
+        try:
+            await db.audit(query.from_user.id, "crypto_manual_confirm",
+                           f"deposit={dep_id} received={received_cents} total={total_cents}")
+        except Exception as e:
+            logger.warning("audit failed for manual confirm %s: %s", dep_id, e)
         await query.answer(texts.TOAST_CRYPTO_CONFIRMED)
     else:
         # Lost the race (worker or another admin claimed it first) — do NOT
