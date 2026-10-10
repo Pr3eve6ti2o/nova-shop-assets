@@ -24,7 +24,14 @@ class WebAppAuthTests(unittest.TestCase):
 
     def test_accepts_valid_recent_init_data(self):
         token, value = self._vector()
-        self.assertIsNotNone(validate_init_data(value, token, max_age_seconds=60))
+        # P0: Was only assertIsNotNone — never verified the returned identity.
+        # A truthy non-dict (True, tuple) would pass and break downstream.
+        result = validate_init_data(value, token, max_age_seconds=60)
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, dict)
+        self.assertIn("user", result)
+        self.assertIsInstance(result["user"], dict)
+        self.assertIn("id", result["user"])
 
     def test_rejects_bad_hash(self):
         token, value = self._vector()

@@ -808,28 +808,54 @@ async def cb_crypto_confirm(query: types.CallbackQuery):
             "⚠️ No funds seen on this deposit yet — cannot confirm.",
             show_alert=True)
         return
+    # P0-1: Fetch order BEFORE claim so we can gate on the actual received
+    # amount. Never credit order total blindly.
+    order = await db.get_order(dep["order_id"])
+    if not order:
+        logger.error("CRITICAL: manual crypto confirm deposit %s has no order %s",
+                     dep_id, dep["order_id"])
+        await notify_admins(
+            f"CRITICAL: manual crypto confirm deposit {dep_id} order {dep['order_id']} missing")
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
+    # P0-1: Compare actual received amount against order total.
+    try:
+        received_cents = int(dep.get("amount_cents") or 0)
+    except (TypeError, ValueError):
+        received_cents = 0
+    total_cents = int(order.get("total_cents") or 0)
+    if received_cents < total_cents:
+        logger.warning(
+            "Manual crypto confirm blocked: deposit %s received %s < order total %s",
+            dep_id, received_cents, total_cents)
+        await db.audit(query.from_user.id, "crypto_manual_confirm_blocked",
+                       f"deposit={dep_id} received={received_cents} total={total_cents}")
+        await query.answer(
+            f"⚠️ Underpaid: received {received_cents} < {total_cents}. Cannot confirm.",
+            show_alert=True)
+        return
+    # P0-4: Guard chain lookup BEFORE claim — do not KeyError after consuming.
+    chain_info = cp.active_chains().get(dep["chain"]) or {}
+    currency = chain_info.get("symbol") or order.get("currency") or dep["chain"]
+    if not chain_info:
+        logger.error("Manual crypto confirm: chain %s disabled for deposit %s",
+                     dep["chain"], dep_id)
+    # P0-2: Stable idempotency key — use tx hash so manual and worker paths
+    # share the same key and cannot double-credit.
+    stable_key = dep.get("tx_hash") or dep.get("txid") or f"manual_{dep_id}"
     # Admins who truly must force-confirm can use the admin panel/DB path.
-    claimed = await db.claim_crypto_deposit(dep_id, f"manual_{dep_id}",
+    claimed = await db.claim_crypto_deposit(dep_id, stable_key,
                                             dep["seen_amount_crypto"] or "0", 999)
     if claimed:
         await db.update_crypto_deposit(dep_id, status="paid")
-        order = await db.get_order(dep["order_id"])
-        if not order:
-            # M5: never finalize with amount 0 — log loudly and alert instead.
-            logger.error("CRITICAL: manual crypto confirm deposit %s paid but order %s missing",
-                         dep_id, dep["order_id"])
-            await notify_admins(
-                f"CRITICAL: manual crypto confirm deposit {dep_id} paid but order {dep['order_id']} missing")
-            await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
-        else:
-            await finalize_crypto_order(
-                dep["order_id"], provider=f"direct_{dep['chain']}",
-                external_id=f"manual_{dep_id}",
-                amount_cents=order["total_cents"],
-                currency=cp.active_chains()[dep["chain"]]["symbol"])
-            await db.audit(query.from_user.id, "crypto_manual_confirm",
-                           f"deposit={dep_id}")
-            await query.answer(texts.TOAST_CRYPTO_CONFIRMED)
+        await finalize_crypto_order(
+            dep["order_id"], provider=f"direct_{dep['chain']}",
+            external_id=stable_key,
+            amount_cents=received_cents,
+            currency=currency)
+        await db.audit(query.from_user.id, "crypto_manual_confirm",
+                       f"deposit={dep_id} received={received_cents} total={total_cents}")
+        await query.answer(texts.TOAST_CRYPTO_CONFIRMED)
     else:
         # Lost the race (worker or another admin claimed it first) — do NOT
         # show the confirmed toast.
@@ -852,14 +878,22 @@ async def cb_crypto_reject(query: types.CallbackQuery):
     if not dep:
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
         return
-    if dep["status"] == "paid":
+    # P0-3: Guard all terminal states, not just "paid". A deposit in
+    # processing/delivered/completed must not be cancellable.
+    if dep["status"] in ("paid", "processing", "delivered", "completed", "cancelled"):
         await query.answer(texts.TOAST_CRYPTO_ALREADY, show_alert=True)
         return
     order = await db.get_order(dep["order_id"])
-    if order and order["status"] == "paid":
+    if order and order["status"] in ("paid", "processing", "delivered", "completed", "refunded", "cancelled"):
         await query.answer(texts.TOAST_CRYPTO_ALREADY, show_alert=True)
         return
-    await db.update_crypto_deposit(dep_id, status="cancelled")
+    # P0-3: Atomic status transition — only cancel if still in a cancellable
+    # state. Prevents double-reject and admin-vs-worker races.
+    updated = await db.update_crypto_deposit_if_status(
+        dep_id, "cancelled", ["pending", "late", "underpaid"])
+    if not updated:
+        await query.answer(texts.TOAST_CRYPTO_ALREADY, show_alert=True)
+        return
     await db.audit(query.from_user.id, "crypto_manual_reject", f"deposit={dep_id}")
     if order:
         await db.set_order_status(order["id"], "cancelled")

@@ -103,24 +103,36 @@ async def cb_purchases(query: types.CallbackQuery):
             show_alert=True)
         return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
-    orders = await db.list_user_orders(user["id"], 50, 0)
+    # P0-1: Paginate instead of hard-capping at 50 orders.
+    try:
+        page = int(query.data.split(":")[1] if ":" in query.data else 0)
+    except (ValueError, IndexError):
+        page = 0
+    PAGE_SIZE = 10
+    orders = await db.list_user_orders(user["id"], PAGE_SIZE + 1, page * PAGE_SIZE)
+    has_more = len(orders) > PAGE_SIZE
+    orders = orders[:PAGE_SIZE]
     items_list = await asyncio.gather(*(db.get_order_items(o["id"]) for o in orders))
     blocks = []
     for o, items in zip(orders, items_list):
         dvals = [(i["name"], i["delivered_value"]) for i in items if i["delivered_value"]]
+        # P0-2: Always show the order, even if nothing delivered yet.
         if dvals:
             blocks.append(texts.MSG_PURCHASE_BLOCK.format(oid=o["id"]) + "\n" +
                           "\n".join(
                               texts.MSG_PURCHASE_KEY_LINE.format(name=n, value=v)
                               for n, v in dvals))
-    if not blocks:
+        else:
+            blocks.append(texts.MSG_PURCHASE_BLOCK.format(oid=o["id"]) + "\n" +
+                          "\u23f3 Awaiting delivery \u2014 contact support if this persists.")
+    if not blocks and page == 0:
         await edit_text_safe(query, texts.MSG_PURCHASES_EMPTY, kb.profile_kb())
     else:
-        text = texts.MSG_PURCHASES_TITLE + "\n\n" + "\n\n".join(blocks[:10])
-        if len(blocks) > 10:
-            text += "\n\n(showing 10 of {})".format(len(blocks))
-        if len(text) > 4000:
-            text = text[:4000] + "..."
+        text = texts.MSG_PURCHASES_TITLE + "\n\n" + "\n\n".join(blocks)
+        if has_more:
+            text += f"\n\n(Page {page + 1} \u2014 more orders available)"
+        elif page > 0:
+            text += f"\n(Page {page + 1})"
         await edit_text_safe(query, text, kb.profile_kb())
 
 

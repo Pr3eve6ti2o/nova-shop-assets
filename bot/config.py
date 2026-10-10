@@ -111,6 +111,17 @@ def _validate_xpubs():
                 f"Misconfigured {env_key}: expected prefix {prefixes}, got {v[:8]!r}... — "
                 f"direct {env_key.split('_')[1].lower()} deposits will fail. Fix .env."
             )
+    # P0: Prevent testnet/mainnet xpub cross-contamination. A testnet build
+    # deriving from a mainnet xpub (or vice versa) generates addresses the
+    # operator does not control — funds sent there are lost.
+    testnet_xpub = globals().get("TESTNET_XPUB_ETH")
+    mainnet_xpub = globals().get("XPUB_ETH")
+    if testnet_xpub and mainnet_xpub:
+        if testnet_xpub.strip() == mainnet_xpub.strip():
+            raise RuntimeError(
+                "Misconfigured TESTNET_XPUB_ETH: must differ from XPUB_ETH. "
+                "NEVER reuse a mainnet xpub for testnet."
+            )
 _validate_xpubs()
 
 CRYPTO_TTL_MINUTES: int = int(os.getenv("CRYPTO_TTL_MINUTES", "45") or 45)
@@ -131,7 +142,8 @@ PERM_BROADCAST = 16
 PERM_PROMOS = 32
 PERM_MAINTENANCE = 64
 PERM_SWAP_APPROVE = 128  # P2.13: dedicated token-swap approval permission
-PERM_ALL = 127
+# P0: was 127, silently excluded PERM_SWAP_APPROVE (128). Must cover all bits.
+PERM_ALL = 255
 
 PERM_NAMES = {
     PERM_STATS: "Stats",
@@ -141,6 +153,7 @@ PERM_NAMES = {
     PERM_BROADCAST: "Broadcast",
     PERM_PROMOS: "Promos",
     PERM_MAINTENANCE: "Maintenance",
+    PERM_SWAP_APPROVE: "Swap Approve",
 }
 
 # Deposit bonus: 5% extra on every top-up

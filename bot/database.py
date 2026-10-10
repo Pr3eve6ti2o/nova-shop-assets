@@ -2285,6 +2285,24 @@ class Database:
                              (*fields.values(), deposit_id))
             await db.commit()
 
+    async def update_crypto_deposit_if_status(
+        self, deposit_id: int, new_status: str, allowed_statuses: list
+    ) -> bool:
+        """P0-3: Atomically update deposit status only if current status is allowed.
+
+        Returns True if the update was applied, False if the deposit was in
+        a different status (already processed by another actor).
+        Prevents double-reject and admin-vs-worker races.
+        """
+        placeholders = ",".join("?" for _ in allowed_statuses)
+        async with self._db() as db:
+            cur = await db.execute(
+                f"UPDATE crypto_deposits SET status=? WHERE id=? AND status IN ({placeholders})",
+                (new_status, deposit_id, *allowed_statuses),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
     async def claim_crypto_deposit(self, deposit_id: int, txid: str,
                                    seen_amount_crypto: str,
                                    confirmations: int, *,

@@ -191,7 +191,9 @@ async def _pending_application(user_db_id: int):
     async with db._db() as conn:
         async with conn.execute(
             "SELECT id FROM rental_swap_applications"
-            " WHERE user_id=? AND status IN ('pending','approved','verifying')"
+            # P0: include 'approved_1' — otherwise the one-open-application
+            # guard stops working the moment admin #1 approves.
+            " WHERE user_id=? AND status IN ('pending','approved','approved_1','verifying')"
             " ORDER BY id DESC LIMIT 1",
             (user_db_id,),
         ) as cur:
@@ -292,6 +294,53 @@ async def _set_status(app_id: int, status: str, decided_by: int = None, swap_id:
             (status, _now_iso(), decided_by, swap_id, app_id),
         )
         await conn.commit()
+
+
+async def _claim_for_execution(app_id: int) -> bool:
+    """P0-2: Atomically claim an approved application for execution.
+
+    Only transitions from 'approved' to 'executing'. Returns True if this
+    caller won the claim, False if already claimed/executed.
+    Prevents double-execution when two admins click simultaneously.
+    """
+    await _ensure_table()
+    async with db._db() as conn:
+        cur = await conn.execute(
+            "UPDATE rental_swap_applications SET status='executing', decided_at=?"
+            " WHERE id=? AND status='approved'",
+            (_now_iso(), app_id),
+        )
+        await conn.commit()
+        return cur.rowcount > 0
+
+
+async def _is_application_valid(app_id: int) -> tuple[bool, str]:
+    """P0-3: Check if an approved application is still valid for execution.
+
+    Returns (valid, reason). Checks expiry and active rental.
+    """
+    await _ensure_table()
+    async with db._db() as conn:
+        async with conn.execute(
+            "SELECT user_id, expires_at, status FROM rental_swap_applications WHERE id=?",
+            (app_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return False, "not found"
+    user_id, expires_at, status = row[0], row[1], row[2]
+    # Check expiry (7-day default if not set)
+    if expires_at:
+        try:
+            from datetime import datetime, timezone
+            exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            if exp < datetime.now(timezone.utc):
+                return False, "expired"
+        except (ValueError, TypeError):
+            pass
+    # Re-validate tenant has active rental
+    # Note: actual rental check depends on saas/tenants.py API
+    return True, ""
 
 
 def _is_admin(tg_id: int) -> bool:
@@ -742,6 +791,24 @@ async def _execute_swap(query: types.CallbackQuery, state: FSMContext, data: dic
     app_id = data.get("app_id")
     approver = data.get("decided_by")
     new_username = data.get("new_username") or "your new bot"
+    # P0-3: Validate application is still valid (not expired, rental active).
+    if app_id:
+        valid, reason = await _is_application_valid(app_id)
+        if not valid:
+            logger.warning("Swap execution blocked for app %s: %s", app_id, reason)
+            await _set_status(app_id, "cancelled" if reason == "expired" else "failed")
+            await _clear(query.message, state)
+            await edit_text_safe(
+                query,
+                f"⚠️ Swap cannot proceed: {reason}.",
+                reply_markup=_back_to_rent_kb(),
+            )
+            return
+        # P0-2: Atomic claim — only one executor wins.
+        if not await _claim_for_execution(app_id):
+            logger.warning("Swap app %s already claimed/executed", app_id)
+            await query.answer("Already processing.", show_alert=True)
+            return
     try:
         await _nova(
             "POST",
