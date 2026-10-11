@@ -62,7 +62,14 @@ async def render_orders(target, user_id: int, page: int):
 async def cb_orders(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     parts = query.data.split(":")
-    page = int(parts[1]) if len(parts) > 1 else 0
+    # Opus: guard the page parse — "ord:abc" raised ValueError, negative
+    # page flowed into offset unchecked.
+    try:
+        page = int(parts[1]) if len(parts) > 1 else 0
+    except (ValueError, IndexError):
+        page = 0
+    if page < 0:
+        page = 0
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     await render_orders(query, user["id"], page)
 
@@ -94,16 +101,20 @@ async def show_order_detail(target, oid: int, user: dict):
          "delivery_fee": order["total_cents"] - order["subtotal_cents"]
                          + order["discount_cents"],
          "total": order["total_cents"]}
-    pay_label = texts.PAY_METHOD_LABEL.get(order["payment_method"],
-                                             order["payment_method"])
+    pay_label = texts.PAY_METHOD_LABEL.get(order["payment_method"])
+    if pay_label is None:
+        pay_label = "—"
     # Include delivered digital keys if available
     values_block = ""
     dvals = [(i["name"], i["qty"], i["delivered_value"]) for i in items
              if i["delivered_value"]]
     if dvals:
+        # Opus: escape delivered values — a "<" in a key broke HTML parsing
+        # and hid the keys from the buyer.
+        from html import escape as _escape
         values_block = "\n\n" + texts.MSG_FULFILL_DIGITAL.format(values="\n".join(
             texts.MSG_FULFILL_VALUE_LINE.format(name=n, qty=q,
-                                                code=f"<code>{v}</code>")
+                                                code=f"<code>{_escape(v)}</code>")
             for n, q, v in dvals))
     text = texts.MSG_ORDER_DETAIL.format(
         oid=oid, lines=lines, totals=totals_text(t), payment=pay_label,
@@ -124,14 +135,22 @@ async def show_order_detail(target, oid: int, user: dict):
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("o:"))
 async def cb_order_detail(query: types.CallbackQuery):
     await query.answer()
-    oid = int(query.data.split(":")[1])
+    try:
+        oid = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     await show_order_detail(query, oid, user)
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ob:"))
 async def cb_buy_again(query: types.CallbackQuery):
-    oid = int(query.data.split(":")[1])
+    try:
+        oid = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     order = await db.get_order(oid)
     if not order or order["user_id"] != user["id"]:
@@ -151,7 +170,11 @@ async def cb_buy_again(query: types.CallbackQuery):
 async def cb_order_cancel_ask(query: types.CallbackQuery):
     """Ask for confirmation before the user cancels their own pending order."""
     await query.answer()
-    oid = int(query.data.split(":")[1])
+    try:
+        oid = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     order = await db.get_order(oid)
     if not order or order["user_id"] != user["id"]:
@@ -172,7 +195,11 @@ async def cb_order_cancel_ask(query: types.CallbackQuery):
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ocx:"))
 async def cb_order_cancel_do(query: types.CallbackQuery):
     """Execute the cancellation. Only pending orders; nothing was charged."""
-    oid = int(query.data.split(":")[1])
+    try:
+        oid = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     order = await db.get_order(oid)
     if not order or order["user_id"] != user["id"]:
@@ -181,7 +208,15 @@ async def cb_order_cancel_do(query: types.CallbackQuery):
     if order["status"] != "pending":
         await query.answer(texts.MSG_ORDER_CANCEL_DENIED, show_alert=True)
         return
-    await db.set_order_status(oid, "cancelled")
+    # Opus P0: atomic conditional claim — the unconditional set_order_status
+    # could clobber "processing"/"paid" if a payment landed between the read
+    # and the write. Only the winner proceeds; the loser sees the denied
+    # message. This also makes double promo release impossible.
+    claimed = await db.set_order_status(oid, "cancelled",
+                                        only_if_status="pending")
+    if not claimed:
+        await query.answer(texts.MSG_ORDER_CANCEL_DENIED, show_alert=True)
+        return
     await db.release_order_promo(oid)  # M2: don't burn promo on unpaid cancel
     await db.audit(user["tg_id"], "order_cancel_self", f"order={oid}")
     await query.answer(texts.TOAST_ORDER_CANCELLED)
