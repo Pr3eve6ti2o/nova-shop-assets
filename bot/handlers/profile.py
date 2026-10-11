@@ -97,8 +97,10 @@ async def cb_wishlist(query: types.CallbackQuery):
         await edit_text_safe(query, texts.MSG_WISHLIST_TITLE, kb.wishlist_kb(items))
 
 
-@dp.callback_query_handler(text="pur")
+@dp.callback_query_handler(lambda q: q.data and (q.data == "pur" or q.data.startswith("pur:")))
 async def cb_purchases(query: types.CallbackQuery, state: FSMContext):
+    # Opus P1: was text="pur" (exact match) — "pur:1" never routed, so
+    # pagination never functioned and page was always 0.
     # P1-3: Clear stale promo state.
     try:
         await state.finish()
@@ -174,7 +176,9 @@ async def cb_referral(query: types.CallbackQuery, state: FSMContext):
     except Exception:
         pass
     # P1-1: Fail-closed chat guard — referral links contain keys, private only.
-    if query.message.chat.type != "private":
+    # Opus: query.message can be None (inline) — guard before access.
+    chat_type = query.message.chat.type if query.message else None
+    if chat_type != "private":
         await query.answer(
             "Referral links contain sensitive info — open me in a private chat.",
             show_alert=True)
@@ -207,7 +211,9 @@ async def cb_referral(query: types.CallbackQuery, state: FSMContext):
 async def cb_redeem(query: types.CallbackQuery, state: FSMContext):
     # P1-1: Fail-closed chat guard — promo codes are sensitive, private only.
     # P1-2: Single query.answer() — guard returns before the main answer.
-    if query.message.chat.type != "private":
+    # Opus: query.message can be None (inline) — guard before access.
+    chat_type = query.message.chat.type if query.message else None
+    if chat_type != "private":
         await query.answer(
             "Promo codes are sensitive — open me in a private chat.",
             show_alert=True)
