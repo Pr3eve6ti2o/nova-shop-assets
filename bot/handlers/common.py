@@ -85,7 +85,9 @@ async def refresh_reply_kb(chat_id: int, tg_id: int):
 async def totals(user_id: int, state: FSMContext, with_delivery: bool = False):
     """Recompute cart totals from the DB. Never trust client-side amounts."""
     items = await db.cart_items(user_id)
-    subtotal = sum(i["price_cents"] * i["qty"] for i in items)
+    # Opus: force int() — SQLite is dynamically typed, an INTEGER column
+    # can hold 12.5, turning the sum into a float and breaking money math.
+    subtotal = sum(int(i["price_cents"]) * int(i["qty"]) for i in items)
     promo_code = None
     discount = 0
     data = await state.get_data()
@@ -96,6 +98,9 @@ async def totals(user_id: int, state: FSMContext, with_delivery: bool = False):
             promo_code, discount = code, disc
         else:
             await state.update_data(promo_code=None)
+    # Opus: clamp discount to subtotal — an over-large discount overstates
+    # the discount line and makes accounting inconsistent.
+    discount = min(int(discount), subtotal)
     delivery_fee = 0
     if with_delivery and data.get("delivery_kind", "delivery") == "delivery":
         delivery_fee = config.DELIVERY_FEE_CENTS
@@ -178,7 +183,14 @@ async def maybe_credit_referral(order) -> int:
     if not user or not user["referred_by"]:
         return 0
     percent = await db.referral_percent()
-    amount = order["total_cents"] * percent // 100
+    # Opus: clamp percent to 0..100 — a config value of 150 would credit
+    # a 150% payout. Coerce to int (floor division on float gives float).
+    try:
+        percent = int(percent)
+    except (ValueError, TypeError):
+        percent = 0
+    percent = max(0, min(100, percent))
+    amount = int(order["total_cents"]) * percent // 100
     if amount <= 0:
         return 0
     if not await db.claim_and_record_referral_credit(
