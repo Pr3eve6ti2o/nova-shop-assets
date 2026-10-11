@@ -13,6 +13,14 @@ from . import mask_of
 
 async def render_console(query_or_msg, tg_id: int):
     mask = await mask_of(tg_id)
+    # Opus F13 (P0): defense in depth — never render the console for
+    # non-admins even if a caller forgets to check.
+    if not mask:
+        if isinstance(query_or_msg, types.CallbackQuery):
+            await query_or_msg.answer(texts.MSG_ADMIN_DENIED, show_alert=True)
+        else:
+            await query_or_msg.answer(texts.MSG_ADMIN_DENIED)
+        return
     maintenance = await db.maintenance_on()
     text = texts.MSG_ADMIN_CONSOLE.format(
         maintenance_banner=texts.MSG_MAINT_BANNER if maintenance else "")
@@ -24,8 +32,15 @@ async def render_console(query_or_msg, tg_id: int):
                                   disable_web_page_preview=True)
 
 
-@dp.message_handler(commands=["admin"])
-async def cmd_admin(message: types.Message):
+@dp.message_handler(commands=["admin"], state="*")
+async def cmd_admin(message: types.Message, state: FSMContext):
+    # Opus P1: state="*" + finish() — an admin stuck mid-flow (e.g. broadcast
+    # compose) was locked out of /admin, and abandoned flows could misapply
+    # later input (e.g. a refund amount) to the wrong operation.
+    try:
+        await state.finish()
+    except Exception:
+        pass
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
     if not await mask_of(message.from_user.id):
         await message.answer(texts.MSG_ADMIN_DENIED,
@@ -34,9 +49,9 @@ async def cmd_admin(message: types.Message):
     await render_console(message, message.from_user.id)
 
 
-@dp.message_handler(text=texts.BTN_ADMIN)
-async def btn_admin(message: types.Message):
-    await cmd_admin(message)
+@dp.message_handler(text=texts.BTN_ADMIN, state="*")
+async def btn_admin(message: types.Message, state: FSMContext):
+    await cmd_admin(message, state)
 
 
 @dp.callback_query_handler(text="adm")
