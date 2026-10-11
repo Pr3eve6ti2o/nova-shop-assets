@@ -85,12 +85,16 @@ async def cb_order_detail(query: types.CallbackQuery):
          "delivery_fee": order["total_cents"] - order["subtotal_cents"]
                          + order["discount_cents"],
          "total": order["total_cents"]}
+    # Opus P1: HTML-escape user-controlled fields — unescaped name/phone/
+    # address break the admin message or inject HTML/phishing links.
+    from html import escape as _escape
     text = texts.MSG_ORDER_ADMIN_DETAIL.format(
         oid=oid, status=texts.STATUS_LABEL.get(order["status"], order["status"]),
         lines=lines, totals=totals_text(t),
-        name=(user["name"] if user else "?"),
+        name=_escape(str(user["name"] if user else "?")),
         tg_id=(user["tg_id"] if user else "?"),
-        phone=order["phone"] or "\u2014", address=order["address"] or "\u2014",
+        phone=_escape(str(order["phone"] or "\u2014")),
+        address=_escape(str(order["address"] or "\u2014")),
         payment=order["payment_method"] or "\u2014",
         delivery=order["delivery_kind"] or "\u2014")
     await edit_text_safe(query, text, kb.admin_order_detail_kb(oid, order["status"]))
@@ -144,7 +148,10 @@ async def cb_order_set_status(query: types.CallbackQuery):
             return
         await maybe_credit_referral(await db.get_order(oid))
     await db.set_order_status(oid, status)
-    if status == "cancelled":
+    if status == "cancelled" and order["status"] != "cancelled":
+        # Opus P0: only release promo on the actual transition INTO
+        # cancelled — repeated cancels were releasing it multiple times,
+        # making the promo infinitely reusable.
         await db.release_order_promo(oid)  # M2: don't burn promo on cancel
     await db.audit(query.from_user.id, "order_status", f"order={oid} status={status}")
     user = await db.get_user(order["user_id"])
@@ -168,12 +175,14 @@ async def cb_order_set_status(query: types.CallbackQuery):
          "delivery_fee": order["total_cents"] - order["subtotal_cents"]
                          + order["discount_cents"],
          "total": order["total_cents"]}
+    # Opus P1: HTML-escape user-controlled fields (see above).
     text = texts.MSG_ORDER_ADMIN_DETAIL.format(
         oid=oid, status=texts.STATUS_LABEL.get(order["status"], order["status"]),
         lines=lines, totals=totals_text(t),
-        name=(user["name"] if user else "?"),
+        name=_escape(str(user["name"] if user else "?")),
         tg_id=(user["tg_id"] if user else "?"),
-        phone=order["phone"] or "\u2014", address=order["address"] or "\u2014",
+        phone=_escape(str(order["phone"] or "\u2014")),
+        address=_escape(str(order["address"] or "\u2014")),
         payment=order["payment_method"] or "\u2014",
         delivery=order["delivery_kind"] or "\u2014")
     await edit_text_safe(query, text, kb.admin_order_detail_kb(oid, order["status"]))
