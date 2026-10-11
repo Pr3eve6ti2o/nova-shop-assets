@@ -29,6 +29,78 @@ _last_deposit_check: dict = {}
 _order_locks: dict = {}
 
 
+class OrderNotPayable(Exception):
+    """Raised when an order cannot be paid (not found, not owned, bad state)."""
+    pass
+
+
+async def _verify_payable_order(user, order_id: int) -> dict:
+    """Authoritative read: this order exists, is this user's, is payable.
+
+    Opus P0 (F1): never trust order_id or total_cents from a callback/FSM
+    payload — re-derive from the database. Violating this lets a user pay
+    1 cent for a $500 order.
+    """
+    order = await db.get_order(order_id)
+    if order is None:
+        raise OrderNotPayable("not_found")
+    if int(order["user_id"]) != int(user["id"]):
+        logger.warning("order %s ownership mismatch user=%s", order_id, user["id"])
+        await db.audit(user["tg_id"], "order_pay_denied",
+                       f"order={order_id}:not_owner")
+        raise OrderNotPayable("not_owner")
+    if order["status"] not in ("pending", "awaiting_payment"):
+        raise OrderNotPayable(f"status={order['status']}")
+    total = int(order["total_cents"])
+    if total <= 0:
+        raise OrderNotPayable("non_positive_total")
+    return order
+
+
+async def _list_active_invoices_or_raise() -> list:
+    """Fail CLOSED. Opus P0 (F2): an unreadable invoice list must abort the
+    payment, never be treated as 'no invoices exist' (which creates a
+    second payable invoice → double fulfilment)."""
+    priors = await db.active_cryptobot_invoices()
+    if priors is None:
+        raise RuntimeError("active_cryptobot_invoices() returned None")
+    return list(priors)
+
+
+async def _cancel_invoice_at_provider(prior: dict) -> None:
+    """Kill at the provider FIRST, then mark cancelled locally.
+
+    Opus P0 (F3): marking cancelled locally before the provider delete
+    leaves a still-payable invoice the DB claims is dead.
+    """
+    inv_id = prior["invoice_id"]
+    try:
+        await cp.cryptobot_delete_invoice(inv_id)
+    except Exception as e:
+        # InvoiceNotFound subclasses Exception — already gone is fine.
+        if "not found" not in str(e).lower():
+            logger.error("cryptobot deleteInvoice %s failed, aborting: %s",
+                         inv_id, e)
+            await db.audit(0, "cryptobot_cancel_failed", f"invoice={inv_id}: {e}")
+            raise
+    await db.set_cryptobot_status(inv_id, "cancelled")
+
+
+MIN_TOPUP_CENTS = 100       # $1.00
+MAX_TOPUP_CENTS = 250_000   # $2,500.00
+
+
+def _valid_topup_amount(amount_cents) -> int:
+    """Opus P0 (F4): clamp top-up amounts — negatives/zero/unbounded values
+    produce bogus balance changes or unreconcilable invoices."""
+    if isinstance(amount_cents, bool) or not isinstance(amount_cents, int):
+        raise ValueError(
+            f"topup amount must be int, got {type(amount_cents).__name__}")
+    if not (MIN_TOPUP_CENTS <= amount_cents <= MAX_TOPUP_CENTS):
+        raise ValueError(f"topup amount out of range: {amount_cents}")
+    return amount_cents
+
+
 def _order_lock(order_id: int) -> asyncio.Lock:
     lock = _order_locks.get(order_id)
     if lock is None:
@@ -173,6 +245,16 @@ def _ttl_line(expires_iso: str) -> str:
 async def start_cryptobot_payment(query: types.CallbackQuery, state: FSMContext,
                                   user, order_id: int, total_cents: int):
     """Create the CryptoBot invoice and show pay + check buttons."""
+    # Opus P0 (F1): re-derive from DB — never trust the caller's total.
+    try:
+        order = await _verify_payable_order(user, order_id)
+    except OrderNotPayable:
+        await query.answer()
+        await edit_text_safe(query, texts.ERR_NOT_FOUND,
+                             kb.main_menu_kb())
+        return
+    total_cents = int(order["total_cents"])  # override the parameter, always
+
     fee_pct = int(config.CRYPTOBOT_FEE_PERCENT)
     # Displayed gross uses the same gross-up as cryptobot_create_invoice:
     # gross = ceil(net * 100 / (100 - fee_pct)), since CryptoBot deducts its
@@ -187,19 +269,25 @@ async def start_cryptobot_payment(query: types.CallbackQuery, state: FSMContext,
     lock = _order_lock(order_id)
     async with lock:
         try:
-            priors = await db.active_cryptobot_invoices() or []
+            priors = await _list_active_invoices_or_raise()
         except Exception as e:
-            logger.warning("list cryptobot invoices failed: %s", e)
-            priors = []
+            logger.error("cannot enumerate active invoices, aborting: %s", e)
+            await db.audit(user["tg_id"], "cryptobot_list_failed",
+                           f"order={order_id}: {e}")
+            await state.finish()
+            await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
+                                 kb.crypto_other_methods_kb())
+            return  # do NOT create an invoice
         for prior in priors:
             if prior["order_id"] != order_id:
                 continue
-            await db.set_cryptobot_status(prior["invoice_id"], "cancelled")
             try:
-                await cp.cryptobot_delete_invoice(prior["invoice_id"])
-            except Exception as e:
-                logger.warning("cryptobot deleteInvoice %s failed: %s",
-                               prior["invoice_id"], e)
+                await _cancel_invoice_at_provider(prior)
+            except Exception:
+                await state.finish()
+                await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
+                                     kb.crypto_other_methods_kb())
+                return
         try:
             inv = await cp.cryptobot_create_invoice(order_id=order_id,
                                                     usd_cents=int(total_cents))
@@ -255,6 +343,13 @@ async def start_topup_cryptobot(query: types.CallbackQuery, state: FSMContext,
     paid (see cb_topup_cryptobot_check).
     """
     await query.answer()
+    # Opus P0 (F4): validate the top-up amount before any arithmetic.
+    try:
+        amount_cents = _valid_topup_amount(amount_cents)
+    except ValueError as e:
+        logger.warning("invalid topup amount from user %s: %s", user["id"], e)
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     fee_pct = int(config.CRYPTOBOT_FEE_PERCENT)
     # Same gross-up as start_cryptobot_payment / cryptobot_create_invoice:
     # gross = ceil(net * 100 / (100 - fee_pct)); CryptoBot deducts its fee
@@ -269,10 +364,15 @@ async def start_topup_cryptobot(query: types.CallbackQuery, state: FSMContext,
     # close the list-then-create race.
     async with _topup_lock(user["id"]):
         try:
-            priors = await db.active_cryptobot_invoices() or []
+            priors = await _list_active_invoices_or_raise()
         except Exception as e:
-            logger.warning("list cryptobot invoices failed: %s", e)
-            priors = []
+            logger.error("cannot enumerate active invoices, aborting: %s", e)
+            await db.audit(user["tg_id"], "cryptobot_list_failed",
+                           f"topup user={user['id']}: {e}")
+            await state.finish()
+            await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
+                                 kb.crypto_other_methods_kb())
+            return  # do NOT create an invoice
         for prior in priors:
             if (prior.get("purpose") or "order") != "topup":
                 continue
@@ -280,12 +380,13 @@ async def start_topup_cryptobot(query: types.CallbackQuery, state: FSMContext,
                 continue
             if prior.get("status") != "active":
                 continue
-            await db.set_cryptobot_status(prior["invoice_id"], "cancelled")
             try:
-                await cp.cryptobot_delete_invoice(prior["invoice_id"])
-            except Exception as e:
-                logger.warning("cryptobot deleteInvoice %s failed: %s",
-                               prior["invoice_id"], e)
+                await _cancel_invoice_at_provider(prior)
+            except Exception:
+                await state.finish()
+                await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
+                                     kb.crypto_other_methods_kb())
+                return
         try:
             inv = await cp.cryptobot_create_invoice(
                 order_id=0, usd_cents=int(amount_cents),
