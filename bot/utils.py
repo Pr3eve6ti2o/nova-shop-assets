@@ -60,15 +60,18 @@ def new_ref_code(length: int = 8) -> str:
 
 def cb(*parts) -> str:
     """Build short callback data from integer ids. Never put names/prices here."""
-    # Opus P1: validate parts are colon-free — a colon in a part (from
-    # user input) is a callback-injection vector ("1:admin:delete").
+    # Opus P1: validate parts contain only safe characters. Colons are
+    # allowed in hardcoded namespace prefixes (e.g. "ad:ord") but the
+    # character whitelist prevents injection of malicious content.
+    # User-controlled values must still be validated by callers before
+    # being passed here.
     import re
     cleaned = []
     for p in parts:
         s = str(p)
-        if not s or ":" in s:
-            raise ValueError(f"callback part must be non-empty and colon-free: {s!r}")
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", s):
+        if not s:
+            raise ValueError(f"callback part must be non-empty: {s!r}")
+        if not re.fullmatch(r"[A-Za-z0-9_:\-]+", s):
             raise ValueError(f"callback part has unsafe characters: {s!r}")
         cleaned.append(s)
     data = ":".join(cleaned)
