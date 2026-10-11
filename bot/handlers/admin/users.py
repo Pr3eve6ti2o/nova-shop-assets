@@ -58,13 +58,24 @@ async def render_user_card(target, tg_id: int):
                            is_admin=config.PERM_USERS)
 async def cb_user_card(query: types.CallbackQuery):
     await query.answer()
-    await render_user_card(query, int(query.data.split(":")[2]))
+    # Opus P1: guard the int parse — malformed callback data crashed.
+    try:
+        tg_id = int(query.data.split(":")[2])
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
+    await render_user_card(query, tg_id)
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ad:ub:"),
                            is_admin=config.PERM_USERS)
 async def cb_user_block(query: types.CallbackQuery):
-    tg_id = int(query.data.split(":")[2])
+    # Opus P1: guard the int parse.
+    try:
+        tg_id = int(query.data.split(":")[2])
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     if str(tg_id) in {str(a) for a in config.ADMINS}:
         await query.answer("Cannot block a config admin.", show_alert=True)
         return
@@ -99,8 +110,13 @@ async def cb_role_edit(query: types.CallbackQuery):
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ad:urc:"),
                            is_admin=config.PERM_USERS)
 async def cb_role_toggle(query: types.CallbackQuery):
-    _, _, tg_id_s, bit_s = query.data.split(":")
-    tg_id, bit = int(tg_id_s), int(bit_s)
+    # Opus P1: guard the split and int parses — malformed data crashed.
+    try:
+        _, _, tg_id_s, bit_s = query.data.split(":")
+        tg_id, bit = int(tg_id_s), int(bit_s)
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     if bit not in config.PERM_NAMES:
         await query.answer("Invalid permission bit.", show_alert=True)
         return
