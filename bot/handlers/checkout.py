@@ -37,7 +37,12 @@ def payment_label(method: str, kind: str) -> str:
     """Human label for the chosen payment method (confirm screen)."""
     if method == "cod" and kind == "pickup":
         return texts.PAY_METHOD_PICKUP
-    return texts.PAY_METHOD_LABEL.get(method, method or "—")
+    # Opus: whitelist — returning the raw method value allows HTML injection
+    # via forged callback data rendered with parse_mode="HTML".
+    label = texts.PAY_METHOD_LABEL.get(method)
+    if label is None:
+        return "—"
+    return label
 
 
 async def _cart_is_digital_only(user_id: int) -> bool:
@@ -160,6 +165,14 @@ async def render_details(target, state: FSMContext, user: dict):
 @dp.callback_query_handler(text="co", state="*")
 async def start_checkout(query: types.CallbackQuery, state: FSMContext):
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
+    # Opus P0: block re-entry while a crypto payment is pending — re-entering
+    # overwrites FSM state and the webhook then credits the wrong order.
+    data = await state.get_data()
+    if data.get("pending_crypto_order_id"):
+        await query.answer(
+            "⏳ A crypto payment is already pending — complete or cancel it first.",
+            show_alert=True)
+        return
     t = await totals(user["id"], state)
     if not t["items"]:
         await query.answer(texts.MSG_CART_EMPTY, show_alert=True)
@@ -169,11 +182,17 @@ async def start_checkout(query: types.CallbackQuery, state: FSMContext):
         if not await product_available(p, it["qty"]):
             await query.answer(texts.ERR_OUT_OF_STOCK, show_alert=True)
             return
+    # Opus P0: reset stale payment keys — merging into existing state lets
+    # order_id/amount/invoice_id from an abandoned crypto payment bleed
+    # into the new checkout and get reused for wrong charges.
+    await state.update_data(
+        order_id=None, amount=None, invoice_id=None, pay_amount=None,
+        pending_crypto_order_id=None,
+        delivery_kind="pickup", phone=None, address=None,
+        payment_method=None, promo_code=None,
+        details_skipped=True)
     # Digital-only bot: delivery details removed from checkout flow.
     # Kept as optional service elsewhere, not in main purchase flow.
-    await state.update_data(delivery_kind="pickup", phone=None, address=None,
-                            payment_method=None, promo_code=None,
-                            details_skipped=True)
     await query.answer()
     await render_payment(query, state, user["id"])
 
