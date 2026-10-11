@@ -34,9 +34,13 @@ async def cb_promo_detail(query: types.CallbackQuery):
         return
     desc = (f"{pr['value']}% off" if pr["kind"] == "percent"
             else f"fixed {pr['value']} cents off")
+    # Opus P0: was f"...{pr['max_uses'] or '\u221e'}..." — backslash in
+    # f-string expression is SyntaxError on Python < 3.12, crashing import.
+    _inf = "\u221e"
+    _dash = "\u2014"
     text = (f"\U0001f39f\ufe0f <code>{html_escape(pr['code'])}</code>\n{desc}\n"
-            f"Uses: {pr['used_count']}/{pr['max_uses'] or '\u221e'}\n"
-            f"Expires: {pr['expires_at'] or '\u2014'}")
+            f"Uses: {pr['used_count']}/{pr['max_uses'] or _inf}\n"
+            f"Expires: {pr['expires_at'] or _dash}")
     await edit_text_safe(query, text, kb.admin_promo_kb(pr))
 
 
@@ -200,10 +204,13 @@ async def pw_expiry(message: types.Message, state: FSMContext):
         InlineKeyboardButton(texts.BTN_CANCEL, callback_data="prw:no"),
         InlineKeyboardButton(texts.BTN_CONFIRM, callback_data="prw:yes"),
     )
+    # Opus P0: avoid backslash in f-string expression (see above).
+    _inf2 = "\u221e"
+    _dash2 = "\u2014"
     await message.answer(
         f"\U0001f39f\ufe0f <code>{html_escape(data['pr_code'])}</code> \u2014 {desc}\n"
-        f"Max uses: {data['pr_max_uses'] or '\u221e'} \u00b7 "
-        f"Expires: {data['pr_expiry'] or '\u2014'}",
+        f"Max uses: {data['pr_max_uses'] or _inf2} \u00b7 "
+        f"Expires: {data['pr_expiry'] or _dash2}",
         reply_markup=kbd)
 
 
