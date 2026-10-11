@@ -120,6 +120,31 @@ def test_fmt_money():
 
 
 # ------------------------------------------------------- callback data audit ---
+def test_cb_namespaced_prefixes():
+    """Regression test: cb() must accept the namespaced prefixes used
+    throughout keyboards.py (e.g. 'ad:ord', 'ac:cl'). A too-strict
+    validation broke the Admin button on 2026-10-11 — this test
+    prevents that from recurring."""
+    from utils import cb
+    # All namespaced prefixes found in keyboards.py
+    prefixes = [
+        "ad:ord", "ad:o", "ad:os", "ad:u", "ad:ub", "ad:ur", "ad:urc",
+        "ac:cl", "ac:padd", "ac:cren", "ac:cdel", "ac:p", "ac:plist",
+        "ac:ppr", "ac:pr", "ac:prd", "ac:prt", "ac:pst", "ac:ptog",
+        "ac:pul", "ac:pv", "ac:pdel",
+    ]
+    for prefix in prefixes:
+        result = cb(prefix, "pending", 0)
+        assert result == f"{prefix}:pending:0", f"cb({prefix!r}) failed: {result!r}"
+    # Unsafe characters must still be rejected
+    for bad in ["a;b", "a<b", "a b", "a'b", 'a"b']:
+        try:
+            cb(bad)
+            raise AssertionError(f"cb({bad!r}) should have raised ValueError")
+        except ValueError:
+            pass
+
+
 def test_callback_data_length():
     kb_path = os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "keyboards.py")
