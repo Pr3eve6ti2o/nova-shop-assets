@@ -30,12 +30,23 @@ async def pre_checkout(query: types.PreCheckoutQuery):
         user = await db.get_user_by_tg(query.from_user.id)
         if order and user and order["user_id"] == user["id"] \
                 and order["status"] == "pending":
+            # Opus P1: reject zero/negative totals — free orders must not
+            # go through the payment flow.
+            if order["total_cents"] <= 0:
+                raise ValueError("non-positive order total")
             if query.currency == "XTR":
                 from .common import stars_label
                 expected = stars_label(order["total_cents"])
                 if not isinstance(expected, int):
                     raise TypeError("stars_label must return int")
             else:
+                # Opus P1: verify the payment currency matches config —
+                # a different currency with matching nominal amount
+                # must not pass verification.
+                if query.currency != config.CURRENCY:
+                    raise ValueError(
+                        f"currency mismatch: got {query.currency}, "
+                        f"expected {config.CURRENCY}")
                 expected = order["total_cents"]
             ok = (query.total_amount == expected)
     except Exception as e:
@@ -123,7 +134,48 @@ async def payment_success(message: types.Message, state: FSMContext):
 
     order = await db.get_order(oid)
     if not order or order["user_id"] != user["id"]:
+        # Opus P0: money arrived but the order is unknown/foreign — NEVER
+        # silently drop it. Record the payment and alert admins for manual
+        # reconciliation.
         logger.error("payment for unknown/foreign order: %s", sp.invoice_payload)
+        charge_id = sp.telegram_payment_charge_id or sp.invoice_payload or ""
+        await db.record_payment(
+            provider=provider, external_id=charge_id,
+            user_id=user["id"], order_id=None,
+            amount_cents=sp.total_amount, currency=sp.currency,
+            status="unmatched")
+        await notify_admins(
+            f"⚠️ Unmatched payment {charge_id}: {sp.total_amount} {sp.currency} "
+            f"from user {user['tg_id']} — payload {sp.invoice_payload!r}. "
+            f"Manual reconciliation required.",
+            min_bit=config.PERM_ORDERS)
+        return
+
+    # Opus P0: record the ACTUAL paid amount and currency from Telegram,
+    # not the expected order total. The old code logged order["total_cents"]
+    # with config.CURRENCY even for Stars payments (250 XTR logged as
+    # 1999 GBP cents) — corrupting the money ledger.
+    # Opus P1: verify the paid amount matches the order total.
+    if sp.currency == "XTR":
+        from .common import stars_label
+        expected_amount = stars_label(order["total_cents"])
+    else:
+        expected_amount = order["total_cents"]
+    if sp.total_amount != expected_amount:
+        logger.error(
+            "payment amount mismatch for order %s: paid %s %s, expected %s",
+            oid, sp.total_amount, sp.currency, expected_amount)
+        await notify_admins(
+            f"⚠️ Payment amount mismatch order {oid}: paid {sp.total_amount} "
+            f"{sp.currency}, expected {expected_amount}",
+            min_bit=config.PERM_ORDERS)
+        # Still record it — do not lose the money — but do not fulfill.
+        charge_id = sp.telegram_payment_charge_id or sp.invoice_payload or ""
+        await db.record_payment(
+            provider=provider, external_id=charge_id,
+            user_id=user["id"], order_id=oid,
+            amount_cents=sp.total_amount, currency=sp.currency,
+            status="amount_mismatch")
         return
 
     # Record payment FIRST (before status checks) so cancelled/duplicate
@@ -135,7 +187,7 @@ async def payment_success(message: types.Message, state: FSMContext):
     is_new = await db.record_payment(
         provider=provider, external_id=charge_id,
         user_id=user["id"], order_id=oid,
-        amount_cents=order["total_cents"], currency=config.CURRENCY, status="processing")
+        amount_cents=sp.total_amount, currency=sp.currency, status="processing")
     if not is_new:
         logger.info("duplicate successful_payment ignored: %s",
                     sp.telegram_payment_charge_id)
