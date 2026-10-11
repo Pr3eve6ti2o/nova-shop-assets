@@ -58,11 +58,10 @@ MSG_INFO = (
 )
 MSG_RENT = (
     "\U0001f4e6 <b>Rent Bot Features</b>\n\n"
-    "Premium features with API access, billed monthly.\n\n"
+    "Premium features with API access.\n\n"
     "<b>Plans</b>\n"
-    "• Starter — $9/mo\n"
-    "• Pro — $29/mo\n"
-    "• Enterprise — $99/mo\n\n"
+    "• Monthly — $8.99/mo\n"
+    "• Yearly — $89.99/yr\n\n"
     "Contact support to activate."
 )
 BTN_SEARCH = "\U0001f50d Search"
