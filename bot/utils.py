@@ -25,8 +25,17 @@ def stars_for_cents(cents: int, stars_per_usd: int, currency: str = "USD") -> in
     """Convert fiat cents to whole Telegram Stars (XTR smallest unit = 1 star)."""
     if (currency or "USD").upper() != "USD":
         raise ValueError("stars_for_cents requires USD; convert order total to USD first")
-    if cents <= 0 or stars_per_usd <= 0:
-        return 0
+    # Opus P0/P1: was silently returning 0 for non-positive cents or
+    # misconfigured rate — a 0-star invoice means free goods (money loss).
+    # Raise explicitly so misconfiguration fails loudly.
+    if not isinstance(cents, int) or isinstance(cents, bool):
+        raise ValueError(f"cents must be int, got {type(cents).__name__}")
+    if cents <= 0:
+        raise ValueError(f"cents must be positive, got {cents}")
+    if not isinstance(stars_per_usd, int) or isinstance(stars_per_usd, bool):
+        raise ValueError(f"stars_per_usd must be int, got {type(stars_per_usd).__name__}")
+    if stars_per_usd <= 0:
+        raise ValueError(f"stars_per_usd must be positive, got {stars_per_usd}")
     # ceil(cents / 100 * stars_per_usd)
     return max(1, -(-cents * stars_per_usd // 100))
 
@@ -58,6 +67,11 @@ def cb(*parts) -> str:
 
 
 def truncate(text: str, limit: int) -> str:
+    # Opus P1: guard limit <= 0 (was: negative slice gave nonsense).
+    # Note: callers must truncate BEFORE HTML-escaping — cutting mid-entity
+    # like "&amp;" produces invalid markup that breaks message delivery.
+    if limit <= 0:
+        return ""
     text = text or ""
     return text if len(text) <= limit else text[: limit - 1] + "\u2026"
 
