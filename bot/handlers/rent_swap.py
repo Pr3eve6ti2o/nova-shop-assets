@@ -193,7 +193,9 @@ async def _pending_application(user_db_id: int):
             "SELECT id FROM rental_swap_applications"
             # P0: include 'approved_1' — otherwise the one-open-application
             # guard stops working the moment admin #1 approves.
-            " WHERE user_id=? AND status IN ('pending','approved','approved_1','verifying')"
+            # Opus P1: include 'executing' — otherwise a tenant can start
+            # a new application while a swap is mid-execution.
+            " WHERE user_id=? AND status IN ('pending','approved','approved_1','verifying','executing')"
             " ORDER BY id DESC LIMIT 1",
             (user_db_id,),
         ) as cur:
@@ -265,28 +267,63 @@ async def _notify_admins_second_approval(app_id: int, first_admin: int):
         if not eligible:
             return
         app = await _get_application(app_id)
-        tenant = app.get("tenant_tg_id", "?") if app else "?"
+        # Opus P1: app may be a sqlite3.Row (no .get) — access by key
+        # with fallback, and HTML-escape user-controlled values.
+        from html import escape as _escape
+        try:
+            tenant = app["tenant_tg_id"] if app else "?"
+        except (KeyError, IndexError, TypeError):
+            tenant = "?"
         text = (
             f"\U0001f6a8 Token swap #{app_id} needs a second approval\n\n"
-            f"First approved by: {first_admin}\n"
-            f"Tenant: {tenant}\n\n"
+            f"First approved by: {_escape(str(first_admin))}\n"
+            f"Tenant: {_escape(str(tenant))}\n\n"
             f"Review in the bot and approve/deny."
         )
         from aiogram import Bot
-        import config as cfg
-        bot = Bot.get_current()
+        _bot = Bot.get_current()
         for tg_id in eligible:
             try:
-                await bot.send_message(tg_id, text)
+                await _bot.send_message(tg_id, text, parse_mode="HTML")
             except Exception:
                 pass  # best-effort
     except Exception:
         pass  # never block on notification failure
 
 
+# Opus P0: explicit allowed-transition map — _set_status previously
+# allowed walking a completed application back to 'approved'/'pending',
+# letting a stale approve button re-open the claim window for double
+# execution.
+_ALLOWED_TRANSITIONS = {
+    "pending": ("approved_1", "denied", "cancelled"),
+    "approved_1": ("approved", "denied", "cancelled"),
+    "approved": ("executing", "cancelled"),
+    "executing": ("done", "failed"),
+    "verifying": ("approved", "denied", "cancelled"),
+    # Terminal states: no outgoing transitions.
+    "denied": (),
+    "cancelled": (),
+    "done": (),
+    "failed": (),
+}
+
+
 async def _set_status(app_id: int, status: str, decided_by: int = None, swap_id: str = None):
     await _ensure_table()
     async with db._db() as conn:
+        # Opus P0: enforce the transition map — refuse illegal rollbacks.
+        async with conn.execute(
+            "SELECT status FROM rental_swap_applications WHERE id=?",
+            (app_id,)) as cur:
+            row = await cur.fetchone()
+        current = row[0] if row else None
+        allowed = _ALLOWED_TRANSITIONS.get(current, ())
+        if status not in allowed:
+            logger.warning(
+                "illegal swap status transition %s -> %s for app %s; refused",
+                current, status, app_id)
+            return False
         await conn.execute(
             "UPDATE rental_swap_applications SET status=?, decided_at=?,"
             " decided_by=COALESCE(?, decided_by), swap_id=COALESCE(?, swap_id)"
@@ -294,6 +331,7 @@ async def _set_status(app_id: int, status: str, decided_by: int = None, swap_id:
             (status, _now_iso(), decided_by, swap_id, app_id),
         )
         await conn.commit()
+        return True
 
 
 async def _claim_for_execution(app_id: int) -> bool:
