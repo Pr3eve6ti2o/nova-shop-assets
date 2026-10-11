@@ -521,13 +521,16 @@ async def cb_swap_confirm(query: types.CallbackQuery, state: FSMContext):
     kb.add(InlineKeyboardButton(BTN_SWAP_APPROVE, callback_data=f"rswap:approve:{app_id}"))
     kb.add(InlineKeyboardButton(BTN_SWAP_DENY, callback_data=f"rswap:deny:{app_id}"))
     try:
+        # Opus P1: HTML-escape user-controlled name and reason — unescaped
+        # input breaks the admin message or injects HTML.
+        from html import escape as _escape
         await notify_admins(
             MSG_ADMIN_SWAP_REQUEST.format(
                 app_id=app_id,
-                name=user["name"] or "?",
+                name=_escape(str(user["name"] or "?")),
                 tg_id=user["tg_id"],
-                old_bot=old_bot,
-                reason=reason[:300],
+                old_bot=_escape(str(old_bot)),
+                reason=_escape(reason[:300]),
             ),
             reply_markup=kb,
         )
