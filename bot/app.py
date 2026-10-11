@@ -4,6 +4,13 @@ import logging
 import os
 import sys
 
+# Opus P0-5: configure logging BEFORE importing loader — loader import can
+# fail (bad token, bad DB path) and those failures were invisible.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+)
+
 from aiogram import executor, types
 
 import config
@@ -50,10 +57,6 @@ dp.filters_factory.bind(IsAdmin)
 
 import handlers  # noqa: F401  (registers all handlers)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 # Opus P1: middleware order — aiogram 2.x runs setup_middleware in reverse
@@ -64,7 +67,21 @@ dp.setup_middleware(RateLimitMiddleware(db))
 dp.setup_middleware(BlockedMiddleware(db))
 
 WEBAPP_HOST = "0.0.0.0"
-WEBAPP_PORT = int(os.environ.get("PORT", 5000))
+# Opus P2-15: validate PORT — unvalidated int() crashes on garbage.
+try:
+    WEBAPP_PORT = int(os.environ.get("PORT", "5000"))
+except ValueError:
+    raise RuntimeError(f"PORT must be an integer, got {os.environ.get('PORT')!r}")
+if not (1 <= WEBAPP_PORT <= 65535):
+    raise RuntimeError(f"PORT must be 1-65535, got {WEBAPP_PORT}")
+
+# Opus P2-16: cross-check WEBHOOK_PATH against WEBHOOK_URL.
+if config.WEBHOOK_URL and config.WEBHOOK_PATH:
+    if not config.WEBHOOK_URL.rstrip("/").endswith(
+            "/" + config.WEBHOOK_PATH.strip("/")):
+        raise RuntimeError(
+            "WEBHOOK_PATH does not match WEBHOOK_URL — "
+            "the webhook receiver path must be a suffix of the URL")
 
 # Opus P0: skip_updates=True drops pre_checkout_query / successful_payment
 # received while offline — customers get charged but never fulfilled.

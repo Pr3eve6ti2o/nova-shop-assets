@@ -38,6 +38,19 @@ _DB_PATH = os.getenv("DATABASE_PATH") or os.path.join(
     "data", "nova_shop.db")
 _DB_PATH = os.path.abspath(_DB_PATH)
 os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
+
+# Opus P2-22: WAL mode + busy_timeout + foreign_keys for a multi-writer
+# money database — prevents "database is locked" crashes and FK violations.
+import sqlite3 as _sqlite3
+_init_conn = _sqlite3.connect(_DB_PATH, timeout=30)
+try:
+    _init_conn.execute("PRAGMA journal_mode=WAL")
+    _init_conn.execute("PRAGMA busy_timeout=30000")
+    _init_conn.execute("PRAGMA foreign_keys=ON")
+    _init_conn.commit()
+finally:
+    _init_conn.close()
+
 db = Database(_DB_PATH)
 
 logger.info("Loader initialized (bot, dispatcher, database at %s).", _DB_PATH)
