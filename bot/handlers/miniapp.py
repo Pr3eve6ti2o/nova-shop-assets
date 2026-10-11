@@ -113,7 +113,13 @@ async def create_tonconnect_order(user: dict, sender: str,
         return None, False
     expected_nano = math.ceil(total / 100 / ton_usd * 1e9)
     # C4: require the FULL amount — no tolerance for underpayment.
-    if matched.get("base", 0) < expected_nano:
+    # Opus P0: cast base to int — toncenter returns nanoton as strings,
+    # and str < int throws TypeError, crashing after the user paid.
+    try:
+        paid_nano = int(matched.get("base", 0))
+    except (ValueError, TypeError):
+        return None, False
+    if paid_nano < expected_nano:
         return None, False
     # P2.17: per-intent claim verification (legacy per-user path removed).
     # The memo must match a single-use intent code for this user.
