@@ -30,7 +30,15 @@ async def _order_is_paid(order) -> bool:
                 return await cur.fetchone() is not None
     if method.startswith("direct_"):
         dep = await db.get_deposit_by_order(oid)
-        return bool(dep and dep["status"] == "paid")
+        # Opus P0: was only checking status=="paid" — an underpaid deposit
+        # marked paid would release goods. Verify the amount covers the total.
+        if not dep or dep["status"] != "paid":
+            return False
+        try:
+            paid_cents = int(dep.get("amount_cents") or 0)
+        except (ValueError, TypeError):
+            return False
+        return paid_cents >= int(order["total_cents"])
     # M3: tonconnect rail records into payments (provider="tonconnect").
     if method == "tonconnect":
         async with db._db() as conn:
@@ -53,11 +61,19 @@ async def cb_orders_home(query: types.CallbackQuery):
                            is_admin=config.PERM_ORDERS)
 async def cb_orders_list(query: types.CallbackQuery):
     await query.answer()
-    _, _, status, page_s = query.data.split(":")
+    # Opus: guard the split and int parse — malformed callback data
+    # threw unhandled ValueError/IndexError.
+    try:
+        _, _, status, page_s = query.data.split(":")
+        page = int(page_s)
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     if status not in texts.ORDER_STATUSES:
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
         return
-    page = int(page_s)
+    if page < 0:
+        page = 0
     total = await db.count_orders_by_status(status)
     page, _ = paginate(total, page, PER_PAGE)
     orders = await db.list_orders_by_status(status, PER_PAGE, page * PER_PAGE)
