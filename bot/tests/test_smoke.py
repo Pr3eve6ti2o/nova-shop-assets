@@ -110,7 +110,13 @@ def test_fmt_money():
     assert stars_for_cents(100, 60) == 60
     assert stars_for_cents(199, 60) == 120  # ceil(1.99*60)=120
     assert stars_for_cents(1, 60) == 1      # min 1
-    assert stars_for_cents(0, 60) == 0
+    # Opus: 0 cents must RAISE (was: silently returned 0, hiding
+    # misconfiguration that meant free-goods invoices).
+    try:
+        stars_for_cents(0, 60)
+        raise AssertionError("stars_for_cents(0, 60) should raise ValueError")
+    except ValueError:
+        pass
 
 
 # ------------------------------------------------------- callback data audit ---
