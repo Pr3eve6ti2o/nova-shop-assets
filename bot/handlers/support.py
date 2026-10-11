@@ -88,10 +88,7 @@ async def render_support_list(target, user_id: int):
 
 
 async def _try_delete(message):
-    try:
-        await message.delete()
-    except Exception:
-        pass
+    # Opus P2: was deleting the same message twice (copy-paste bug).
     try:
         await message.delete()
     except Exception:
