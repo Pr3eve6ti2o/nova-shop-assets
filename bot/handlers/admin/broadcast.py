@@ -32,6 +32,10 @@ async def bc_content(message: types.Message, state: FSMContext):
     text = message.text or message.caption or ""
     if not text and not photo:
         return
+    # Opus P1: HTML-escape broadcast text — raw <>& breaks the send
+    # for every recipient or injects unintended HTML.
+    from html import escape as _escape
+    text = _escape(text)
     users = list(dict.fromkeys(await db.all_active_tg_ids()))
     await state.update_data(bc_text=text, bc_photo=photo, bc_tg_ids=users)
     await BroadcastFlow.confirm.set()
