@@ -272,13 +272,31 @@ async def msg_token_pasted(message: types.Message, state: FSMContext):
     if not _enabled():
         await state.finish()
         return
+    # Opus P1: restrict token flow to private chats — in a group, others
+    # could see the token.
+    if message.chat.type != "private":
+        await message.answer(
+            "🔒 For your security, please send your bot token in a private chat.",
+            reply_markup=_back_to_rent_kb())
+        await _clear(message, state)
+        return
     text = (message.text or "").strip()
     if text.lower() in ("cancel", "/cancel"):
         await _clear(message, state)
         await message.answer(MSG_TOK_CANCELLED, reply_markup=_back_to_rent_kb())
         return
 
-    token = text
+    # Opus P1: validate token format (digits:alphanumeric) before sending
+    # to the API — stray whitespace or extra words break things.
+    import re
+    token = text.strip()
+    if not re.fullmatch(r"\d+:[A-Za-z0-9_-]+", token):
+        await message.answer(
+            "⚠️ That doesn't look like a valid bot token. "
+            "It should look like `123456:ABC-DEF...`. Try again or tap Cancel.",
+            reply_markup=_back_to_rent_kb())
+        return
+
     # Remove the token from chat history best-effort.
     try:
         await message.delete()
@@ -287,7 +305,10 @@ async def msg_token_pasted(message: types.Message, state: FSMContext):
 
     try:
         user_id = await _get_user_id(message.from_user.id)
-    except RuntimeError:
+    except Exception:
+        # Opus P1: was RuntimeError only — network/timeout/JSON errors
+        # propagated unhandled, leaving the token in state and risking
+        # token leakage in exception logs.
         await _clear(message, state)
         await message.answer(MSG_TOK_UNAVAILABLE, reply_markup=_back_to_rent_kb())
         return
@@ -298,7 +319,10 @@ async def msg_token_pasted(message: types.Message, state: FSMContext):
 
     try:
         result = await _nova("POST", "/api/internal/rental/token/validate", json_body={"token": token})
-    except RuntimeError as exc:
+    except Exception as exc:
+        # Opus P1: catch broad Exception (not just RuntimeError) and never
+        # log the token itself.
+        logger.warning("token validation failed: %s", type(exc).__name__)
         await _clear(message, state)
         await message.answer(_err_text(exc), reply_markup=_back_to_rent_kb())
         return
@@ -467,8 +491,11 @@ async def _do_submit(query: types.CallbackQuery, state: FSMContext, plan: str):
     await edit_text_safe(query, MSG_TOK_DONE.format(username="@" + bot_username if bot_username else "your bot"), reply_markup=kb)
 
 
-@dp.callback_query_handler(text="rent:token:cancel")
+@dp.callback_query_handler(text="rent:token:cancel", state="*")
 async def cb_token_cancel(query: types.CallbackQuery, state: FSMContext):
+    # Opus P1: was missing state="*" — tapping Cancel while in
+    # waiting_token did nothing, trapping the user with their secret
+    # still in FSM storage.
     await query.answer()
     await _clear(query, state)
     await edit_text_safe(query, MSG_TOK_CANCELLED, reply_markup=_back_to_rent_kb())
