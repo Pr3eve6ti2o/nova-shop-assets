@@ -341,17 +341,23 @@ async def msg_token_pasted(message: types.Message, state: FSMContext):
         await message.answer(MSG_TOK_FOREIGN.format(url=url), reply_markup=kb)
         return
 
-    await _issue_challenge(message, state, token, user_id, False)
+    await _issue_challenge(message, state, token, user_id, False,
+                           telegram_id=message.from_user.id)
 
 
-async def _issue_challenge(message: types.Message, state: FSMContext, token: str, user_id: str, confirm: bool):
+async def _issue_challenge(message: types.Message, state: FSMContext,
+                         token: str, user_id: str, confirm: bool,
+                         telegram_id: int):
+    # Opus P1: telegram_id is passed explicitly — deriving it from
+    # message.from_user.id was wrong when called with query.message
+    # (that's the bot's identity, not the clicking user).
     try:
         result = await _nova(
             "POST",
             "/api/internal/rental/token/challenge",
             json_body={
                 "token": token,
-                "telegram_id": str(message.from_user.id),
+                "telegram_id": str(telegram_id),
                 "user_id": user_id,
                 "confirm_foreign_webhook": confirm,
             },
@@ -389,8 +395,10 @@ async def cb_token_challenge_confirm(query: types.CallbackQuery, state: FSMConte
         await _clear(query, state)
         await edit_text_safe(query, MSG_TOK_FAILED, reply_markup=_back_to_rent_kb())
         return
-    # message proxy for _issue_challenge
-    await _issue_challenge(query.message, state, token, user_id, True)
+    # Opus P1: pass the clicking user's telegram_id explicitly — 
+    # query.message.from_user is the bot, not the user.
+    await _issue_challenge(query.message, state, token, user_id, True,
+                           telegram_id=query.from_user.id)
 
 
 @dp.callback_query_handler(text="rent:token:check")
