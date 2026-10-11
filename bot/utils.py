@@ -60,7 +60,18 @@ def new_ref_code(length: int = 8) -> str:
 
 def cb(*parts) -> str:
     """Build short callback data from integer ids. Never put names/prices here."""
-    data = ":".join(str(p) for p in parts)
+    # Opus P1: validate parts are colon-free — a colon in a part (from
+    # user input) is a callback-injection vector ("1:admin:delete").
+    import re
+    cleaned = []
+    for p in parts:
+        s = str(p)
+        if not s or ":" in s:
+            raise ValueError(f"callback part must be non-empty and colon-free: {s!r}")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", s):
+            raise ValueError(f"callback part has unsafe characters: {s!r}")
+        cleaned.append(s)
+    data = ":".join(cleaned)
     if len(data.encode("utf-8")) > 64:
         raise ValueError("callback_data exceeds 64 bytes")
     return data
