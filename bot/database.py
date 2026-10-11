@@ -17,17 +17,20 @@ CREATE TABLE IF NOT EXISTS users(
   id INTEGER PRIMARY KEY, tg_id INTEGER UNIQUE NOT NULL, name TEXT,
   phone TEXT, address TEXT, is_blocked INTEGER DEFAULT 0,
   ref_code TEXT UNIQUE, referred_by INTEGER REFERENCES users(id),
-  role_mask INTEGER DEFAULT 0, balance_cents INTEGER NOT NULL DEFAULT 0,
+  role_mask INTEGER DEFAULT 0,
+  balance_cents INTEGER NOT NULL DEFAULT 0 CHECK (balance_cents >= 0),
   has_rental INTEGER NOT NULL DEFAULT 0,
   has_rental_history INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT);
+  created_at TEXT,
+  CHECK (referred_by IS NULL OR referred_by != id));
 CREATE TABLE IF NOT EXISTS categories(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, emoji TEXT DEFAULT '\U0001f4e6',
   sort INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS products(
   id INTEGER PRIMARY KEY, category_id INTEGER REFERENCES categories(id),
   name TEXT NOT NULL, description TEXT DEFAULT '', photo_file_id TEXT,
-  price_cents INTEGER NOT NULL, old_price_cents INTEGER,
+  price_cents INTEGER NOT NULL CHECK (price_cents >= 0),
+  old_price_cents INTEGER CHECK (old_price_cents IS NULL OR old_price_cents >= 0),
   kind TEXT NOT NULL DEFAULT 'physical',
   stock INTEGER NOT NULL DEFAULT -1,
   rating_sum INTEGER DEFAULT 0, rating_count INTEGER DEFAULT 0,
@@ -41,14 +44,14 @@ CREATE TABLE IF NOT EXISTS product_values(
 CREATE TABLE IF NOT EXISTS cart_items(
   user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
   product_id INTEGER REFERENCES products(id) ON DELETE CASCADE,
-  qty INTEGER NOT NULL, UNIQUE(user_id, product_id));
+  qty INTEGER NOT NULL CHECK (qty > 0), UNIQUE(user_id, product_id));
 CREATE TABLE IF NOT EXISTS wishlist(
   user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
   product_id INTEGER REFERENCES products(id) ON DELETE CASCADE,
   UNIQUE(user_id, product_id));
 CREATE TABLE IF NOT EXISTS promos(
   id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL, kind TEXT NOT NULL,
-  value INTEGER NOT NULL,
+  value INTEGER NOT NULL CHECK (value >= 0),
   max_uses INTEGER DEFAULT 0, used_count INTEGER DEFAULT 0,
   min_subtotal_cents INTEGER DEFAULT 0,
   expires_at TEXT, is_active INTEGER DEFAULT 1);
@@ -56,8 +59,12 @@ CREATE TABLE IF NOT EXISTS promo_usages(promo_id INTEGER, user_id INTEGER,
   used_at TEXT, UNIQUE(promo_id, user_id));
 CREATE TABLE IF NOT EXISTS orders(
   id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id),
-  status TEXT NOT NULL DEFAULT 'pending',
-  subtotal_cents INTEGER, discount_cents INTEGER DEFAULT 0, total_cents INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','awaiting_payment','confirmed','processing',
+                      'shipped','delivered','cancelled','refunded')),
+  subtotal_cents INTEGER NOT NULL DEFAULT 0 CHECK (subtotal_cents >= 0),
+  discount_cents INTEGER NOT NULL DEFAULT 0 CHECK (discount_cents >= 0),
+  total_cents INTEGER NOT NULL DEFAULT 0 CHECK (total_cents >= 0),
   payment_method TEXT,
   delivery_kind TEXT,
   address TEXT, phone TEXT, promo_code TEXT,
@@ -98,6 +105,9 @@ CREATE TABLE IF NOT EXISTS payment_observations(
   UNIQUE(chain_id, token_contract, tx_hash, log_index));
 CREATE INDEX IF NOT EXISTS ix_observations_chain_recipient
   ON payment_observations(chain, recipient, state);
+-- Opus P2: claim query was doing a full scan — composite index on (product_id, is_used).
+CREATE INDEX IF NOT EXISTS ix_product_values_claim
+  ON product_values(product_id, is_used);
 CREATE TABLE IF NOT EXISTS reconciliation_cursors(
   chain TEXT PRIMARY KEY,
   last_block_height INTEGER,
