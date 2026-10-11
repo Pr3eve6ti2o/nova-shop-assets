@@ -64,7 +64,17 @@ def _nav_footer(kb, back_cb: str, deep: bool = False):
 def categories_kb(cats):
     kb = InlineKeyboardMarkup(row_width=2)
     for c in cats:
-        kb.insert(InlineKeyboardButton(f"{c['emoji']} {c['name']}",
+        # Opus P1: guard against empty names (Telegram rejects the whole
+        # keyboard with BUTTON_TEXT_EMPTY) and None emoji ("None Name").
+        # Truncate long names to avoid rendering issues.
+        name = (c["name"] or "").strip()
+        if not name:
+            continue  # skip broken category rather than crash storefront
+        emoji = c["emoji"] or ""
+        label = f"{emoji} {name}".strip()
+        if len(label) > 60:
+            label = label[:57] + "..."
+        kb.insert(InlineKeyboardButton(label,
                                        callback_data=cb("cat", c["id"], 0)))
     kb.row(BTN_MENU)
     return kb
