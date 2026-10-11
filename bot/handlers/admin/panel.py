@@ -77,8 +77,11 @@ async def cb_stats(query: types.CallbackQuery):
         f"{texts.STATUS_EMOJI.get(s, '')} {texts.STATUS_LABEL.get(s, s)}: <b>{counts.get(s, 0)}</b>"
         for s in texts.ORDER_STATUSES)
     top = await db.top_products(5)
+    # Opus: HTML-escape product names — unescaped names with <>& break
+    # Telegram's HTML parsing and fail the stats message.
+    from html import escape as _escape
     top_lines = "\n".join(
-        f"\u2022 {t['name']} \u2014 {t['qty']} sold ({fmt_money(t['revenue'], config.CURRENCY)})"
+        f"\u2022 {_escape(str(t['name']))} \u2014 {t['qty']} sold ({fmt_money(t['revenue'], config.CURRENCY)})"
         for t in top) or "\u2014"
     text = texts.MSG_ADMIN_STATS.format(
         total=total, new24=new24, blocked=blocked,
