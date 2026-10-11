@@ -47,8 +47,13 @@ async def cb_shop(query: types.CallbackQuery, state: FSMContext):
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("cat:"))
 async def cb_category(query: types.CallbackQuery):
     await query.answer()
-    _, cid_s, page_s = query.data.split(":")
-    cid, page = int(cid_s), int(page_s)
+    try:
+        _, cid_s, page_s = query.data.split(":")
+        cid, page = int(cid_s), int(page_s)
+    except (ValueError, IndexError):
+        # Opus: malformed callback data must not crash the handler.
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     cat = await db.get_category(cid)
     if not cat:
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
@@ -56,11 +61,14 @@ async def cb_category(query: types.CallbackQuery):
     total = await db.count_active_products(cid)
     page, _ = paginate(total, page, PER_PAGE)
     items = await db.list_products(cid, PER_PAGE, page * PER_PAGE)
-    header = texts.MSG_BREADCRUMB.format(cat=cat["name"])
+    # Opus: HTML-escape category names — unescaped names allow injection
+    # via the HTML parse mode.
+    header = texts.MSG_BREADCRUMB.format(cat=html.escape(cat["name"]))
     if not items:
         await edit_text_safe(
             query,
-            f"{header}\n\n" + texts.MSG_CATEGORY_EMPTY.format(name=cat["name"]),
+            f"{header}\n\n" + texts.MSG_CATEGORY_EMPTY.format(
+                name=html.escape(cat["name"])),
             kb.products_kb([], cid, 0, 0, PER_PAGE),
         )
         return
@@ -128,7 +136,11 @@ async def show_product_detail(target, pid: int, user, qty: int = 1):
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("p:"))
 async def cb_product(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
-    pid = int(query.data.split(":")[1])
+    try:
+        pid = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     qty = await _qty_in_view(state, pid)
     await show_product_detail(query, pid, user, qty)
@@ -136,8 +148,12 @@ async def cb_product(query: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("pa:"))
 async def cb_stepper(query: types.CallbackQuery, state: FSMContext):
-    _, pid_s, delta_s = query.data.split(":")
-    pid = int(pid_s)
+    try:
+        _, pid_s, delta_s = query.data.split(":")
+        pid = int(pid_s)
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     delta = 1 if delta_s == "+1" else -1
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     p = await db.get_product(pid)
@@ -162,8 +178,17 @@ async def cb_stepper(query: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("a:"))
 async def cb_add_cart(query: types.CallbackQuery, state: FSMContext):
-    pid = int(query.data.split(":")[1])
+    try:
+        pid = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     p = await db.get_product(pid)
+    # Opus: explicit existence/active check — cb_add_cart previously relied
+    # solely on product_available() to catch missing products.
+    if not p or not p["is_active"]:
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     qty = await _qty_in_view(state, pid)
     if not await product_available(p, qty):
@@ -175,8 +200,15 @@ async def cb_add_cart(query: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("pb:"))
 async def cb_buy_now(query: types.CallbackQuery, state: FSMContext):
-    pid = int(query.data.split(":")[1])
+    try:
+        pid = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     p = await db.get_product(pid)
+    if not p or not p["is_active"]:
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     qty = await _qty_in_view(state, pid)
     if not await product_available(p, qty):
@@ -190,7 +222,11 @@ async def cb_buy_now(query: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("w:"))
 async def cb_wishlist(query: types.CallbackQuery, state: FSMContext):
-    pid = int(query.data.split(":")[1])
+    try:
+        pid = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     p = await db.get_product(pid)
     if not p or not p["is_active"]:
@@ -256,7 +292,11 @@ async def cb_search_page(query: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     if not data.get("q"):
         return
-    await render_search(query, state, int(query.data.split(":")[1]))
+    try:
+        page = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        return
+    await render_search(query, state, page)
 
 
 @dp.callback_query_handler(text="noop")
