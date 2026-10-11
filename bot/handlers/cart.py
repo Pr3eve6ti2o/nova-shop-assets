@@ -1,4 +1,6 @@
 """Cart: view, steppers, promo, clear-confirm."""
+import html
+
 from aiogram import types
 from aiogram.dispatcher import FSMContext
 from aiogram.utils.exceptions import TelegramAPIError
@@ -42,15 +44,20 @@ async def render_cart(target, user_id: int, state: FSMContext, dropped: list = N
     else:
         await target.answer(text, reply_markup=markup, disable_web_page_preview=True)
     if dropped:
-        toast = texts.MSG_CART_DROPPED.format(names=", ".join(dropped))
+        # Opus: escape product names — unescaped names in HTML parse mode
+        # allow injection.
+        toast = texts.MSG_CART_DROPPED.format(
+            names=", ".join(html.escape(n) for n in dropped))
         if isinstance(target, types.CallbackQuery):
             await target.answer(toast, show_alert=True)
         else:
             await target.answer(toast)
 
 
-@dp.message_handler(lambda m: (m.text or "").startswith(texts.BTN_CART))
+@dp.message_handler(lambda m: (m.text or "") == texts.BTN_CART)
 async def nav_cart(message: types.Message, state: FSMContext):
+    # Opus: was startswith() — a support question beginning with the cart
+    # label was treated as navigation and the user's message got deleted.
     if message.chat.type != "private":
         await message.answer("Your cart is private — please open me in a private chat.")
         return
@@ -100,17 +107,27 @@ async def cb_cart_qty(query: types.CallbackQuery, state: FSMContext):
         return
     delta = 1 if delta_s == "+1" else -1
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
+    # Opus: check stock BEFORE adjusting — the old rollback logic was wrong
+    # when cart_adjust clamped the quantity (new_qty reflected the clamp,
+    # not the requested delta, so -delta rollback landed below the cap).
+    # Also enforces an upper bound so totals cannot grow unbounded.
+    MAX_QTY = 99
+    p = await db.get_product(pid)
+    items = await db.cart_items(user["id"])
+    current = next((i["qty"] for i in items if i["product_id"] == pid), 0)
+    new_qty = current + delta
+    if new_qty > MAX_QTY:
+        # Opus: upper bound — silently ignore, matching shop stepper behaviour.
+        await query.answer()
+        return
+    if new_qty > 0 and not product_available(p, new_qty):
+        await query.answer(texts.ERR_OUT_OF_STOCK, show_alert=True)
+        return
     # Atomic adjust prevents read-modify-write race on rapid taps
     new_qty = await db.cart_adjust(user["id"], pid, delta)
     if new_qty <= 0:
         await query.answer(texts.TOAST_REMOVED)
     else:
-        p = await db.get_product(pid)
-        if not product_available(p, new_qty):
-            # Roll back the increment if stock exceeded
-            await db.cart_adjust(user["id"], pid, -delta)
-            await query.answer(texts.ERR_OUT_OF_STOCK, show_alert=True)
-            return
         await query.answer()
     await render_cart(query, user["id"], state)
 
@@ -162,7 +179,14 @@ async def cb_promo_ask(query: types.CallbackQuery, state: FSMContext):
 async def promo_code_received(message: types.Message, state: FSMContext):
     if await handle_escape(message, state):
         return
-    code = (message.text or "").strip()[:32]
+    # Opus: validate BEFORE truncating — truncating first lets a long code
+    # map onto a shorter valid-looking one.
+    code = (message.text or "").strip()
+    if len(code) > 32:
+        await message.answer(texts.MSG_PROMO_INVALID,
+                             reply_markup=await main_reply_kb(message.from_user.id))
+        await state.finish()
+        return
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
     data = await state.get_data()
     origin = data.get("promo_origin", "cart")
