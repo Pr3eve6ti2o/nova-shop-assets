@@ -70,6 +70,11 @@ async def nav_cart(message: types.Message, state: FSMContext):
 
 
 async def cmd_cart(message: types.Message, state: FSMContext):
+    # Opus: nav_cart has a private-chat guard but cmd_cart did not —
+    # cart contents could leak in a group chat.
+    if message.chat.type != "private":
+        await message.answer("Your cart is private — please open me in a private chat.")
+        return
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
     await render_cart(message, user["id"], state)
 
@@ -192,11 +197,11 @@ async def promo_code_received(message: types.Message, state: FSMContext):
     origin = data.get("promo_origin", "cart")
 
     if origin == "redeem":
-        # Validate the code itself (no cart needed); stash for next checkout.
-        promo = await db.get_promo(code)
-        ok = bool(promo and promo["is_active"])
-        if ok and promo["expires_at"] and promo["expires_at"] < utcnow_iso():
-            ok = False
+        # Opus: redeem path must run the FULL promo validation (usage limits,
+        # per-user usage), not just is_active + expiry — otherwise a code
+        # accepted here can fail or misbehave at checkout.
+        ok, reason, _discount, promo = await db.validate_promo(
+            code, user["id"], 0)
         await state.finish()
         if not ok:
             await message.answer(texts.MSG_PROMO_INVALID,
