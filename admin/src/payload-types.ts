@@ -72,6 +72,8 @@ export interface Config {
     categories: Category;
     products: Product;
     orders: Order;
+    customers: Customer;
+    'gift-cards': GiftCard;
     'payload-kv': PayloadKv;
     'payload-locked-documents': PayloadLockedDocument;
     'payload-preferences': PayloadPreference;
@@ -84,6 +86,8 @@ export interface Config {
     categories: CategoriesSelect<false> | CategoriesSelect<true>;
     products: ProductsSelect<false> | ProductsSelect<true>;
     orders: OrdersSelect<false> | OrdersSelect<true>;
+    customers: CustomersSelect<false> | CustomersSelect<true>;
+    'gift-cards': GiftCardsSelect<false> | GiftCardsSelect<true>;
     'payload-kv': PayloadKvSelect<false> | PayloadKvSelect<true>;
     'payload-locked-documents': PayloadLockedDocumentsSelect<false> | PayloadLockedDocumentsSelect<true>;
     'payload-preferences': PayloadPreferencesSelect<false> | PayloadPreferencesSelect<true>;
@@ -132,7 +136,7 @@ export interface User {
   /**
    * Admins can manage users and settings; staff manage catalog and orders.
    */
-  role: 'admin' | 'staff';
+  role: 'admin' | 'staff' | 'service';
   updatedAt: string;
   createdAt: string;
   enableAPIKey?: boolean | null;
@@ -249,6 +253,14 @@ export interface Order {
    */
   tgUserId?: string | null;
   customerName?: string | null;
+  /**
+   * Buyer phone. Edits write back to the bot while the order is unshipped.
+   */
+  phone?: string | null;
+  /**
+   * Delivery address. Edits write back to the bot while the order is unshipped.
+   */
+  address?: string | null;
   items?:
     | {
         productName?: string | null;
@@ -258,9 +270,13 @@ export interface Order {
       }[]
     | null;
   totalCents?: number | null;
+  /**
+   * Total refunded to store credit so far (USD cents).
+   */
+  refundedCents?: number | null;
   currency?: string | null;
-  paymentMethod?: ('stars' | 'card' | 'cryptobot' | 'crypto_self') | null;
-  status?: ('pending' | 'paid' | 'processing' | 'shipped' | 'completed' | 'cancelled') | null;
+  paymentMethod?: ('stars' | 'card' | 'cryptobot' | 'crypto_self' | 'balance' | 'comp') | null;
+  status?: ('pending' | 'paid' | 'processing' | 'shipped' | 'completed' | 'cancelled' | 'refunded') | null;
   /**
    * Original order payload from the bot (debug).
    */
@@ -273,6 +289,49 @@ export interface Order {
     | number
     | boolean
     | null;
+  updatedAt: string;
+  createdAt: string;
+}
+/**
+ * Shop customers mirrored from the bot. Use Sync to refresh; credit/debit runs through the bot.
+ *
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "customers".
+ */
+export interface Customer {
+  id: number;
+  tgUserId?: string | null;
+  fullName?: string | null;
+  /**
+   * Store-credit balance snapshot (USD cents).
+   */
+  balanceCents?: number | null;
+  totalCreditsCents?: number | null;
+  totalDebitsCents?: number | null;
+  txCount?: number | null;
+  blocked?: boolean | null;
+  updatedAt: string;
+  createdAt: string;
+}
+/**
+ * Stored-value gift cards. Create/revoke here — the bot generates codes and applies redemptions.
+ *
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "gift-cards".
+ */
+export interface GiftCard {
+  id: number;
+  botId?: number | null;
+  code?: string | null;
+  valueCents?: number | null;
+  remainingCents?: number | null;
+  status?: ('active' | 'redeemed' | 'revoked' | 'expired') | null;
+  expiresAt?: string | null;
+  note?: string | null;
+  /**
+   * Bot user id that redeemed the card.
+   */
+  redeemedBy?: string | null;
   updatedAt: string;
   createdAt: string;
 }
@@ -319,6 +378,14 @@ export interface PayloadLockedDocument {
     | ({
         relationTo: 'orders';
         value: number | Order;
+      } | null)
+    | ({
+        relationTo: 'customers';
+        value: number | Customer;
+      } | null)
+    | ({
+        relationTo: 'gift-cards';
+        value: number | GiftCard;
       } | null);
   globalSlug?: string | null;
   user: {
@@ -448,6 +515,8 @@ export interface OrdersSelect<T extends boolean = true> {
   orderNumber?: T;
   tgUserId?: T;
   customerName?: T;
+  phone?: T;
+  address?: T;
   items?:
     | T
     | {
@@ -457,10 +526,42 @@ export interface OrdersSelect<T extends boolean = true> {
         id?: T;
       };
   totalCents?: T;
+  refundedCents?: T;
   currency?: T;
   paymentMethod?: T;
   status?: T;
   rawPayload?: T;
+  updatedAt?: T;
+  createdAt?: T;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "customers_select".
+ */
+export interface CustomersSelect<T extends boolean = true> {
+  tgUserId?: T;
+  fullName?: T;
+  balanceCents?: T;
+  totalCreditsCents?: T;
+  totalDebitsCents?: T;
+  txCount?: T;
+  blocked?: T;
+  updatedAt?: T;
+  createdAt?: T;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "gift-cards_select".
+ */
+export interface GiftCardsSelect<T extends boolean = true> {
+  botId?: T;
+  code?: T;
+  valueCents?: T;
+  remainingCents?: T;
+  status?: T;
+  expiresAt?: T;
+  note?: T;
+  redeemedBy?: T;
   updatedAt?: T;
   createdAt?: T;
 }

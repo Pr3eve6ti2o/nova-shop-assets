@@ -1,5 +1,6 @@
 import type { CollectionConfig } from 'payload'
 import { isAdmin } from '../access/roles'
+import { isAdminField } from '../access/roles'
 
 export const Users: CollectionConfig = {
   slug: 'users',
@@ -22,7 +23,7 @@ export const Users: CollectionConfig = {
     {
       name: 'role',
       type: 'select',
-      access: { create: isAdmin, update: isAdmin },
+      access: { create: isAdminField, update: isAdminField },
       required: true,
       defaultValue: 'staff',
       options: [

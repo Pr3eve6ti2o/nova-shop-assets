@@ -1,5 +1,6 @@
 import type { CollectionConfig } from 'payload'
 import { isAdmin, isStaff } from '../access/roles'
+import { isAdminField, isStaffField } from '../access/roles'
 
 export const Products: CollectionConfig = {
   slug: 'products',
@@ -60,7 +61,7 @@ export const Products: CollectionConfig = {
     {
       name: 'stock',
       type: 'number',
-      access: { update: isStaff },
+      access: { update: isStaffField },
       defaultValue: -1,
       admin: {
         description: '-1 = unlimited stock.',
@@ -74,7 +75,7 @@ export const Products: CollectionConfig = {
     {
       name: 'status',
       type: 'select',
-      access: { update: isAdmin },
+      access: { update: isAdminField },
       defaultValue: 'draft',
       options: [
         { label: 'Draft', value: 'draft' },
@@ -87,7 +88,7 @@ export const Products: CollectionConfig = {
     {
       name: 'featured',
       type: 'checkbox',
-      access: { update: isStaff },
+      access: { update: isStaffField },
     },
     {
       name: 'ratingSum',
