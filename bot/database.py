@@ -1822,6 +1822,34 @@ class Database:
             await db.commit()
         return code
 
+    async def tonconnect_intent_register_code(self, user_id: int,
+                                              intent_id: str, code: str,
+                                              expected_nano: int) -> bool:
+        """Register a client-generated claim code (stress-audit fix).
+
+        The Mini App generates the code BEFORE the wallet broadcasts
+        and embeds it as the transfer comment, so the code must be
+        accepted as-is rather than minted server-side after the fact.
+        Returns True when the code is bound to this user (fresh insert
+        or an idempotent re-registration of the same user's unused
+        code); False when the code is already used or belongs to
+        another user — the caller must fail closed.
+        """
+        async with self._db() as db:
+            async with db.execute(
+                    "SELECT user_id, used_at FROM tonconnect_intent_claims"
+                    " WHERE code=?", (code,)) as cur:
+                row = await cur.fetchone()
+            if row is not None:
+                return row["user_id"] == user_id and row["used_at"] is None
+            await db.execute(
+                "INSERT INTO tonconnect_intent_claims(user_id, intent_id,"
+                " code, expected_nano, created_at) VALUES (?, ?, ?, ?, ?)",
+                (user_id, intent_id, code, expected_nano, utcnow_iso()),
+            )
+            await db.commit()
+            return True
+
     async def mark_tonconnect_intent_used(self, code: str, txid: str):
         """Mark a per-intent claim code as used (single-use enforcement)."""
         async with self._db() as db:

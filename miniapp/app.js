@@ -793,6 +793,34 @@
     var label = $("ton-pay-label");
     if (label) label.textContent = (tonUI && tonUI.wallet) ? "Pay with TON · connected" : "Pay with TON";
   }
+  // TON Connect claim code: generated BEFORE the wallet broadcasts and
+  // embedded as the transfer comment, so the bot can bind the on-chain
+  // tx to this user/payment. (Previously the bot minted the code after
+  // broadcast and demanded the memo equal it — no payment could match.)
+  function tonClaimCode() {
+    var b = new Uint8Array(8);
+    if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(b);
+    else for (var i = 0; i < 8; i++) b[i] = Math.floor(Math.random() * 256);
+    var hex = "";
+    for (var j = 0; j < 8; j++) hex += ("0" + b[j].toString(16)).slice(-2);
+    return "TC-" + hex.toUpperCase();
+  }
+  // Minimal BoC serialisation of a text-comment cell (32-bit zero opcode
+  // + raw UTF-8), the payload format TON wallets attach as the tx memo.
+  function tonCommentPayload(text) {
+    var enc = new TextEncoder().encode(text);
+    var data = new Uint8Array(4 + enc.length); // first 4 bytes stay 0
+    data.set(enc, 4);
+    var cellBytes = 2 + data.length;
+    var out = new Uint8Array(11 + cellBytes);
+    out.set([0xb5, 0xee, 0x9c, 0x72, 0x01, 0x01, 0x01, 0x01, 0x00, cellBytes, 0x00], 0);
+    out[11] = 0x00;                    // cell descriptor d1: 0 refs, level 0
+    out[12] = (4 + enc.length) * 2;    // d2: full bytes * 2 (no partial byte)
+    out.set(data, 13);
+    var bin = "";
+    for (var i = 0; i < out.length; i++) bin += String.fromCharCode(out[i]);
+    return btoa(bin);
+  }
   async function payWithTon() {
     if (S.actionLoading || tonLoading) return;
     var ids = Object.keys(S.cart).filter(function (id) { return S.byId[id]; });
@@ -813,10 +841,12 @@
       var tonRate = await fetchTonRate(); // USD per TON
       if (!tonRate) throw new Error("Rate unavailable");
       var nanoAmount = String(Math.round((usdTotal / tonRate) * 1e9));
+      var claimCode = tonClaimCode();
       var tx = {
         validUntil: Math.floor(Date.now() / 1000) + 300,
         network: "-239",
-        messages: [{ address: TON_MERCHANT, amount: nanoAmount }]
+        messages: [{ address: TON_MERCHANT, amount: nanoAmount,
+                      payload: tonCommentPayload(claimCode) }]
       };
       var result = await ui.sendTransaction(tx);
       // M3: wallet.account.address is raw; toncenter returns user-friendly
@@ -835,6 +865,7 @@
         boc: result.boc,
         sender: sender,
         amount_nano: nanoAmount,
+        claim_code: claimCode,
         items: items,
         promo: S.promo || ""
       }));
