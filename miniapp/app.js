@@ -377,6 +377,21 @@
     S.loading = false;
     S.loadError = false;
     render();
+    openDeepLinkProduct();
+  }
+  // Shared product links (?startapp=p_<id>) arrive as the Mini App's
+  // start_param; open that product once the catalog is in. Previously
+  // the param was never read, so shared links landed on the home page.
+  var deepLinkChecked = false;
+  function openDeepLinkProduct() {
+    if (deepLinkChecked) return;
+    deepLinkChecked = true;
+    try {
+      var wa = window.Telegram && window.Telegram.WebApp;
+      var sp = (wa && wa.initDataUnsafe && wa.initDataUnsafe.start_param) || "";
+      var m = /^p_(\d+)$/.exec(sp);
+      if (m && S.byId[m[1]]) openSheet("product", m[1]);
+    } catch (e) {}
   }
   function pruneCart() {
     // C1: never prune before the catalog is loaded — S.byId is empty then
@@ -755,7 +770,10 @@
 
   /* ---------------- TON Connect (lazy-loaded) ---------------- */
   var TON_UI_URL = "https://unpkg.com/@tonconnect/ui@3.0.2/dist/tonconnect-ui.min.js";
-  var TON_MANIFEST_URL = "https://cdn.jsdelivr.net/gh/Pr3eve6ti2o/nova-shop-assets/tonconnect/tonconnect-manifest.json";
+  // Pinned to the refactor branch: tonconnect/ does not exist on main
+  // yet, and jsDelivr serves the default branch when no ref is given
+  // (the unpinned URL 404'd, so the SDK could never initialise).
+  var TON_MANIFEST_URL = "https://cdn.jsdelivr.net/gh/Pr3eve6ti2o/nova-shop-assets@refactor/nova-shop-professional/tonconnect/tonconnect-manifest.json";
   var TON_MERCHANT = ""; // set from catalog.json (merchant_ton_address)
   var tonUI = null;
   var tonLoading = false;
@@ -1141,7 +1159,7 @@
     return '<h3 class="sheet-title">Refer &amp; Earn</h3>' +
       '<div class="referral-hero"><span class="referral-emoji">🎁</span>' +
       "<p>Share Nova Shop with friends. When they make their first purchase, " +
-      "you both get rewarded.</p></div>" +
+      "you earn a percentage back as store credit.</p></div>" +
       '<button class="btn primary btn-block btn-lg" data-action="referral-get">' +
       "Get my referral link</button>" +
       '<p class="hint-text" style="text-align:center;margin-top:var(--sp-2)">Your personal link will be sent in the bot chat.</p>';
@@ -1408,7 +1426,9 @@
       payloadObj.alert_sync = S.pendingAlertSync;
     }
     var payload = JSON.stringify(payloadObj);
-    if (payload.length > SENDDATA_LIMIT) {
+    // The bot caps UTF-8 BYTES; payload.length counts UTF-16 units.
+    // Measure the same way the bot does so the pre-check is exact.
+    if (new TextEncoder().encode(payload).length > SENDDATA_LIMIT) {
       toast("Your cart is too large to send. Remove some items and try again.", "error");
       return;
     }
@@ -1447,6 +1467,7 @@
     var id = t.getAttribute("data-id");
     switch (a) {
       case "open": openSheet("product", id); break;
+      case "open-product": openSheet("product", id); break;
       case "add": addToCart(id, 1); break;
       case "wish": toggleWish(id); break;
       case "ton-pay": payWithTon(); break;

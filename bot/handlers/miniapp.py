@@ -218,9 +218,13 @@ async def webapp_data(message: types.Message, state: FSMContext):
         else:
             lines = []
             for o in orders:
-                status_emoji = {"paid": "✅", "pending": "⏳", "cancelled": "❌"}.get(o["status"], "📦")
+                # Use the canonical lifecycle maps — the old inline map
+                # keyed on statuses that don't exist (paid), so every
+                # real order rendered with the fallback box emoji.
+                status_emoji = texts.STATUS_EMOJI.get(o["status"], "📦")
+                status_label = texts.STATUS_LABEL.get(o["status"], o["status"])
                 lines.append(f"{status_emoji} <b>Order #{o['id']}</b> — "
-                             f"{fmt_money(o['total_cents'], config.CURRENCY)} — {o['status']}")
+                             f"{fmt_money(o['total_cents'], config.CURRENCY)} — {status_label}")
             await message.answer(
                 "📦 <b>Your recent orders:</b>\n\n" + "\n".join(lines),
                 reply_markup=await main_reply_kb(message.from_user.id),
@@ -254,26 +258,11 @@ async def webapp_data(message: types.Message, state: FSMContext):
                                         message.from_user.full_name)
         await handle_tonconnect_paid(message, user, payload, state)
         return
-    # Stock alert subscription (from Mini App "Notify me" button).
-    if payload.get("type") == "stock_alert":
-        user, _ = await get_or_register(message.from_user.id,
-                                        message.from_user.full_name)
-        try:
-            pid = int(payload.get("id"))
-        except (TypeError, ValueError):
-            return
-        p = await db.get_product(pid)
-        if not p or not p["is_active"]:
-            return
-        if payload.get("on"):
-            await db.stock_alert_add(user["id"], pid)
-            from utils import h as _h
-            await message.answer(f"🔔 You'll be notified when <b>{_h(p['name'])}</b> is back in stock.",
-                                 reply_markup=await main_reply_kb(message.from_user.id),
-                                 parse_mode="HTML")
-        else:
-            await db.stock_alert_remove(user["id"], pid)
-        return
+    # NOTE: a standalone type="stock_alert" branch used to live here.
+    # The Mini App never sends it — stock alerts ride the checkout
+    # payload as alert_sync (sendData closes the app, so fire-and-forget
+    # is impossible). The dead branch was removed to keep the bridge's
+    # attack surface honest; alert_sync below is the real flow.
     items = payload.get("items")
     if not isinstance(items, list) or not items or len(items) > MAX_ITEMS:
         await message.answer(texts.MSG_MINIAPP_BAD_PAYLOAD,
