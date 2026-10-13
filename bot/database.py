@@ -821,6 +821,13 @@ class Database:
                     (str(code).strip().upper(),)) as cur:
                 return await cur.fetchone()
 
+    async def giftcard_get_by_id(self, card_id: int):
+        async with self._db() as db:
+            async with db.execute(
+                    "SELECT * FROM gift_cards WHERE id=?",
+                    (int(card_id),)) as cur:
+                return await cur.fetchone()
+
     async def giftcard_redeem(self, code: str, user_id: int,
                               amount_cents: int = None):
         """Redeem a gift card into the customer's balance, atomically.

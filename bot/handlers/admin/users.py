@@ -47,6 +47,9 @@ async def render_user_card(target, tg_id: int):
             ref=(html.escape(ref["name"]) if ref else "\u2014"),
             role=", ".join(bits) if bits else "\u2014",
             blocked="yes" if user["is_blocked"] else "no")
+        # Store credit (Medusa borrow): the admin card shows the account.
+        text += (f"\n\U0001f4b3 Balance: "
+                 f"{fmt_money(user['balance_cents'], config.CURRENCY)}")
         markup = kb.admin_user_kb(user)
     if isinstance(target, types.CallbackQuery):
         await edit_text_safe(target, text, markup)

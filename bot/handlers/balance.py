@@ -8,7 +8,7 @@ import config
 import keyboards as kb
 import texts
 from loader import bot, db, dp
-from states import BalanceFlow
+from states import BalanceFlow, GiftCardFlow
 from utils import fmt_money
 from .common import get_or_register, edit_text_safe
 
@@ -153,6 +153,37 @@ async def cb_topup_method(query: types.CallbackQuery, state: FSMContext):
         await render_topup_payment(query, amount)
         return
     await query.answer()
+
+
+@dp.callback_query_handler(text="bal:gift", state="*")
+async def cb_giftcard_start(query: types.CallbackQuery, state: FSMContext):
+    """Store credit (Medusa borrow): redeem a gift card into balance."""
+    await query.answer()
+    await GiftCardFlow.code.set()
+    await query.message.answer(
+        texts.MSG_GIFTCARD_ASK,
+        reply_markup=types.ForceReply(
+            input_field_placeholder="NOVA-XXXX-XXXX-XXXX"))
+
+
+@dp.message_handler(state=GiftCardFlow.code)
+async def msg_giftcard_code(message: types.Message, state: FSMContext):
+    user, _ = await get_or_register(message.from_user.id,
+                                    message.from_user.full_name)
+    ok, result = await db.giftcard_redeem(message.text or "", user["id"])
+    if not ok:
+        errors = {
+            "not_found": texts.MSG_GIFTCARD_ERR_NOT_FOUND,
+            "redeemed": texts.MSG_GIFTCARD_ERR_REDEEMED,
+            "revoked": texts.MSG_GIFTCARD_ERR_REVOKED,
+            "expired": texts.MSG_GIFTCARD_ERR_EXPIRED,
+        }
+        await message.answer(errors.get(result, texts.ERR_GENERIC))
+        return  # stay in the flow so a mistyped code can be retried
+    await state.finish()
+    await message.answer(texts.MSG_GIFTCARD_OK.format(
+        amount=fmt_money(result["amount_cents"], config.CURRENCY),
+        balance=fmt_money(result["balance_cents"], config.CURRENCY)))
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("tupc:"))

@@ -175,6 +175,84 @@ BTN_PROMO_ADD = "\u2795 New Promo"
 BTN_MAINT_ON = "\U0001f527 Maintenance: ON"
 BTN_MAINT_OFF = "\U0001f527 Maintenance: OFF"
 
+# ------------------------------------------------------- store credit ---
+# Medusa borrow (2026-10-14): admin credit/debit, gift cards, manual orders.
+BTN_CREDIT = "➕ Credit"
+BTN_DEBIT = "➖ Debit"
+BTN_CREATE_ORDER = "🧾 Create order"
+BTN_ADM_GIFTCARDS = "🎁 Gift cards"
+BTN_GIFTCARD_NEW = "➕ New gift card"
+BTN_GIFTCARD_REVOKE = "🗑 Revoke"
+BTN_REDEEM_GIFTCARD = "🎁 Redeem gift card"
+BTN_ORDER_COMP = "🎁 Comp (free)"
+BTN_ORDER_CHARGE = "💳 Charge balance"
+BTN_PICK_CLEAR = "🧹 Clear"
+BTN_CONFIRM = "✅ Confirm"
+
+MSG_CREDIT_ASK_AMOUNT = (
+    "{emoji} <b>{verb} store credit</b>\n\n"
+    "Customer: {name}\nCurrent balance: {balance}\n\n"
+    "Send the amount in USD (e.g. 25.00):"
+)
+MSG_CREDIT_ASK_NOTE = (
+    "✏️ <b>Reason</b>\n\n"
+    "Send a short note for the ledger (required, up to 200 characters):"
+)
+MSG_CREDIT_CONFIRM = (
+    "🧾 <b>Confirm {verb}</b>\n\n"
+    "Customer: {name}\nAmount: {amount}\n"
+    "Balance after: {new_balance}\nNote: {note}"
+)
+MSG_CREDIT_DONE = "✅ Done. New balance: {balance}."
+MSG_CREDIT_NOTE_INVALID = "⚠️ The note must be 1–200 characters."
+MSG_CREDIT_NOTIFY_CREDIT = (
+    "💳 <b>Store credit added</b>\n\n"
+    "{amount} was added to your balance.\nNote: {note}\n"
+    "New balance: {balance}."
+)
+MSG_CREDIT_NOTIFY_DEBIT = (
+    "💳 <b>Store credit removed</b>\n\n"
+    "{amount} was removed from your balance.\nNote: {note}\n"
+    "New balance: {balance}."
+)
+MSG_GIFTCARD_ASK_AMOUNT = (
+    "🎁 <b>New gift card — value</b>\n\nSend the value in USD (e.g. 25.00):"
+)
+MSG_GIFTCARD_ASK_EXPIRY = (
+    "🎁 <b>New gift card — expiry</b>\n\n"
+    "Send the number of days until it expires, or 0 for no expiry:"
+)
+MSG_GIFTCARD_ASK_NOTE = (
+    "🎁 <b>New gift card — note</b>\n\n"
+    "Send an optional note, or “-” to skip:"
+)
+MSG_GIFTCARD_CREATED = (
+    "✅ <b>Gift card created</b>\n\n<code>{code}</code>\n"
+    "Value: {amount}{expiry_line}\n\n"
+    "Share the code with the customer — they redeem it from "
+    "their Balance screen."
+)
+MSG_GIFTCARD_ASK = (
+    "🎁 <b>Redeem a gift card</b>\n\nSend the gift card code as a message."
+)
+MSG_GIFTCARD_OK = (
+    "🎉 <b>Gift card redeemed!</b>\n\n"
+    "{amount} was added to your balance.\nNew balance: {balance}."
+)
+MSG_GIFTCARD_ERR_NOT_FOUND = "❌ That code doesn't look right — check it and try again."
+MSG_GIFTCARD_ERR_REDEEMED = "❌ This gift card has already been redeemed."
+MSG_GIFTCARD_ERR_REVOKED = "❌ This gift card is no longer valid."
+MSG_GIFTCARD_ERR_EXPIRED = "❌ This gift card has expired."
+MSG_MANUAL_ORDER_OK_COMP = (
+    "🧾 <b>Order #{oid}</b>\n\n"
+    "Our team placed this order for you. No payment was taken."
+)
+MSG_MANUAL_ORDER_OK_BALANCE = (
+    "🧾 <b>Order #{oid}</b>\n\n"
+    "Our team placed this order for you and charged {amount} "
+    "to your balance.\nNew balance: {balance}."
+)
+
 # ----------------------------------------------------------------- common ---
 TOAST_ADDED_CART = "Added to cart"
 TOAST_REMOVED = "Removed"

@@ -267,7 +267,9 @@ async def cb_refund_go(query: types.CallbackQuery):
     except ValueError as e:
         return await query.answer(f"⚠️ {e}", show_alert=True)
     await db.add_balance(order["user_id"], remaining, tx_type="refund",
-                         order_id=oid)
+                         order_id=oid, actor_type="admin",
+                         actor_id=query.from_user.id, note="admin /refund",
+                         reference="refund", reference_id=str(oid))
     await db.set_order_status(oid, "refunded")
     await query.answer("Refunded 💸")
     customer = await db.get_user(order["user_id"])

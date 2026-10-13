@@ -393,6 +393,7 @@ def profile_kb():
 def balance_kb():
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton(texts.BTN_TOPUP, callback_data="bal:topup"))
+    kb.add(InlineKeyboardButton(texts.BTN_REDEEM_GIFTCARD, callback_data="bal:gift"))
     kb.row(BTN_MENU)
     return kb
 
@@ -465,6 +466,7 @@ def admin_console_kb(mask: int, maintenance_on: bool):
         kb.insert(InlineKeyboardButton(texts.BTN_ADM_USERS, callback_data="ad:usr"))
     if mask & config.PERM_PROMOS:
         kb.insert(InlineKeyboardButton(texts.BTN_ADM_PROMOS, callback_data="ad:pro"))
+        kb.insert(InlineKeyboardButton(texts.BTN_ADM_GIFTCARDS, callback_data="ad:gcl"))
     if mask & config.PERM_BROADCAST:
         kb.insert(InlineKeyboardButton(texts.BTN_ADM_BROADCAST, callback_data="ad:bc"))
     if mask & config.PERM_MAINTENANCE:
@@ -592,7 +594,71 @@ def admin_user_kb(user):
                              callback_data=cb("ad:ub", tg_id)),
         InlineKeyboardButton(texts.BTN_SET_ROLE, callback_data=cb("ad:ur", tg_id)),
     )
+    # Store credit (Medusa borrow): credit always available; debit only
+    # when there is a balance to debit (Medusa disables it at zero).
+    credit_btn = InlineKeyboardButton(texts.BTN_CREDIT,
+                                      callback_data=cb("ad:ucr", tg_id))
+    if int(user["balance_cents"] or 0) > 0:
+        kb.row(credit_btn,
+               InlineKeyboardButton(texts.BTN_DEBIT,
+                                    callback_data=cb("ad:udb", tg_id)))
+    else:
+        kb.row(credit_btn)
+    kb.row(InlineKeyboardButton(texts.BTN_CREATE_ORDER,
+                                callback_data=cb("ad:uord", tg_id)))
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="ad:usr"))
+    return kb
+
+
+def admin_credit_confirm_kb():
+    kb = InlineKeyboardMarkup()
+    kb.row(InlineKeyboardButton(texts.BTN_CONFIRM, callback_data="ad:ucok"),
+           InlineKeyboardButton(texts.BTN_CANCEL, callback_data="ad:ucx"))
+    return kb
+
+
+def admin_giftcards_kb(cards):
+    kb = InlineKeyboardMarkup()
+    for c in cards:
+        kb.add(InlineKeyboardButton(
+            f"{c['code']} · {fmt_money(c['remaining_cents'], config.CURRENCY)}"
+            f" left · {c['status']}",
+            callback_data=cb("ad:gc", c["id"])))
+    kb.add(InlineKeyboardButton(texts.BTN_GIFTCARD_NEW, callback_data="ad:gcnew"))
+    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="adm"))
+    return kb
+
+
+def admin_giftcard_kb(card):
+    kb = InlineKeyboardMarkup()
+    if card["status"] == "active":
+        kb.add(InlineKeyboardButton(texts.BTN_GIFTCARD_REVOKE,
+                                    callback_data=cb("ad:gcrv", card["id"])))
+    kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data="ad:gcl"))
+    return kb
+
+
+def admin_manual_pick_kb(products, picks):
+    """Manual-order product picker: tap a product to add one unit."""
+    kb = InlineKeyboardMarkup()
+    for p in products:
+        n = int(picks.get(str(p["id"]), 0))
+        label = f"{p['name']} — {fmt_money(p['price_cents'], config.CURRENCY)}"
+        if n:
+            label += f" ×{n}"
+        kb.add(InlineKeyboardButton(label, callback_data=cb("ad:mo:add", p["id"])))
+    if picks:
+        kb.row(InlineKeyboardButton(texts.BTN_ORDER_COMP, callback_data="ad:mo:comp"),
+               InlineKeyboardButton(texts.BTN_ORDER_CHARGE, callback_data="ad:mo:bal"))
+        kb.row(InlineKeyboardButton(texts.BTN_PICK_CLEAR, callback_data="ad:mo:clear"))
+    kb.row(InlineKeyboardButton(texts.BTN_CANCEL, callback_data="ad:mo:x"))
+    return kb
+
+
+def admin_manual_confirm_kb():
+    kb = InlineKeyboardMarkup()
+    kb.row(InlineKeyboardButton(texts.BTN_CONFIRM, callback_data="ad:mo:ok"),
+           InlineKeyboardButton(texts.BTN_CANCEL, callback_data="ad:mo:x"))
     return kb
 
 

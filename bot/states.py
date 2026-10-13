@@ -106,3 +106,28 @@ class AdminPayreviewFlow(StatesGroup):
 
 class AdminRefundFlow(StatesGroup):
     order_id = State()  # waiting for the admin to type the order id
+
+
+class AdminCreditFlow(StatesGroup):
+    """Store credit (Medusa borrow): admin credit/debit with a reason."""
+    amount = State()   # USD amount typed by the admin
+    note = State()     # mandatory ledger note
+    confirm = State()  # awaiting the confirm tap
+
+
+class AdminGiftCardFlow(StatesGroup):
+    """Admin gift-card creation: amount -> expiry days -> note."""
+    amount = State()
+    expiry = State()
+    note = State()
+
+
+class GiftCardFlow(StatesGroup):
+    """Customer gift-card redemption from the Balance screen."""
+    code = State()
+
+
+class AdminOrderFlow(StatesGroup):
+    """Admin manual (comp / balance-charged) order for a customer."""
+    pick = State()     # tapping products to build the order
+    confirm = State()  # awaiting the confirm tap
