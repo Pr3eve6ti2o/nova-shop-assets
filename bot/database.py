@@ -1248,6 +1248,80 @@ class Database:
                 (cutoff, limit)) as cur:
                 return await cur.fetchall()
 
+    # ---------------------------------------------------------- campaigns
+    # Port plan Part 2: the campaign engine's data side. A send is
+    # CLAIMED by inserting its (campaign, user, dedup_key) row — the
+    # UNIQUE constraint makes a duplicate claim a no-op, so a reminder
+    # can never be sent twice for the same trigger, even across crashes.
+
+    async def campaign_claim_send(self, campaign: str, user_id: int,
+                                  dedup_key: str) -> bool:
+        """Atomically claim a campaign send. True = you may send it."""
+        async with self._db() as db:
+            cur = await db.execute(
+                "INSERT OR IGNORE INTO campaign_sends"
+                "(campaign, user_id, dedup_key, sent_at) VALUES (?, ?, ?, ?)",
+                (campaign, user_id, dedup_key, utcnow_iso()))
+            claimed = cur.rowcount > 0
+            await db.commit()
+            return claimed
+
+    async def campaign_release_send(self, campaign: str, user_id: int,
+                                    dedup_key: str):
+        """Undo a claim when delivery failed, so a later pass can retry."""
+        async with self._db() as db:
+            await db.execute(
+                "DELETE FROM campaign_sends WHERE campaign=? AND user_id=?"
+                " AND dedup_key=?", (campaign, user_id, dedup_key))
+            await db.commit()
+
+    async def orders_delivered_before(self, cutoff_iso: str, limit: int = 200,
+                                      since_iso: str = None):
+        """Delivered orders whose delivery stamp is <= cutoff (port 2.4).
+        since_iso bounds the window so a first-ever pass doesn't message
+        every historical customer."""
+        async with self._db() as db:
+            if since_iso:
+                async with db.execute(
+                    "SELECT * FROM orders WHERE status='delivered'"
+                    " AND delivered_at IS NOT NULL AND delivered_at <= ?"
+                    " AND delivered_at >= ?"
+                    " ORDER BY delivered_at ASC LIMIT ?",
+                    (cutoff_iso, since_iso, limit)) as cur:
+                    return await cur.fetchall()
+            async with db.execute(
+                "SELECT * FROM orders WHERE status='delivered'"
+                " AND delivered_at IS NOT NULL AND delivered_at <= ?"
+                " ORDER BY delivered_at ASC LIMIT ?",
+                (cutoff_iso, limit)) as cur:
+                return await cur.fetchall()
+
+    async def users_registered_before_no_orders(self, cutoff_iso: str,
+                                                limit: int = 200):
+        """Users created <= cutoff who have never ordered (port 2.6)."""
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT u.* FROM users u WHERE u.created_at <= ?"
+                " AND u.is_blocked = 0"
+                " AND NOT EXISTS (SELECT 1 FROM orders o"
+                "                 WHERE o.user_id = u.id)"
+                " ORDER BY u.created_at ASC LIMIT ?",
+                (cutoff_iso, limit)) as cur:
+                return await cur.fetchall()
+
+    async def alert_products_in_stock(self):
+        """Products with stock-alert subscribers that are back in stock
+        (port 2.3): physical stock > 0, or an unused digital value."""
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT DISTINCT p.id, p.name FROM stock_alerts sa"
+                " JOIN products p ON p.id = sa.product_id"
+                " WHERE p.is_active = 1 AND (p.stock > 0 OR EXISTS"
+                "   (SELECT 1 FROM product_values pv"
+                "    WHERE pv.product_id = p.id AND pv.is_used = 0))"
+            ) as cur:
+                return await cur.fetchall()
+
     async def cart_remove(self, user_id: int, product_id: int):
         await self.cart_set_qty(user_id, product_id, 0)
 

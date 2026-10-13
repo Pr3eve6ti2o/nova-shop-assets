@@ -50,6 +50,7 @@ else:
 
 _watcher_task: asyncio.Task | None = None
 _outbox_task: asyncio.Task | None = None
+_campaign_task: asyncio.Task | None = None
 
 # Bind custom filters BEFORE handlers register (they use is_admin=...).
 # Opus P2: bind once — duplicate bind was dead code.
@@ -170,14 +171,26 @@ async def on_startup(dp_):
     from loader import db as _db
     _outbox_task = asyncio.get_running_loop().create_task(outbox_worker_loop(_db))
 
+    # Port Part 2: campaign engine (abandoned cart, back-in-stock,
+    # post-purchase, onboarding). CAMPAIGNS_ENABLED=0 disables sends.
+    global _campaign_task
+    if config.CAMPAIGNS_ENABLED:
+        from campaign_worker import campaign_worker_loop
+        from loader import bot as _bot
+        _campaign_task = asyncio.get_running_loop().create_task(
+            campaign_worker_loop(_db, _bot))
+    else:
+        logger.info("Campaign engine disabled (CAMPAIGNS_ENABLED=0)")
+
 
 async def on_shutdown(dp_):
     logger.warning("Shutting down...")
-    global _watcher_task, _outbox_task
+    global _watcher_task, _outbox_task, _campaign_task
     # Opus P1: cancel with a timeout — unbounded await can hang shutdown
     # mid-credit.
     for _task, _name in ((_watcher_task, "watcher"),
-                         (_outbox_task, "outbox")):
+                         (_outbox_task, "outbox"),
+                         (_campaign_task, "campaign")):
         if _task:
             _task.cancel()
             try:
@@ -186,6 +199,7 @@ async def on_shutdown(dp_):
                 pass
     _watcher_task = None
     _outbox_task = None
+    _campaign_task = None
     # Opus P2: do not delete the webhook on shutdown in webhook mode —
     # it drops the production webhook on every restart.
     if not config.WEBHOOK_URL:

@@ -173,6 +173,17 @@ DEPOSIT_BONUS_PERCENT: int = _int_env("DEPOSIT_BONUS_PERCENT", 5,
 RETURNS_WINDOW_DAYS: int = _int_env("RETURNS_WINDOW_DAYS", 14,
                                     min_val=0, max_val=365)
 
+# Campaign engine (port plan Part 2): customer-lifecycle messages.
+CAMPAIGNS_ENABLED: bool = _flag("CAMPAIGNS_ENABLED", "1")
+CAMPAIGN_INTERVAL_SECONDS: int = _int_env("CAMPAIGN_INTERVAL_SECONDS", 300,
+                                          min_val=30, max_val=86400)
+ABANDONED_CART_DELAY_MINUTES: int = _int_env(
+    "ABANDONED_CART_DELAY_MINUTES", 60, min_val=5, max_val=10080)
+POST_PURCHASE_DELAY_HOURS: int = _int_env(
+    "POST_PURCHASE_DELAY_HOURS", 24, min_val=1, max_val=720)
+ONBOARDING_NUDGE_HOURS: int = _int_env(
+    "ONBOARDING_NUDGE_HOURS", 24, min_val=1, max_val=720)
+
 # Opus P0 money-sanity: referral + bonus must never exceed 100%.
 if REFERRAL_PERCENT + DEPOSIT_BONUS_PERCENT > 100:
     raise RuntimeError(
