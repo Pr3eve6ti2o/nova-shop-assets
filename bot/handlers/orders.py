@@ -34,7 +34,7 @@ async def _try_delete(message):
         pass
 
 
-@dp.message_handler(text=texts.BTN_ORDERS)
+@dp.message_handler(text=texts.BTN_ORDERS, state="*")
 async def nav_orders(message: types.Message, state: FSMContext):
     if message.chat.type != "private":
         await message.answer("Your orders are private — please open me in a private chat.")
@@ -58,7 +58,7 @@ async def render_orders(target, user_id: int, page: int):
         await target.answer(text, reply_markup=markup, disable_web_page_preview=True)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("ord"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("ord"), state="*")
 async def cb_orders(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     parts = query.data.split(":")
@@ -139,7 +139,7 @@ async def show_order_detail(target, oid: int, user: dict):
                             disable_web_page_preview=True)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("o:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("o:"), state="*")
 async def cb_order_detail(query: types.CallbackQuery):
     await query.answer()
     try:
@@ -151,7 +151,7 @@ async def cb_order_detail(query: types.CallbackQuery):
     await show_order_detail(query, oid, user)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("ob:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("ob:"), state="*")
 async def cb_buy_again(query: types.CallbackQuery):
     try:
         oid = int(query.data.split(":")[1])
@@ -173,7 +173,7 @@ async def cb_buy_again(query: types.CallbackQuery):
                        show_alert=not added)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("oc:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("oc:"), state="*")
 async def cb_order_cancel_ask(query: types.CallbackQuery):
     """Ask for confirmation before the user cancels their own pending order."""
     await query.answer()
@@ -199,7 +199,7 @@ async def cb_order_cancel_ask(query: types.CallbackQuery):
                          markup)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("ocx:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("ocx:"), state="*")
 async def cb_order_cancel_do(query: types.CallbackQuery):
     """Execute the cancellation. Only pending orders; nothing was charged."""
     try:

@@ -420,7 +420,7 @@ async def start_topup_cryptobot(query: types.CallbackQuery, state: FSMContext,
         kb.topup_cryptobot_kb(pay_url, invoice_id))
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("cokb:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("cokb:"), state="*")
 async def cb_cryptobot_check(query: types.CallbackQuery):
     """"I've Paid — Check": poll CryptoBot for this invoice (named states).
 
@@ -498,7 +498,7 @@ async def cb_cryptobot_check(query: types.CallbackQuery):
         pass
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("tupkb:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("tupkb:"), state="*")
 async def cb_topup_cryptobot_check(query: types.CallbackQuery):
     """"I've Paid — Check" for a balance top-up CryptoBot invoice.
 
@@ -807,7 +807,7 @@ async def _manual_deposit_scan(deposit_id: int) -> str:
     return {"paid": "paid", "underpaid": "underpaid"}.get(dep["status"], "unpaid")
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("codc:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("codc:"), state="*")
 async def cb_deposit_check(query: types.CallbackQuery):
     """"Check My Deposit" — manual re-scan, rate-limited 1/30s per user."""
     now = time.time()
@@ -868,7 +868,7 @@ async def _crypto_counts():
     return len(pending), len(late), len(underpaid)
 
 
-@dp.callback_query_handler(text="cry:panel", is_admin=config.PERM_ORDERS)
+@dp.callback_query_handler(text="cry:panel", is_admin=config.PERM_ORDERS, state="*")
 async def cb_crypto_panel(query: types.CallbackQuery):
     await query.answer()
     p, l, u = await _crypto_counts()
@@ -878,7 +878,7 @@ async def cb_crypto_panel(query: types.CallbackQuery):
 
 @dp.callback_query_handler(
     lambda q: q.data and q.data.startswith("cry:") and q.data != "cry:panel",
-    is_admin=config.PERM_ORDERS)
+    is_admin=config.PERM_ORDERS, state="*")
 async def cb_crypto_view(query: types.CallbackQuery):
     await query.answer()
     view = query.data.split(":")[1]
@@ -902,7 +902,7 @@ async def _render_deposits(query, view: str, page: int, per_page: int = 6):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("cryp:"),
-                           is_admin=config.PERM_ORDERS)
+                           is_admin=config.PERM_ORDERS, state="*")
 async def cb_crypto_page(query: types.CallbackQuery):
     await query.answer()
     _, view, page_s = query.data.split(":")
@@ -910,7 +910,7 @@ async def cb_crypto_page(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("cryd:"),
-                           is_admin=config.PERM_ORDERS)
+                           is_admin=config.PERM_ORDERS, state="*")
 async def cb_crypto_detail(query: types.CallbackQuery):
     await query.answer()
     dep = await db.get_crypto_deposit(int(query.data.split(":")[1]))
@@ -931,7 +931,7 @@ async def cb_crypto_detail(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("cryok:"),
-                           is_admin=config.PERM_ORDERS)
+                           is_admin=config.PERM_ORDERS, state="*")
 async def cb_crypto_confirm(query: types.CallbackQuery):
     """Manual confirm: finalize the order for this deposit.
 
@@ -1020,7 +1020,7 @@ async def cb_crypto_confirm(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("cryno:"),
-                           is_admin=config.PERM_ORDERS)
+                           is_admin=config.PERM_ORDERS, state="*")
 async def cb_crypto_reject(query: types.CallbackQuery):
     """Reject a deposit: cancel deposit AND order (no orphaned pending order)."""
     try:
@@ -1067,7 +1067,7 @@ async def cb_crypto_reject(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("cryc:"),
-                           is_admin=config.PERM_ORDERS)
+                           is_admin=config.PERM_ORDERS, state="*")
 async def cb_crypto_chain_toggle(query: types.CallbackQuery):
     # Exactly one answer per callback (see cb_cryptobot_check).
     try:

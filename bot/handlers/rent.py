@@ -213,13 +213,13 @@ async def _render_plans_edit(query, plans, selected_id):
     )
 
 
-@dp.message_handler(text=texts.BTN_RENT)
+@dp.message_handler(text=texts.BTN_RENT, state="*")
 async def nav_rent(message: types.Message, state: FSMContext):
     await state.finish()
     await _render_plans_as_new_message(message, message.from_user.id)
 
 
-@dp.callback_query_handler(text="rent:back")
+@dp.callback_query_handler(text="rent:back", state="*")
 async def cb_rent_back(query: types.CallbackQuery):
     await query.answer()
     try:
@@ -235,7 +235,7 @@ async def cb_rent_back(query: types.CallbackQuery):
     await _render_plans_edit(query, plans, _default_plan_id(plans))
 
 
-@dp.callback_query_handler(lambda q: q.data == "rent:plans")
+@dp.callback_query_handler(lambda q: q.data == "rent:plans", state="*")
 async def cb_rent_plans(query: types.CallbackQuery):
     """Continue to Payment -> show Monthly/Yearly plan selection."""
     await query.answer()
@@ -257,7 +257,7 @@ async def cb_rent_plans(query: types.CallbackQuery):
     )
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:select:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:select:"), state="*")
 async def cb_rent_select(query: types.CallbackQuery):
     """Monthly/Yearly buttons: choose the plan, go to payment methods."""
     await query.answer()
@@ -298,7 +298,7 @@ async def cb_rent_select(query: types.CallbackQuery):
     await edit_text_safe(query, text, reply_markup=kb.rent_method_kb(selected_id))
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:method:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:method:"), state="*")
 async def cb_rent_method(query: types.CallbackQuery):
     await query.answer()
     parts = query.data.split(":")
@@ -331,7 +331,7 @@ async def cb_rent_method(query: types.CallbackQuery):
     await edit_text_safe(query, text, reply_markup=kb.rent_confirm_kb(plan_id, provider))
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:confirm:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:confirm:"), state="*")
 async def cb_rent_confirm(query: types.CallbackQuery):
     await query.answer()
     parts = query.data.split(":")
@@ -451,14 +451,14 @@ async def _my_rental_text(tg_id: int):
     return text, _rent_success_kb()
 
 
-@dp.callback_query_handler(text="rent:mine")
+@dp.callback_query_handler(text="rent:mine", state="*")
 async def cb_rent_mine(query: types.CallbackQuery):
     await query.answer()
     text, markup = await _my_rental_text(query.from_user.id)
     await edit_text_safe(query, text, reply_markup=markup)
 
 
-@dp.message_handler(text=texts.BTN_RENT_MINE)
+@dp.message_handler(text=texts.BTN_RENT_MINE, state="*")
 async def nav_rent_mine(message: types.Message, state: FSMContext):
     """Main-menu 'My Rental' button (visible once the user has ever
     subscribed) — a sort of invoice view for their subscription."""

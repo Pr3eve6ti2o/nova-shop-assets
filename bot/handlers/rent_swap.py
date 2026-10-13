@@ -433,7 +433,7 @@ async def _get_current_bot(tenant_id: str) -> str:
 # --- Tenant: application ---
 
 
-@dp.callback_query_handler(text="rswap:start")
+@dp.callback_query_handler(text="rswap:start", state="*")
 async def cb_swap_start(query: types.CallbackQuery):
     await query.answer()
     try:
@@ -465,7 +465,7 @@ async def cb_swap_start(query: types.CallbackQuery):
     )
 
 
-@dp.callback_query_handler(text="rswap:begin")
+@dp.callback_query_handler(text="rswap:begin", state="*")
 async def cb_swap_begin(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     await SwapFlow.waiting_reason.set()
@@ -542,7 +542,7 @@ async def cb_swap_confirm(query: types.CallbackQuery, state: FSMContext):
     )
 
 
-@dp.callback_query_handler(text="rswap:cancel")
+@dp.callback_query_handler(text="rswap:cancel", state="*")
 async def cb_swap_cancel(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     await _clear(query.message, state)
@@ -580,7 +580,7 @@ async def _admin_only(query: types.CallbackQuery) -> bool:
     return False
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rswap:approve:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rswap:approve:"), state="*")
 async def cb_swap_approve(query: types.CallbackQuery):
     """Dual-control approval: two DISTINCT approvers must approve.
 
@@ -635,7 +635,7 @@ async def cb_swap_approve(query: types.CallbackQuery):
     await edit_text_safe(query, MSG_ADMIN_SWAP_DECIDED.format(app_id=app_id, decision="approved"))
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rswap:deny:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rswap:deny:"), state="*")
 async def cb_swap_deny(query: types.CallbackQuery):
     await query.answer()
     if not await _swap_approver_only(query):
@@ -662,7 +662,7 @@ async def cb_swap_deny(query: types.CallbackQuery):
 # --- Tenant: verified swap after approval ---
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rswap:continue:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rswap:continue:"), state="*")
 async def cb_swap_continue(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     app_id = int(query.data.split(":")[2])

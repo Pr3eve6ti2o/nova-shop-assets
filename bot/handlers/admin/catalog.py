@@ -18,7 +18,7 @@ PER_PAGE = 8
 
 
 # ------------------------------------------------------------ categories ---
-@dp.callback_query_handler(text="ad:cat", is_admin=config.PERM_CATALOG)
+@dp.callback_query_handler(text="ad:cat", is_admin=config.PERM_CATALOG, state="*")
 async def cb_cat_list(query: types.CallbackQuery):
     await query.answer()
     cats = await db.list_categories()
@@ -31,7 +31,7 @@ async def cb_cat_list(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:cl:"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_cat_detail(query: types.CallbackQuery):
     await query.answer()
     cid = int(query.data.split(":")[2])
@@ -45,7 +45,7 @@ async def cb_cat_detail(query: types.CallbackQuery):
                          kb.admin_category_kb(cat, n))
 
 
-@dp.callback_query_handler(text="ac:cadd", is_admin=config.PERM_CATALOG)
+@dp.callback_query_handler(text="ac:cadd", is_admin=config.PERM_CATALOG, state="*")
 async def cb_cat_add(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     await CategoryWizard.name.set()
@@ -79,7 +79,7 @@ async def cat_name_received(message: types.Message, state: FSMContext):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:cren:"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_cat_rename(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     cid = int(query.data.split(":")[2])
@@ -103,7 +103,7 @@ async def cat_rename_received(message: types.Message, state: FSMContext):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:cdel:"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_cat_delete_ask(query: types.CallbackQuery):
     await query.answer()
     cid = int(query.data.split(":")[2])
@@ -120,7 +120,7 @@ async def cb_cat_delete_ask(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:cdely:"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_cat_delete_yes(query: types.CallbackQuery):
     cid = int(query.data.split(":")[2])
     # Delete all products in the category first (force delete)
@@ -141,7 +141,7 @@ async def cb_cat_delete_yes(query: types.CallbackQuery):
 
 # -------------------------------------------------------------- products ---
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:plist:"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_product_list(query: types.CallbackQuery):
     await query.answer()
     _, _, cid_s, page_s = query.data.split(":")
@@ -155,7 +155,7 @@ async def cb_product_list(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:padd"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_product_add(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     parts = query.data.split(":")
@@ -374,7 +374,7 @@ async def pw_confirm(query: types.CallbackQuery, state: FSMContext):
 
 # ------------------------------------------------------- product manage ---
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:p:"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_product_detail(query: types.CallbackQuery):
     await query.answer()
     pid = int(query.data.split(":")[2])
@@ -392,7 +392,7 @@ async def cb_product_detail(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:ptog:"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_product_toggle(query: types.CallbackQuery):
     pid = int(query.data.split(":")[2])
     p = await db.get_product(pid)
@@ -411,7 +411,7 @@ async def cb_product_toggle(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:pul:"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_product_unlimited_toggle(query: types.CallbackQuery):
     pid = int(query.data.split(":")[2])
     p = await db.get_product(pid)
@@ -429,7 +429,7 @@ async def cb_product_unlimited_toggle(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:pdel:"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_product_del_ask(query: types.CallbackQuery):
     await query.answer()
     pid = int(query.data.split(":")[2])
@@ -440,7 +440,7 @@ async def cb_product_del_ask(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:pdely:"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_product_del_yes(query: types.CallbackQuery):
     pid = int(query.data.split(":")[2])
     p = await db.get_product(pid)
@@ -464,7 +464,7 @@ async def cb_product_del_yes(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:ppr:"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_price_ask(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     pid = int(query.data.split(":")[2])
@@ -494,7 +494,7 @@ async def price_received(message: types.Message, state: FSMContext):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:pst:"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_stock_ask(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     pid = int(query.data.split(":")[2])
@@ -527,7 +527,7 @@ async def stock_received(message: types.Message, state: FSMContext):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:pv:"),
-                           is_admin=config.PERM_CATALOG)
+                           is_admin=config.PERM_CATALOG, state="*")
 async def cb_values_ask(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     pid = int(query.data.split(":")[2])

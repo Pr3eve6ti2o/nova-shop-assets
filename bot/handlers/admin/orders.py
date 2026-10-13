@@ -51,7 +51,7 @@ async def _order_is_paid(order) -> bool:
     return False
 
 
-@dp.callback_query_handler(text="ad:ordf", is_admin=config.PERM_ORDERS)
+@dp.callback_query_handler(text="ad:ordf", is_admin=config.PERM_ORDERS, state="*")
 async def cb_orders_home(query: types.CallbackQuery):
     await query.answer()
     counts = await db.orders_by_status_counts()
@@ -60,7 +60,7 @@ async def cb_orders_home(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ad:ord:"),
-                           is_admin=config.PERM_ORDERS)
+                           is_admin=config.PERM_ORDERS, state="*")
 async def cb_orders_list(query: types.CallbackQuery):
     await query.answer()
     # Opus: guard the split and int parse — malformed callback data
@@ -86,7 +86,7 @@ async def cb_orders_list(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ad:o:"),
-                           is_admin=config.PERM_ORDERS)
+                           is_admin=config.PERM_ORDERS, state="*")
 async def cb_order_detail(query: types.CallbackQuery):
     await query.answer()
     oid = int(query.data.split(":")[2])
@@ -119,7 +119,7 @@ async def cb_order_detail(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ad:os:"),
-                           is_admin=config.PERM_ORDERS)
+                           is_admin=config.PERM_ORDERS, state="*")
 async def cb_order_set_status(query: types.CallbackQuery):
     _, _, oid_s, status = query.data.split(":")
     oid = int(oid_s)

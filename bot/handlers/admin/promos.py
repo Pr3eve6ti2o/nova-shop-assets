@@ -15,7 +15,7 @@ from states import PromoWizard
 from ..common import edit_text_safe, handle_escape
 
 
-@dp.callback_query_handler(text="ad:pro", is_admin=config.PERM_PROMOS)
+@dp.callback_query_handler(text="ad:pro", is_admin=config.PERM_PROMOS, state="*")
 async def cb_promo_list(query: types.CallbackQuery):
     await query.answer()
     promos = await db.list_promos()
@@ -23,7 +23,7 @@ async def cb_promo_list(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:pr:"),
-                           is_admin=config.PERM_PROMOS)
+                           is_admin=config.PERM_PROMOS, state="*")
 async def cb_promo_detail(query: types.CallbackQuery):
     await query.answer()
     pid = int(query.data.split(":")[2])
@@ -45,7 +45,7 @@ async def cb_promo_detail(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:prt:"),
-                           is_admin=config.PERM_PROMOS)
+                           is_admin=config.PERM_PROMOS, state="*")
 async def cb_promo_toggle(query: types.CallbackQuery):
     pid = int(query.data.split(":")[2])
     promos = {p["id"]: p for p in await db.list_promos()}
@@ -61,7 +61,7 @@ async def cb_promo_toggle(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:prd:"),
-                           is_admin=config.PERM_PROMOS)
+                           is_admin=config.PERM_PROMOS, state="*")
 async def cb_promo_del_ask(query: types.CallbackQuery):
     await query.answer()
     pid = int(query.data.split(":")[2])
@@ -76,7 +76,7 @@ async def cb_promo_del_ask(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ac:prdy:"),
-                           is_admin=config.PERM_PROMOS)
+                           is_admin=config.PERM_PROMOS, state="*")
 async def cb_promo_del_yes(query: types.CallbackQuery):
     pid = int(query.data.split(":")[2])
     promos = {p["id"]: p for p in await db.list_promos()}
@@ -97,7 +97,7 @@ async def cb_promo_del_yes(query: types.CallbackQuery):
 
 
 # ---------------------------------------------------------------- wizard ---
-@dp.callback_query_handler(text="ac:pradd", is_admin=config.PERM_PROMOS)
+@dp.callback_query_handler(text="ac:pradd", is_admin=config.PERM_PROMOS, state="*")
 async def cb_promo_add(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     await PromoWizard.code.set()

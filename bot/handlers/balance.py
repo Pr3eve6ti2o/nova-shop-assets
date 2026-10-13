@@ -26,7 +26,7 @@ async def cmd_balance(message: types.Message, state: FSMContext):
         reply_markup=kb.balance_kb())
 
 
-@dp.callback_query_handler(text="bal:topup")
+@dp.callback_query_handler(text="bal:topup", state="*")
 async def cb_balance_topup(query: types.CallbackQuery):
     await query.answer()
     await edit_text_safe(
@@ -47,7 +47,7 @@ async def render_topup_payment(target, amount_cents: int):
         await target.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("bal:amt:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("bal:amt:"), state="*")
 async def cb_balance_amount(query: types.CallbackQuery, state: FSMContext):
     """User picked a top-up amount - create CryptoBot invoice."""
     amount_cents = int(query.data.split(":")[2])
@@ -60,7 +60,7 @@ async def cb_balance_amount(query: types.CallbackQuery, state: FSMContext):
     await render_topup_payment(query, amount_cents)
 
 
-@dp.callback_query_handler(text="bal:custom")
+@dp.callback_query_handler(text="bal:custom", state="*")
 async def cb_balance_custom(query: types.CallbackQuery, state: FSMContext):
     """User tapped Custom Amount: ask them to type an amount (min $1)."""
     await query.answer()

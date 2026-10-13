@@ -12,7 +12,7 @@ from utils import fmt_money
 from ..common import edit_text_safe, handle_escape
 
 
-@dp.callback_query_handler(text="ad:usr", is_admin=config.PERM_USERS)
+@dp.callback_query_handler(text="ad:usr", is_admin=config.PERM_USERS, state="*")
 async def cb_users_home(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     await UserSearch.query.set()
@@ -55,7 +55,7 @@ async def render_user_card(target, tg_id: int):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ad:u:"),
-                           is_admin=config.PERM_USERS)
+                           is_admin=config.PERM_USERS, state="*")
 async def cb_user_card(query: types.CallbackQuery):
     await query.answer()
     # Opus P1: guard the int parse — malformed callback data crashed.
@@ -68,7 +68,7 @@ async def cb_user_card(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ad:ub:"),
-                           is_admin=config.PERM_USERS)
+                           is_admin=config.PERM_USERS, state="*")
 async def cb_user_block(query: types.CallbackQuery):
     # Opus P1: guard the int parse.
     try:
@@ -95,7 +95,7 @@ async def cb_user_block(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ad:ur:"),
-                           is_admin=config.PERM_USERS)
+                           is_admin=config.PERM_USERS, state="*")
 async def cb_role_edit(query: types.CallbackQuery):
     await query.answer()
     tg_id = int(query.data.split(":")[2])
@@ -108,7 +108,7 @@ async def cb_role_edit(query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ad:urc:"),
-                           is_admin=config.PERM_USERS)
+                           is_admin=config.PERM_USERS, state="*")
 async def cb_role_toggle(query: types.CallbackQuery):
     # Opus P1: guard the split and int parses — malformed data crashed.
     try:

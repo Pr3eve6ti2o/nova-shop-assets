@@ -16,7 +16,7 @@ from ..common import edit_text_safe, handle_escape
 _broadcast_running = {}
 
 
-@dp.callback_query_handler(text="ad:bc", is_admin=config.PERM_BROADCAST)
+@dp.callback_query_handler(text="ad:bc", is_admin=config.PERM_BROADCAST, state="*")
 async def cb_broadcast(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     await BroadcastFlow.content.set()
@@ -122,7 +122,7 @@ async def bc_send(query: types.CallbackQuery, state: FSMContext):
         await db.audit(admin_id, "broadcast_done", f"sent={done} errors={errors}")
 
 
-@dp.callback_query_handler(text="bcstop", is_admin=config.PERM_BROADCAST)
+@dp.callback_query_handler(text="bcstop", is_admin=config.PERM_BROADCAST, state="*")
 async def bc_stop(query: types.CallbackQuery):
     _broadcast_running[query.from_user.id] = False
     await query.answer(texts.TOAST_BROADCAST_STOPPED)

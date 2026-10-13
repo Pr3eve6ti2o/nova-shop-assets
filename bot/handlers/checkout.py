@@ -186,11 +186,16 @@ async def start_checkout(query: types.CallbackQuery, state: FSMContext):
     # Opus P0: reset stale payment keys — merging into existing state lets
     # order_id/amount/invoice_id from an abandoned crypto payment bleed
     # into the new checkout and get reused for wrong charges.
+    # NOTE: promo_code is deliberately NOT reset here — a promo applied
+    # in the cart (or saved via /redeem, whose confirmation promises it
+    # "will apply at checkout") must survive into this checkout. It is
+    # re-validated by totals()/create_checkout_atomic before any money
+    # moves, so a stale or expired code cannot slip through.
     await state.update_data(
         order_id=None, amount=None, invoice_id=None, pay_amount=None,
         pending_crypto_order_id=None,
         delivery_kind="pickup", phone=None, address=None,
-        payment_method=None, promo_code=None,
+        payment_method=None,
         details_skipped=True)
     # Digital-only bot: delivery details removed from checkout flow.
     # Kept as optional service elsewhere, not in main purchase flow.
@@ -907,7 +912,7 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
     await edit_text_safe(query, texts.MSG_PAY_WAITING, kb.waiting_kb(oid))
 
 
-@dp.callback_query_handler(text_startswith="copc:")
+@dp.callback_query_handler(text_startswith="copc:", state="*")
 async def cb_change_payment(query: types.CallbackQuery, state: FSMContext):
     """From the payment-waiting screen: cancel the still-pending order, restore
     its items to the cart, and return to the payment step."""

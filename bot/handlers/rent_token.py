@@ -181,7 +181,7 @@ def _err_text(exc: RuntimeError) -> str:
     return MSG_TOK_UNAVAILABLE
 
 
-@dp.callback_query_handler(text="rent:token:start")
+@dp.callback_query_handler(text="rent:token:start", state="*")
 async def cb_token_start(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     if not _enabled():
@@ -206,7 +206,7 @@ async def _start_paste(message: types.Message, state: FSMContext) -> None:
     await message.answer("Tap Cancel to stop.", reply_markup=_cancel_kb())
 
 
-@dp.callback_query_handler(text="rent:token:paste")
+@dp.callback_query_handler(text="rent:token:paste", state="*")
 async def cb_token_paste(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     if not _enabled():
@@ -214,7 +214,7 @@ async def cb_token_paste(query: types.CallbackQuery, state: FSMContext):
     await _start_paste(query.message, state)
 
 
-@dp.callback_query_handler(text="rent:token:managed:start")
+@dp.callback_query_handler(text="rent:token:managed:start", state="*")
 async def cb_token_managed_start(query: types.CallbackQuery, state: FSMContext):
     """D4 consent screen — the tenant confirms they understand platform
     token custody before we hand them the tap-to-confirm link."""
@@ -227,7 +227,7 @@ async def cb_token_managed_start(query: types.CallbackQuery, state: FSMContext):
     await edit_text_safe(query, MSG_TOK_MANAGED_CONSENT, reply_markup=kb)
 
 
-@dp.callback_query_handler(text="rent:token:managed:consent")
+@dp.callback_query_handler(text="rent:token:managed:consent", state="*")
 async def cb_token_managed_consent(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     if not _enabled() or not _managed_available():
@@ -242,7 +242,7 @@ async def cb_token_managed_consent(query: types.CallbackQuery, state: FSMContext
     )
 
 
-@dp.callback_query_handler(text="rent:token:managed:check")
+@dp.callback_query_handler(text="rent:token:managed:check", state="*")
 async def cb_token_managed_check(query: types.CallbackQuery, state: FSMContext):
     """Claim the managed bot via the control plane. Until the claim backend
     exists (pilot preconditions), degrade gracefully to the manual paste
@@ -456,7 +456,7 @@ async def _plan_step(query: types.CallbackQuery, state: FSMContext):
     await edit_text_safe(query, MSG_TOK_PLAN, reply_markup=kb)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:token:plan:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:token:plan:"), state="*")
 async def cb_token_plan(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     if not _enabled():

@@ -48,7 +48,7 @@ async def render_profile(target, user):
                             disable_web_page_preview=True)
 
 
-@dp.message_handler(text=texts.BTN_PROFILE)
+@dp.message_handler(text=texts.BTN_PROFILE, state="*")
 async def nav_profile(message: types.Message, state: FSMContext):
     await state.finish()
     if message.chat.type != "private":
@@ -68,7 +68,7 @@ async def cmd_profile(message: types.Message, state: FSMContext):
     await render_profile(message, user)
 
 
-@dp.callback_query_handler(text="prof")
+@dp.callback_query_handler(text="prof", state="*")
 async def cb_profile(query: types.CallbackQuery, state: FSMContext):
     # P1-3: Clear stale promo state — navigation, not a promo flow.
     try:
@@ -87,7 +87,7 @@ async def cb_profile(query: types.CallbackQuery, state: FSMContext):
     await render_profile(query, user)
 
 
-@dp.callback_query_handler(text="wl")
+@dp.callback_query_handler(text="wl", state="*")
 async def cb_wishlist(query: types.CallbackQuery):
     await query.answer()
     # Wishlist contents are personal; don't render them in groups.
@@ -105,7 +105,7 @@ async def cb_wishlist(query: types.CallbackQuery):
         await edit_text_safe(query, texts.MSG_WISHLIST_TITLE, kb.wishlist_kb(items))
 
 
-@dp.callback_query_handler(lambda q: q.data and (q.data == "pur" or q.data.startswith("pur:")))
+@dp.callback_query_handler(lambda q: q.data and (q.data == "pur" or q.data.startswith("pur:")), state="*")
 async def cb_purchases(query: types.CallbackQuery, state: FSMContext):
     # Opus P1: was text="pur" (exact match) — "pur:1" never routed, so
     # pagination never functioned and page was always 0.
@@ -176,7 +176,7 @@ async def cb_purchases(query: types.CallbackQuery, state: FSMContext):
         await edit_text_safe(query, text, kb.profile_kb())
 
 
-@dp.callback_query_handler(text="ref")
+@dp.callback_query_handler(text="ref", state="*")
 async def cb_referral(query: types.CallbackQuery, state: FSMContext):
     # P1-3: Clear stale promo state.
     try:
@@ -215,7 +215,7 @@ async def cb_referral(query: types.CallbackQuery, state: FSMContext):
         kb.profile_kb())
 
 
-@dp.callback_query_handler(text="pm3")
+@dp.callback_query_handler(text="pm3", state="*")
 async def cb_redeem(query: types.CallbackQuery, state: FSMContext):
     # P1-1: Fail-closed chat guard — promo codes are sensitive, private only.
     # P1-2: Single query.answer() — guard returns before the main answer.

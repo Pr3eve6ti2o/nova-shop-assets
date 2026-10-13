@@ -7,7 +7,7 @@ import texts
 from loader import dp
 
 
-@dp.message_handler(text=texts.BTN_INFO)
+@dp.message_handler(text=texts.BTN_INFO, state="*")
 async def nav_info(message: types.Message, state: FSMContext):
     await state.finish()
     await message.answer(

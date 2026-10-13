@@ -54,7 +54,7 @@ async def btn_admin(message: types.Message, state: FSMContext):
     await cmd_admin(message, state)
 
 
-@dp.callback_query_handler(text="adm")
+@dp.callback_query_handler(text="adm", state="*")
 async def cb_admin(query: types.CallbackQuery):
     if not await mask_of(query.from_user.id):
         await query.answer(texts.MSG_ADMIN_DENIED, show_alert=True)
@@ -63,7 +63,7 @@ async def cb_admin(query: types.CallbackQuery):
     await render_console(query, query.from_user.id)
 
 
-@dp.callback_query_handler(text="ad:st", is_admin=config.PERM_STATS)
+@dp.callback_query_handler(text="ad:st", is_admin=config.PERM_STATS, state="*")
 async def cb_stats(query: types.CallbackQuery):
     await query.answer()
     total = await db.count_users()

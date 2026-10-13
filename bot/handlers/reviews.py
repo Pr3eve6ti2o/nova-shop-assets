@@ -58,7 +58,7 @@ async def _render_reviews(target, pid: int, user):
                             disable_web_page_preview=True)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rv:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rv:"), state="*")
 async def cb_reviews(query: types.CallbackQuery):
     try:
         pid = int(query.data.split(":")[1])
@@ -70,7 +70,7 @@ async def cb_reviews(query: types.CallbackQuery):
     await _render_reviews(query, pid, user)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rvl:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rvl:"), state="*")
 async def cb_review_leave(query: types.CallbackQuery, state: FSMContext):
     try:
         pid = int(query.data.split(":")[1])
@@ -91,7 +91,7 @@ async def cb_review_leave(query: types.CallbackQuery, state: FSMContext):
     await edit_text_safe(query, texts.MSG_REVIEW_ASK_RATING, markup)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rvr:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rvr:"), state="*")
 async def cb_review_rate(query: types.CallbackQuery, state: FSMContext):
     try:
         _, pid_s, stars_s = query.data.split(":")

@@ -54,7 +54,7 @@ async def render_cart(target, user_id: int, state: FSMContext, dropped: list = N
             await target.answer(toast)
 
 
-@dp.message_handler(lambda m: (m.text or "") == texts.BTN_CART)
+@dp.message_handler(lambda m: (m.text or "") == texts.BTN_CART, state="*")
 async def nav_cart(message: types.Message, state: FSMContext):
     # Opus: was startswith() — a support question beginning with the cart
     # label was treated as navigation and the user's message got deleted.
@@ -79,7 +79,7 @@ async def cmd_cart(message: types.Message, state: FSMContext):
     await render_cart(message, user["id"], state)
 
 
-@dp.callback_query_handler(text="cart")
+@dp.callback_query_handler(text="cart", state="*")
 async def cb_cart(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     # H4: clear the details share-contact keyboard if we're leaving it behind.
@@ -95,7 +95,7 @@ async def cb_cart(query: types.CallbackQuery, state: FSMContext):
     await render_cart(query, user["id"], state)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("cq:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("cq:"), state="*")
 async def cb_cart_qty(query: types.CallbackQuery, state: FSMContext):
     parts = query.data.split(":")
     if len(parts) != 3:
@@ -137,7 +137,7 @@ async def cb_cart_qty(query: types.CallbackQuery, state: FSMContext):
     await render_cart(query, user["id"], state)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("crm:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("crm:"), state="*")
 async def cb_cart_remove(query: types.CallbackQuery, state: FSMContext):
     parts = query.data.split(":")
     if len(parts) != 2:
@@ -154,7 +154,7 @@ async def cb_cart_remove(query: types.CallbackQuery, state: FSMContext):
     await render_cart(query, user["id"], state)
 
 
-@dp.callback_query_handler(text="cc")
+@dp.callback_query_handler(text="cc", state="*")
 async def cb_clear_ask(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
@@ -163,7 +163,7 @@ async def cb_clear_ask(query: types.CallbackQuery, state: FSMContext):
                          kb.clear_confirm_kb(n))
 
 
-@dp.callback_query_handler(text="ccy")
+@dp.callback_query_handler(text="ccy", state="*")
 async def cb_clear_yes(query: types.CallbackQuery, state: FSMContext):
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     await db.cart_clear(user["id"])
@@ -172,7 +172,7 @@ async def cb_clear_yes(query: types.CallbackQuery, state: FSMContext):
     await render_cart(query, user["id"], state)
 
 
-@dp.callback_query_handler(text="pm")
+@dp.callback_query_handler(text="pm", state="*")
 async def cb_promo_ask(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     await CartPromo.waiting_code.set()
@@ -235,7 +235,7 @@ async def promo_code_received(message: types.Message, state: FSMContext):
     await render_cart(message, user["id"], state)
 
 
-@dp.callback_query_handler(text="px")
+@dp.callback_query_handler(text="px", state="*")
 async def cb_promo_remove(query: types.CallbackQuery, state: FSMContext):
     await state.update_data(promo_code=None)
     await query.answer(texts.TOAST_PROMO_REMOVED)

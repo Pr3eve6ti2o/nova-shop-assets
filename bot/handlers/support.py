@@ -95,7 +95,7 @@ async def _try_delete(message):
         pass
 
 
-@dp.message_handler(text=texts.BTN_SUPPORT)
+@dp.message_handler(text=texts.BTN_SUPPORT, state="*")
 async def nav_help(message: types.Message):
     await _try_delete(message)
     await get_or_register(message.from_user.id, message.from_user.full_name)
@@ -103,21 +103,21 @@ async def nav_help(message: types.Message):
                          disable_web_page_preview=True)
 
 
-@dp.message_handler(commands=["support"])
+@dp.message_handler(commands=["support"], state="*")
 async def cmd_support(message: types.Message):
     user, _ = await get_or_register(message.from_user.id,
                                     message.from_user.full_name)
     await render_support_list(message, user["id"])
 
 
-@dp.callback_query_handler(text="sup_list")
+@dp.callback_query_handler(text="sup_list", state="*")
 async def cb_support_list(query: types.CallbackQuery):
     await query.answer()
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     await render_support_list(query, user["id"])
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("supt:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("supt:"), state="*")
 async def cb_support_ticket(query: types.CallbackQuery):
     await query.answer()
     tid = int(query.data.split(":")[1])
@@ -192,7 +192,7 @@ async def support_followup(message: types.Message, state: FSMContext):
     await message.answer("\u2705 Added to your ticket. We'll reply here.")
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("suptc:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("suptc:"), state="*")
 async def cb_support_ticket_close(query: types.CallbackQuery):
     tid = int(query.data.split(":")[1])
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
@@ -204,13 +204,13 @@ async def cb_support_ticket_close(query: types.CallbackQuery):
     await render_support_list(query, user["id"])
 
 
-@dp.callback_query_handler(text="help")
+@dp.callback_query_handler(text="help", state="*")
 async def cb_help(query: types.CallbackQuery):
     await query.answer()
     await edit_text_safe(query, texts.MSG_HELP, kb.support_kb())
 
 
-@dp.callback_query_handler(text="sup")
+@dp.callback_query_handler(text="sup", state="*")
 async def cb_support(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     await SupportFlow.waiting_message.set()
@@ -237,7 +237,7 @@ async def support_message(message: types.Message, state: FSMContext):
     await message.answer(texts.MSG_SUPPORT_TICKET_OPEN.format(id=ticket_id))
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("srep:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("srep:"), state="*")
 async def cb_support_reply(query: types.CallbackQuery, state: FSMContext):
     from .admin import IsAdmin
     # Admin-only: re-check manually (callback, not message handler).

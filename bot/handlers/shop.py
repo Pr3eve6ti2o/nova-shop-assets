@@ -26,7 +26,7 @@ async def _try_delete_user_tap(message: types.Message):
 
 
 # ---------------------------------------------------------- categories ---
-@dp.message_handler(text=texts.BTN_SHOP)
+@dp.message_handler(text=texts.BTN_SHOP, state="*")
 async def nav_shop(message: types.Message, state: FSMContext):
     await _try_delete_user_tap(message)
     await state.finish()
@@ -35,7 +35,7 @@ async def nav_shop(message: types.Message, state: FSMContext):
     await message.answer(texts.MSG_CATEGORIES, reply_markup=kb.categories_kb(cats))
 
 
-@dp.callback_query_handler(text="shop")
+@dp.callback_query_handler(text="shop", state="*")
 async def cb_shop(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     await state.finish()
@@ -44,7 +44,7 @@ async def cb_shop(query: types.CallbackQuery, state: FSMContext):
 
 
 # -------------------------------------------------------- product list ---
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("cat:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("cat:"), state="*")
 async def cb_category(query: types.CallbackQuery):
     await query.answer()
     try:
@@ -144,7 +144,7 @@ async def show_product_detail(target, pid: int, user, qty: int = 1):
                                 disable_web_page_preview=True)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("p:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("p:"), state="*")
 async def cb_product(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     try:
@@ -157,7 +157,7 @@ async def cb_product(query: types.CallbackQuery, state: FSMContext):
     await show_product_detail(query, pid, user, qty)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("pa:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("pa:"), state="*")
 async def cb_stepper(query: types.CallbackQuery, state: FSMContext):
     try:
         _, pid_s, delta_s = query.data.split(":")
@@ -186,7 +186,7 @@ async def cb_stepper(query: types.CallbackQuery, state: FSMContext):
         pass
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("a:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("a:"), state="*")
 async def cb_add_cart(query: types.CallbackQuery, state: FSMContext):
     try:
         pid = int(query.data.split(":")[1])
@@ -208,7 +208,7 @@ async def cb_add_cart(query: types.CallbackQuery, state: FSMContext):
     await query.answer(texts.TOAST_ADDED_CART)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("pb:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("pb:"), state="*")
 async def cb_buy_now(query: types.CallbackQuery, state: FSMContext):
     try:
         pid = int(query.data.split(":")[1])
@@ -230,7 +230,7 @@ async def cb_buy_now(query: types.CallbackQuery, state: FSMContext):
     await start_checkout(query, state)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("w:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("w:"), state="*")
 async def cb_wishlist(query: types.CallbackQuery, state: FSMContext):
     try:
         pid = int(query.data.split(":")[1])
@@ -253,7 +253,7 @@ async def cb_wishlist(query: types.CallbackQuery, state: FSMContext):
 
 
 # ---------------------------------------------------------------- search ---
-@dp.message_handler(text=texts.BTN_SEARCH)
+@dp.message_handler(text=texts.BTN_SEARCH, state="*")
 async def nav_search(message: types.Message, state: FSMContext):
     await _try_delete_user_tap(message)
     await get_or_register(message.from_user.id, message.from_user.full_name)
@@ -261,7 +261,7 @@ async def nav_search(message: types.Message, state: FSMContext):
     await message.answer(texts.MSG_SEARCH_ASK, reply_markup=kb.force_reply())
 
 
-@dp.callback_query_handler(text="snew")
+@dp.callback_query_handler(text="snew", state="*")
 async def cb_search_new(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     await SearchFlow.waiting_query.set()
@@ -295,7 +295,7 @@ async def render_search(target, state: FSMContext, page: int):
         await target.answer(text, reply_markup=markup, disable_web_page_preview=True)
 
 
-@dp.callback_query_handler(lambda q: q.data and q.data.startswith("sp:"))
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("sp:"), state="*")
 async def cb_search_page(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     data = await state.get_data()
@@ -308,6 +308,6 @@ async def cb_search_page(query: types.CallbackQuery, state: FSMContext):
     await render_search(query, state, page)
 
 
-@dp.callback_query_handler(text="noop")
+@dp.callback_query_handler(text="noop", state="*")
 async def cb_noop(query: types.CallbackQuery):
     await query.answer()

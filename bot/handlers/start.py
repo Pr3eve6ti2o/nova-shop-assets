@@ -31,7 +31,7 @@ async def home_inline_kb(user_id: int):
     return k
 
 
-@dp.message_handler(commands=["start"])
+@dp.message_handler(commands=["start"], state="*")
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.finish()
     args = message.get_args() or ""
@@ -113,7 +113,7 @@ async def _welcome_back_text(user) -> str:
     return texts.MSG_WELCOME_BACK.format(summary="\n".join(lines))
 
 
-@dp.callback_query_handler(text="menu")
+@dp.callback_query_handler(text="menu", state="*")
 async def cb_menu(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     # H4: clear the details share-contact keyboard if we're leaving it behind.
