@@ -39,7 +39,11 @@ async def _fixture():
 
 class ReturnsFlow(unittest.TestCase):
     def run_async(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
 
     def test_create_and_balance_refund_exactly_once(self):
         async def go():

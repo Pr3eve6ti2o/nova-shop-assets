@@ -31,7 +31,11 @@ async def _fixture():
 
 class CartSync(unittest.TestCase):
     def run_async(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
 
     def test_mutations_stamp_updated_at(self):
         async def go():

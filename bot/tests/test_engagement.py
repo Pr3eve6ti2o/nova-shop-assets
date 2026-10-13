@@ -41,7 +41,11 @@ async def _promo(db, code, kind, value, **kw):
 
 class Engagement(unittest.TestCase):
     def run_async(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
 
     def test_review_upsert_updates_aggregates(self):
         async def go():
