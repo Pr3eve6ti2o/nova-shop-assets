@@ -225,9 +225,15 @@ class Database:
             self._keepalive = await aiosqlite.connect(self.path, uri=True)
             self._keepalive.row_factory = _dict_factory
             await self._keepalive.execute("PRAGMA foreign_keys = ON")
+            await self._keepalive.execute("PRAGMA busy_timeout = 30000")
         async with aiosqlite.connect(self.path, uri=self._memory) as db:
             db.row_factory = _dict_factory
             await db.execute("PRAGMA foreign_keys = ON")
+            # Stress-audit fix: busy_timeout was set only on loader.py's
+            # one-off init connection, so every operational connection
+            # fell back to SQLite's 5s default and writes started
+            # failing "database is locked" at ~100 concurrent users.
+            await db.execute("PRAGMA busy_timeout = 30000")
             yield db
 
     async def create_tables(self):
