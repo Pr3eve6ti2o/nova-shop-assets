@@ -521,8 +521,9 @@ async def confirm_promo_reply(message: types.Message, state: FSMContext):
     if not code:
         return
     t = await totals(user["id"], state, with_delivery=True)
-    ok, reason, _discount, promo = await db.validate_promo(code, user["id"],
-                                                           t["subtotal"])
+    ok, reason, _discount, promo = await db.validate_promo(
+        code, user["id"], t["subtotal"],
+        items=await db.cart_items(user["id"]))
     if not ok:
         if reason == "used":
             await message.answer(texts.MSG_PROMO_USED)

@@ -85,6 +85,13 @@ async def _set_qty_in_view(state: FSMContext, pid: int, qty: int):
     await state.update_data(**{f"qv:{pid}": max(1, min(99, qty))})
 
 
+def _rating_of(p):
+    """(avg, count) from the product's denormalised review aggregates."""
+    count = p["rating_count"] or 0
+    avg = (p["rating_sum"] / count) if count else 0.0
+    return avg, count
+
+
 async def show_product_detail(target, pid: int, user, qty: int = 1):
     """Render product detail; target is CallbackQuery or Message."""
     p = await db.get_product(pid)
@@ -101,8 +108,12 @@ async def show_product_detail(target, pid: int, user, qty: int = 1):
     caption = texts.MSG_PRODUCT_CAPTION.format(
         name=_h(p["name"]), description=_h(truncate(p["description"] or "", 200)),
         price=fmt_money(p["price_cents"], config.CURRENCY), old_price=old,
-        stock_line=await check_stock_line(p), rating_line="")
-    markup = kb.product_kb(p, qty, in_wl, 0.0, 0)
+        stock_line=await check_stock_line(p),
+        rating_line=(texts.MSG_RATING_LINE.format(
+            avg=f"{p['rating_sum'] / p['rating_count']:.1f}",
+            n=p['rating_count']) if p["rating_count"]
+            else texts.MSG_NO_RATING))
+    markup = kb.product_kb(p, qty, in_wl, *_rating_of(p))
 
     if isinstance(target, types.CallbackQuery):
         msg = target.message
@@ -167,11 +178,10 @@ async def cb_stepper(query: types.CallbackQuery, state: FSMContext):
         return
     await query.answer()
     await _set_qty_in_view(state, pid, new_qty)
-    # rating removed
     in_wl = await db.wishlist_has(user["id"], pid)
     try:
         await query.message.edit_reply_markup(
-            kb.product_kb(p, new_qty, in_wl, 0.0, 0))
+            kb.product_kb(p, new_qty, in_wl, *_rating_of(p)))
     except Exception:
         pass
 
@@ -235,10 +245,9 @@ async def cb_wishlist(query: types.CallbackQuery, state: FSMContext):
     now_in = await db.wishlist_toggle(user["id"], pid)
     await query.answer(texts.TOAST_WISH_ADDED if now_in else texts.TOAST_WISH_REMOVED)
     qty = await _qty_in_view(state, pid)
-    # rating removed
     try:
         await query.message.edit_reply_markup(
-            kb.product_kb(p, qty, now_in, 0.0, 0))
+            kb.product_kb(p, qty, now_in, *_rating_of(p)))
     except Exception:
         pass
 

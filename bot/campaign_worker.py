@@ -158,11 +158,38 @@ async def _pass_onboarding(db, bot) -> int:
     return sent
 
 
+async def _pass_wishlist_drops(db, bot) -> int:
+    # Port 5.2: re-arm first (recovered prices clear their stamp), then
+    # notify fresh drops of >=10% vs the price when the item was added.
+    await db.wishlist_drop_rearm()
+    sent = 0
+    for row in await db.wishlist_price_drops():
+        uid, pid = row["user_id"], row["product_id"]
+        await db.wishlist_drop_mark_notified(uid, pid)
+        tg_id = await _tg_of(db, uid)
+        ok = False
+        if tg_id:
+            kb = InlineKeyboardMarkup().add(InlineKeyboardButton(
+                "🛍 View product", callback_data=f"p:{pid}"))
+            ok = await _send(
+                bot, tg_id,
+                f"💸 <b>Price drop</b>\n\n<b>{row['name']}</b> fell from "
+                f"{fmt_money(row['price_at_add_cents'], config.CURRENCY)} "
+                f"to {fmt_money(row['price_cents'], config.CURRENCY)} — "
+                "and it's on your wishlist.",
+                reply_markup=kb)
+        if ok:
+            sent += 1
+        await asyncio.sleep(_SEND_GAP)
+    return sent
+
+
 async def process_campaigns_once(db, bot) -> dict:
     """Run one pass of every campaign type. Returns per-type counts."""
     counts = {}
     counts["abandoned_cart"] = await _pass_abandoned_cart(db, bot)
     counts["back_in_stock"] = await _pass_back_in_stock(db, bot)
+    counts["wishlist_drops"] = await _pass_wishlist_drops(db, bot)
     counts["post_purchase"] = await _pass_post_purchase(db, bot)
     counts["onboarding"] = await _pass_onboarding(db, bot)
     return counts

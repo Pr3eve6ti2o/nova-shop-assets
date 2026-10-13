@@ -1723,11 +1723,113 @@ class Database:
                     (user_id, product_id))
                 await db.commit()
                 return False
+            # Port 5.2: remember the price at add time for drop alerts.
             await db.execute(
-                "INSERT OR IGNORE INTO wishlist(user_id, product_id) VALUES (?, ?)",
-                (user_id, product_id))
+                "INSERT OR IGNORE INTO wishlist"
+                "(user_id, product_id, price_at_add_cents)"
+                " SELECT ?, ?, price_cents FROM products WHERE id=?",
+                (user_id, product_id, product_id))
             await db.commit()
             return True
+
+    async def wishlist_price_drops(self):
+        """Wishlist rows whose product fell >=10% since adding and
+        haven't been notified yet (port 5.2)."""
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT w.user_id, w.product_id, w.price_at_add_cents,"
+                " p.price_cents, p.name FROM wishlist w"
+                " JOIN products p ON p.id = w.product_id"
+                " WHERE w.price_at_add_cents IS NOT NULL"
+                " AND w.price_notified_at IS NULL AND p.is_active = 1"
+                " AND p.price_cents * 10 <= w.price_at_add_cents * 9"
+            ) as cur:
+                return await cur.fetchall()
+
+    async def wishlist_drop_mark_notified(self, user_id: int, product_id: int):
+        async with self._db() as db:
+            await db.execute(
+                "UPDATE wishlist SET price_notified_at=?"
+                " WHERE user_id=? AND product_id=?",
+                (utcnow_iso(), user_id, product_id))
+            await db.commit()
+
+    async def wishlist_drop_rearm(self):
+        """Clear the notified stamp where the price recovered above the
+        drop threshold, so a FUTURE drop notifies again (the source
+        repo's re-arm behaviour, verified in the v3 mechanics pass)."""
+        async with self._db() as db:
+            await db.execute(
+                "UPDATE wishlist SET price_notified_at=NULL"
+                " WHERE price_notified_at IS NOT NULL"
+                " AND EXISTS (SELECT 1 FROM products p"
+                "   WHERE p.id = wishlist.product_id"
+                "   AND p.price_cents * 10 > wishlist.price_at_add_cents * 9)")
+            await db.commit()
+
+    # -------------------------------------------------------- loyalty ---
+    # Port 5.3 (JumpCodeFrog mechanics): lifetime points accrue on paid
+    # orders at the CURRENT tier's rate; tiers are status-only (the
+    # source has no redemption, so neither do we — points buy nothing,
+    # they set the rate at which future points accrue).
+
+    LOYALTY_TIERS = ((10000, "VIP", 10), (5000, "Gold", 5),
+                     (1000, "Silver", 2), (0, "Bronze", 1))
+
+    @classmethod
+    def loyalty_tier(cls, points: int):
+        """(tier_name, rate_percent) for a lifetime points balance."""
+        for threshold, name, rate in cls.LOYALTY_TIERS:
+            if points >= threshold:
+                return name, rate
+        return "Bronze", 1
+
+    @classmethod
+    def loyalty_next_tier(cls, points: int):
+        """(next_name, points_needed) or None at the top tier."""
+        tiers = sorted(cls.LOYALTY_TIERS)
+        for threshold, name, _rate in tiers:
+            if points < threshold:
+                return name, threshold - points
+        return None
+
+    async def loyalty_accrue(self, user_id: int, order_id: int,
+                             total_cents: int) -> int:
+        """Accrue points for a paid order. Idempotent per order
+        (loyalty_txs.order_id is UNIQUE). Returns points credited."""
+        if total_cents <= 0:
+            return 0
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT loyalty_points FROM users WHERE id=?",
+                (user_id,)) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return 0
+            _name, rate = self.loyalty_tier(int(row["loyalty_points"] or 0))
+            points = int(round(total_cents / 100 * rate))
+            if points <= 0:
+                return 0
+            cur = await db.execute(
+                "INSERT OR IGNORE INTO loyalty_txs"
+                "(user_id, order_id, points, created_at) VALUES (?, ?, ?, ?)",
+                (user_id, order_id, points, utcnow_iso()))
+            if cur.rowcount == 0:
+                await db.commit()
+                return 0  # already accrued for this order
+            await db.execute(
+                "UPDATE users SET loyalty_points = loyalty_points + ?"
+                " WHERE id=?", (points, user_id))
+            await db.commit()
+            return points
+
+    async def loyalty_points_of(self, user_id: int) -> int:
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT loyalty_points FROM users WHERE id=?",
+                (user_id,)) as cur:
+                row = await cur.fetchone()
+            return int(row["loyalty_points"] or 0) if row else 0
 
     async def wishlist_has(self, user_id: int, product_id: int) -> bool:
         async with self._db() as db:
@@ -1752,10 +1854,20 @@ class Database:
                 (code.strip(),)) as cur:
                 return await cur.fetchone()
 
-    async def validate_promo(self, code: str, user_id: int, subtotal_cents: int):
-        """Returns (ok, message, discount_cents, promo_row)."""
+    async def validate_promo(self, code: str, user_id: int, subtotal_cents: int,
+                             items=None):
+        """Returns (ok, message, discount_cents, promo_row).
+
+        Port 5.5: `items` (cart lines with product id + price + qty)
+        enables category-scoped promos — the discount then applies to
+        the category's subtotal only. Personal codes (bound_user_id)
+        behave as if they don't exist for anyone else."""
         promo = await self.get_promo(code)
         if not promo or not promo["is_active"]:
+            return False, "invalid", 0, None
+        keys = promo.keys()
+        bound = promo["bound_user_id"] if "bound_user_id" in keys else None
+        if bound and int(bound) != int(user_id):
             return False, "invalid", 0, None
         expires = promo["expires_at"]
         if expires is not None:
@@ -1779,17 +1891,49 @@ class Database:
                 (promo["id"], user_id)) as cur:
                 if await cur.fetchone():
                     return False, "used", 0, None
+        # Port 5.5: category-scoped promos discount only that category.
+        basis = subtotal_cents
+        cat_id = promo["category_id"] if "category_id" in keys else None
+        if cat_id:
+            if not items:
+                return False, "invalid", 0, None
+            wanted = {}
+            for it in items:
+                try:
+                    pid = it["product_id"] if "product_id" in it.keys() \
+                        else (it.get("product_id") or it.get("pid")
+                              or it.get("id"))
+                    price = it["price_cents"] if "price_cents" in it.keys() \
+                        else (it.get("price_cents") or it.get("price") or 0)
+                    qty = it["qty"] if "qty" in it.keys() else it.get("qty", 1)
+                except Exception:
+                    continue
+                if pid:
+                    wanted[int(pid)] = int(price or 0) * int(qty or 0)
+            if wanted:
+                async with self._db() as db:
+                    marks = ",".join("?" * len(wanted))
+                    async with db.execute(
+                        f"SELECT id FROM products WHERE category_id=?"
+                        f" AND id IN ({marks})",
+                        (int(cat_id), *wanted.keys())) as cur:
+                        in_cat = [r["id"] async for r in cur]
+                basis = sum(wanted[pid] for pid in in_cat)
+            else:
+                basis = 0
+            if basis <= 0:
+                return False, "invalid", 0, None
         if promo["kind"] == "percent":
             if promo["value"] <= 0 or promo["value"] > 100:
                 return False, "invalid", 0, None
-            discount = subtotal_cents * promo["value"] // 100
+            discount = basis * promo["value"] // 100
         elif promo["kind"] == "fixed":
             if promo["value"] <= 0:
                 return False, "invalid", 0, None
             discount = promo["value"]
         else:
             return False, "invalid", 0, None
-        discount = min(discount, subtotal_cents)
+        discount = min(discount, basis)
         return True, "ok", discount, promo
 
     async def record_promo_usage(self, promo_id: int, user_id: int) -> bool:

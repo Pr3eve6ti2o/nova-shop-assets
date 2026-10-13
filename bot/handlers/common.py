@@ -93,7 +93,7 @@ async def totals(user_id: int, state: FSMContext, with_delivery: bool = False):
     data = await state.get_data()
     code = data.get("promo_code")
     if code:
-        ok, _, disc, _ = await db.validate_promo(code, user_id, subtotal)
+        ok, _, disc, _ = await db.validate_promo(code, user_id, subtotal, items=items)
         if ok:
             promo_code, discount = code, disc
         else:
@@ -191,6 +191,15 @@ async def fulfill_order(order_id: int):
     """
     result = await db.fulfill_order_atomic(order_id)
     if result and result[0]:
+        # Port 5.3: loyalty accrual on paid+fulfilled orders
+        # (idempotent per order). Never allowed to fail fulfilment.
+        try:
+            order = await db.get_order(order_id)
+            if order:
+                await db.loyalty_accrue(order["user_id"], order_id,
+                                        int(order["total_cents"]))
+        except Exception:
+            pass
         # Port 6.4: outbound webhook for paid+fulfilled orders. Every
         # fulfilment path funnels through here. Never allowed to fail
         # the fulfilment itself.

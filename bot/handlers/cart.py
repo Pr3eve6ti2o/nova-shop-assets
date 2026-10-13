@@ -201,7 +201,7 @@ async def promo_code_received(message: types.Message, state: FSMContext):
         # per-user usage), not just is_active + expiry — otherwise a code
         # accepted here can fail or misbehave at checkout.
         ok, reason, _discount, promo = await db.validate_promo(
-            code, user["id"], 0)
+            code, user["id"], 0, items=await db.cart_items(user["id"]))
         await state.finish()
         if not ok:
             await message.answer(texts.MSG_PROMO_INVALID,
@@ -218,7 +218,7 @@ async def promo_code_received(message: types.Message, state: FSMContext):
         await message.answer(texts.MSG_CART_EMPTY,
                              reply_markup=await main_reply_kb(message.from_user.id))
         return
-    ok, reason, discount, promo = await db.validate_promo(code, user["id"], t["subtotal"])
+    ok, reason, discount, promo = await db.validate_promo(code, user["id"], t["subtotal"], items=t["items"])
     await state.finish()
     if not ok:
         msg = texts.MSG_PROMO_USED if reason == "used" else texts.MSG_PROMO_INVALID

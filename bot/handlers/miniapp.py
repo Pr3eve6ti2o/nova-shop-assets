@@ -97,7 +97,7 @@ async def create_tonconnect_order(user: dict, sender: str,
     promo_row = None
     if promo_code:
         ok_promo, _, promo_discount, promo_row = await db.validate_promo(
-            promo_code, user["id"], subtotal)
+            promo_code, user["id"], subtotal, items=clean)
         if ok_promo:
             discount_cents = promo_discount
         else:
@@ -337,7 +337,7 @@ async def webapp_data(message: types.Message, state: FSMContext):
         if promo:
             ok, _msg, _disc, _row = await db.validate_promo(
                 promo_raw, user["id"],
-                sum(i["price"] * i["qty"] for i in clean))
+                sum(i["price"] * i["qty"] for i in clean), items=clean)
             if ok:
                 promo_code = promo_raw
 
@@ -416,7 +416,7 @@ async def handle_tonconnect_paid(message: types.Message, user: dict,
     subtotal = sum(it["qty"] * it["price"] for it in clean)
     if promo_code:
         ok_promo, _, promo_discount, _ = await db.validate_promo(
-            promo_code, user["id"], subtotal)
+            promo_code, user["id"], subtotal, items=clean)
         if ok_promo:
             subtotal -= promo_discount
         else:

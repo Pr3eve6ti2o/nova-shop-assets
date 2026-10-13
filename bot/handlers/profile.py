@@ -33,6 +33,14 @@ async def render_profile(target, user):
         spent=fmt_money(spent, config.CURRENCY),
         earnings=fmt_money(earned, config.CURRENCY),
         balance=fmt_money(balance, config.CURRENCY))
+    # Port 5.3: loyalty status line (points are tier status, JCF-style).
+    points = await db.loyalty_points_of(user["id"])
+    if points > 0:
+        tier, rate = db.loyalty_tier(points)
+        nxt = db.loyalty_next_tier(points)
+        progress = (f" · {nxt[1]} pts to {nxt[0]}" if nxt else " · top tier")
+        text += (f"\n\n🏅 <b>{tier}</b> member · {points} loyalty points"
+                 f" · earning at {rate}%{progress}")
     if isinstance(target, types.CallbackQuery):
         await edit_text_safe(target, text, kb.profile_kb())
     else:

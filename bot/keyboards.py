@@ -150,6 +150,15 @@ def product_kb(p, qty: int, in_wishlist: bool, rating_avg: float, rating_count: 
     kb.add(InlineKeyboardButton(
         texts.BTN_BUY_NOW.format(price=fmt_money(p["price_cents"] * qty, config.CURRENCY)),
         callback_data=cb("pb", p["id"])))
+    # Restored (port 5.1/5.2): wishlist toggle + reviews entry — the
+    # handlers and texts survived; only these rows were stripped.
+    kb.row(
+        InlineKeyboardButton(
+            "\U0001f494 Wishlist" if in_wishlist else texts.BTN_WISHLIST,
+            callback_data=cb("w", p["id"])),
+        InlineKeyboardButton(
+            texts.BTN_REVIEWS.format(n=rating_count),
+            callback_data=cb("rv", p["id"])))
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data=cb("cat", p["category_id"], 0)))
     kb.row(BTN_MENU)
     return kb
