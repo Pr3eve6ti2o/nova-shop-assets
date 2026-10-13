@@ -168,6 +168,11 @@ DELIVERY_FEE_CENTS: int = _int_env("DELIVERY_FEE_CENTS", 0,
 DEPOSIT_BONUS_PERCENT: int = _int_env("DEPOSIT_BONUS_PERCENT", 5,
                                       min_val=0, max_val=50)
 
+# Returns window (port plan 1.1): days after purchase/delivery during which
+# a customer may request a return. 0 disables returns entirely.
+RETURNS_WINDOW_DAYS: int = _int_env("RETURNS_WINDOW_DAYS", 14,
+                                    min_val=0, max_val=365)
+
 # Opus P0 money-sanity: referral + bonus must never exceed 100%.
 if REFERRAL_PERCENT + DEPOSIT_BONUS_PERCENT > 100:
     raise RuntimeError(

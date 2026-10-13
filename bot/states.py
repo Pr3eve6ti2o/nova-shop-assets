@@ -85,3 +85,11 @@ class CartPromo(StatesGroup):
 
 class BalanceFlow(StatesGroup):
     topup_custom = State()  # waiting for the user to type a custom top-up amount
+
+
+class ReturnFlow(StatesGroup):
+    reason = State()  # waiting for the customer to type the return reason
+
+
+class AdminReturnFlow(StatesGroup):
+    deny_note = State()  # waiting for the admin to type the (required) denial note

@@ -19,5 +19,6 @@ from . import rent_token  # noqa: F401  (Token onboarding: connect merchant's ow
 from . import rent_swap  # noqa: F401  (Token swap: tenant applies -> owner approves -> verified swap)
 from . import support  # noqa: F401  (SupportFlow / AdminReplyFlow states)
 from . import orders  # noqa: F401
+from . import returns  # noqa: F401  (port 1.1: customer return requests)
 from . import profile  # noqa: F401
 from . import admin  # noqa: F401  (admin console + management)

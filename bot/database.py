@@ -1922,16 +1922,24 @@ class Database:
         (atomic compare-and-set); returns True if a row was updated."""
         async with self._claim_lock:
             async with self._db() as db:
+                now = utcnow_iso()
+                # Port 1.2: stamp fulfilment timestamps on transitions.
+                stamp = (" shipped_at=CASE WHEN ?='shipped' THEN ?"
+                         " ELSE shipped_at END,"
+                         " delivered_at=CASE WHEN ?='delivered' THEN ?"
+                         " ELSE delivered_at END")
                 if only_if_status is None:
                     cur = await db.execute(
-                        "UPDATE orders SET status=?, updated_at=? WHERE id=?",
-                        (status, utcnow_iso(), order_id),
+                        "UPDATE orders SET status=?, updated_at=?," + stamp +
+                        " WHERE id=?",
+                        (status, now, status, now, status, now, order_id),
                     )
                 else:
                     cur = await db.execute(
-                        "UPDATE orders SET status=?, updated_at=?"
+                        "UPDATE orders SET status=?, updated_at=?," + stamp +
                         " WHERE id=? AND status=?",
-                        (status, utcnow_iso(), order_id, only_if_status),
+                        (status, now, status, now, status, now,
+                         order_id, only_if_status),
                     )
                 # Capture rowcount BEFORE commit: reading cur.rowcount after an
                 # await (e.g. commit) can return a stale/wrong value under
@@ -1941,6 +1949,195 @@ class Database:
                 won = cur.rowcount > 0
                 await db.commit()
                 return won
+
+    # ------------------------------------------------------------- returns
+    # Port plan 1.1 (DoktorShift returns pattern): customer request ->
+    # admin approve/deny -> refund. The status flip out of 'requested' is
+    # the atomic claim: only the decider who wins it may refund, so a
+    # double-tap or two admins acting at once can never refund twice.
+
+    RETURNABLE_STATUSES = ("confirmed", "processing", "shipped", "delivered")
+    OPEN_RETURN_STATUSES = ("requested", "approved")
+
+    async def create_return(self, user_id: int, order_id: int,
+                            reason: str) -> int:
+        """Create a return request. Raises ValueError with a user-safe
+        message when the order is not returnable."""
+        import config as cfg
+        window_days = getattr(cfg, "RETURNS_WINDOW_DAYS", 14)
+        if window_days <= 0:
+            raise ValueError("Returns are not currently accepted.")
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValueError("A reason is required.")
+        if len(reason) > 1000:
+            raise ValueError("Reason is too long (1000 characters max).")
+        async with self._claim_lock:
+            async with self._db() as db:
+                async with db.execute(
+                    "SELECT * FROM orders WHERE id=?", (order_id,)) as cur:
+                    order = await cur.fetchone()
+                if not order or order["user_id"] != user_id:
+                    raise ValueError("Order not found.")
+                if order["status"] not in self.RETURNABLE_STATUSES:
+                    raise ValueError(
+                        "This order can't be returned in its current state.")
+                base = order["delivered_at"] or order["updated_at"] \
+                    or order["created_at"]
+                if base:
+                    from datetime import datetime, timedelta, timezone
+                    try:
+                        when = datetime.fromisoformat(
+                            str(base).replace("Z", "+00:00"))
+                        if when.tzinfo is None:
+                            when = when.replace(tzinfo=timezone.utc)
+                        if datetime.now(timezone.utc) - when > timedelta(
+                                days=window_days):
+                            raise ValueError(
+                                "The return window for this order has closed.")
+                    except ValueError:
+                        raise
+                    except Exception:
+                        pass  # unparseable legacy timestamp: don't block
+                async with db.execute(
+                    "SELECT id FROM returns WHERE order_id=? AND status IN"
+                    " ('requested','approved')", (order_id,)) as cur:
+                    if await cur.fetchone():
+                        raise ValueError(
+                            "A return for this order is already in progress.")
+                cur = await db.execute(
+                    "INSERT INTO returns(order_id, user_id, reason, status,"
+                    " created_at) VALUES (?, ?, ?, 'requested', ?)",
+                    (order_id, user_id, reason, utcnow_iso()))
+                rid = cur.lastrowid
+                await db.commit()
+                return rid
+
+    async def get_return(self, return_id: int):
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT * FROM returns WHERE id=?", (return_id,)) as cur:
+                return await cur.fetchone()
+
+    async def get_open_return(self, order_id: int):
+        """The open (requested/approved) return for an order, if any."""
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT * FROM returns WHERE order_id=? AND status IN"
+                " ('requested','approved') ORDER BY id DESC LIMIT 1",
+                (order_id,)) as cur:
+                return await cur.fetchone()
+
+    async def list_returns(self, status: str = None, limit: int = 20,
+                           offset: int = 0):
+        async with self._db() as db:
+            if status:
+                async with db.execute(
+                    "SELECT * FROM returns WHERE status=?"
+                    " ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (status, limit, offset)) as cur:
+                    return await cur.fetchall()
+            async with db.execute(
+                "SELECT * FROM returns ORDER BY id DESC LIMIT ? OFFSET ?",
+                (limit, offset)) as cur:
+                return await cur.fetchall()
+
+    async def returns_count(self, status: str = None) -> int:
+        async with self._db() as db:
+            if status:
+                async with db.execute(
+                    "SELECT COUNT(*) c FROM returns WHERE status=?",
+                    (status,)) as cur:
+                    return (await cur.fetchone())["c"]
+            async with db.execute("SELECT COUNT(*) c FROM returns") as cur:
+                return (await cur.fetchone())["c"]
+
+    async def decide_return(self, return_id: int, admin_id: int,
+                            approve: bool, note: str = "",
+                            refund_target: str = "balance") -> str:
+        """Decide a return request atomically.
+
+        Returns the outcome: 'refunded' (balance credited), 'approved'
+        (manual refund still to perform), or 'denied'. Raises ValueError
+        if the return was already decided or the input is invalid.
+        Denial requires a note (the customer sees it)."""
+        note = (note or "").strip()
+        if not approve and not note:
+            raise ValueError("A note is required when denying a return.")
+        if approve and refund_target not in ("balance", "manual"):
+            raise ValueError("refund_target must be 'balance' or 'manual'.")
+        # Phase 1 (under the claim lock): win the 'requested' flip and
+        # record the decision + refund target in the same UPDATE.
+        async with self._claim_lock:
+            async with self._db() as db:
+                async with db.execute(
+                    "SELECT * FROM returns WHERE id=?", (return_id,)) as cur:
+                    ret = await cur.fetchone()
+                if not ret:
+                    raise ValueError("Return not found.")
+                new_status = "approved" if approve else "denied"
+                cur = await db.execute(
+                    "UPDATE returns SET status=?, admin_note=?, decided_at=?,"
+                    " decided_by=?, refund_target=? WHERE id=?"
+                    " AND status='requested'",
+                    (new_status, note or None, utcnow_iso(), admin_id,
+                     refund_target if approve else None, return_id))
+                won = cur.rowcount > 0
+                await db.commit()
+                if not won:
+                    raise ValueError("This return was already decided.")
+                order_id, user_id = ret["order_id"], ret["user_id"]
+        # Phase 2 (lock released — set_order_status takes the same lock):
+        # the committed claim above is the only path here, so the refund
+        # below can still only happen once.
+        if not approve:
+            return "denied"
+        if refund_target == "manual":
+            return "approved"
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT total_cents, status FROM orders WHERE id=?",
+                (order_id,)) as cur:
+                order = await cur.fetchone()
+        total = int(order["total_cents"]) if order else 0
+        if total > 0:
+            await self.add_balance(user_id, total, tx_type="refund",
+                                   order_id=order_id)
+        async with self._db() as db:
+            await db.execute(
+                "UPDATE returns SET status='refunded', refund_cents=?"
+                " WHERE id=? AND status='approved'",
+                (total, return_id))
+            await db.commit()
+        if order and order["status"] != "refunded":
+            await self.set_order_status(order_id, "refunded")
+        return "refunded"
+
+    async def mark_return_refunded(self, return_id: int,
+                                   refund_cents: int) -> bool:
+        """Close a manually-refunded return (admin confirms the external
+        refund happened). Only valid from 'approved' + manual target."""
+        if refund_cents < 0:
+            raise ValueError("refund_cents must be >= 0")
+        order_id = None
+        async with self._claim_lock:
+            async with self._db() as db:
+                cur = await db.execute(
+                    "UPDATE returns SET status='refunded', refund_cents=?"
+                    " WHERE id=? AND status='approved'"
+                    " AND refund_target='manual'",
+                    (refund_cents, return_id))
+                won = cur.rowcount > 0
+                if won:
+                    async with db.execute(
+                        "SELECT order_id FROM returns WHERE id=?",
+                        (return_id,)) as cur2:
+                        row = await cur2.fetchone()
+                    order_id = row["order_id"] if row else None
+                await db.commit()
+        if won and order_id:
+            await self.set_order_status(order_id, "refunded")
+        return won
 
     async def cancel_order_atomic(self, order_id: int) -> bool:
         """P1-3: Atomically cancel order AND release promo in one transaction.

@@ -44,4 +44,4 @@ async def mask_of(tg_id: int) -> int:
     return mask & config.PERM_ALL
 
 
-from . import panel, catalog, orders, users, promos, broadcast, maintenance  # noqa: E402
+from . import panel, catalog, orders, users, promos, broadcast, maintenance, returns  # noqa: E402

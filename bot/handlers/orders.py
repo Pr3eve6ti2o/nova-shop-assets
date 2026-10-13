@@ -125,6 +125,13 @@ async def show_order_detail(target, oid: int, user: dict):
         markup.inline_keyboard.insert(
             2, [InlineKeyboardButton(texts.BTN_CANCEL_ORDER,
                                     callback_data=f"oc:{oid}")])
+    # Port 1.1: append a return entry point for returnable orders with no
+    # open return. Existing buttons are not modified.
+    if order["status"] in db.RETURNABLE_STATUSES:
+        _open = await db.get_open_return(oid)
+        if not _open:
+            markup.inline_keyboard.append([InlineKeyboardButton(
+                "↩️ Request return", callback_data=f"rtn:new:{oid}")])
     if isinstance(target, types.CallbackQuery):
         await edit_text_safe(target, text, markup)
     else:
