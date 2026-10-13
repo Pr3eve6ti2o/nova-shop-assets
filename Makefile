@@ -9,6 +9,9 @@ install: ## Install bot dependencies into the current environment
 run: ## Run the bot (polling by default)
 	cd bot && python app.py
 
+doctor:
+	python3 tools/doctor.py
+
 test: ## Run the test suite
 	python -m pytest bot/tests -q
 
