@@ -60,11 +60,11 @@ def test_config():
 def _test_config_body():
     import config
     # empty ADMINS -> []
-    os.environ["BOT_TOKEN"] = "test-token"
+    os.environ["BOT_TOKEN"] = "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     os.environ["ADMINS"] = ""
     importlib.reload(config)
-    assert config.ADMINS == [], config.ADMINS
-    assert config.BOT_TOKEN == "test-token"
+    assert config.ADMINS == frozenset(), config.ADMINS
+    assert config.BOT_TOKEN == "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     assert config.PAYMENTS_PROVIDER_TOKEN is None
     assert config.STARS_PER_USD == 60
     assert config.CURRENCY == "USD"
@@ -72,7 +72,7 @@ def _test_config_body():
 
     os.environ["ADMINS"] = "123456789, 987654321 ,"
     importlib.reload(config)
-    assert config.ADMINS == [123456789, 987654321], config.ADMINS
+    assert config.ADMINS == frozenset({123456789, 987654321}), config.ADMINS
 
     os.environ["ADMINS"] = "abc"
     try:
@@ -92,7 +92,7 @@ def _test_config_body():
         raise AssertionError("missing BOT_TOKEN should raise RuntimeError")
 
     # restore sane env for the rest of the suite
-    os.environ["BOT_TOKEN"] = "test-token"
+    os.environ["BOT_TOKEN"] = "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     os.environ["ADMINS"] = ""
     importlib.reload(config)
 
@@ -143,6 +143,18 @@ def test_cb_namespaced_prefixes():
             raise AssertionError(f"cb({bad!r}) should have raised ValueError")
         except ValueError:
             pass
+
+
+def test_cb_stepper_deltas():
+    """Regression test: cb() must accept the quantity steppers' "+1"
+    delta (keyboards product_kb/cart_kb). The usability smoke found
+    product cards crashing on this on 2026-10-13."""
+    from utils import cb
+    assert cb("pa", 1, "+1") == "pa:1:+1"
+    assert cb("pa", 1, "-1") == "pa:1:-1"
+    assert cb("cq", 2, "+1") == "cq:2:+1"
+    # A bare '+' injection into a user-controlled part is still just a
+    # plus — but whitespace/quotes/semicolons stay rejected (above).
 
 
 def test_callback_data_length():
@@ -468,7 +480,7 @@ def test_payment_rails():
 
 def _payment_rails_body(cp, cfg, importlib):
     async def run():
-        os.environ["BOT_TOKEN"] = "test-token"
+        os.environ["BOT_TOKEN"] = "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         # Case 1: nothing configured -> stars only (COD removed for digital-only)
         for k in ("CRYPTOBOT_TOKEN", "PAYMENTS_PROVIDER_TOKEN", "XPUB_BTC",
                   "XPUB_ETH", "XPUB_TRX", "TON_DEPOSIT_ADDRESS"):
@@ -485,8 +497,8 @@ def _payment_rails_body(cp, cfg, importlib):
         # Case 2: everything on -> balance, stars, cryptobot, card, crypto
         os.environ["CRYPTOBOT_TOKEN"] = "cb-test"
         os.environ["PAYMENTS_PROVIDER_TOKEN"] = "stripe-test"
-        os.environ["XPUB_BTC"] = "zpub-test"
-        os.environ["TON_DEPOSIT_ADDRESS"] = "EQ-test"
+        os.environ["XPUB_BTC"] = "zpub6jftahH18ngZw8pWFPu9ff2FJLn2WGdipSRX1NZ9uUN6m2oCedCycnGtJWMDaQ7ez8qXt5Ru9bcFifYHfXBg9RLS9g1RjmUC1L2dsCsVGoy"
+        os.environ["TON_DEPOSIT_ADDRESS"] = "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         importlib.reload(cfg)
         importlib.reload(cp)
         rails = await cp.payment_rails(None, 1000)
@@ -544,3 +556,27 @@ if __name__ == "__main__":
 
 
 # The focused unit tests in test_webapp_auth.py are run by CI via unittest discovery.
+
+
+# ------------------------------------------------------------- unittest wiring
+def load_tests(loader, tests, pattern):
+    """These tests are module-level functions (pytest style), which
+    `unittest discover` — the project's own test command — silently
+    collected as ZERO tests for this file (found by the usability
+    smoke, 2026-10-13: the cb() regression test lived here and never
+    ran). Adapt them into the unittest run so `make test` is honest.
+    """
+    import unittest as _u
+    suite = _u.TestSuite()
+    for name, fn in sorted(globals().items()):
+        if not (name.startswith("test_") and callable(fn)):
+            continue
+        if name == "test_hd_vectors" and \
+                importlib.util.find_spec("hdwallet") is None:
+            def _skip():
+                raise _u.SkipTest("hdwallet package not installed")
+            suite.addTest(_u.FunctionTestCase(
+                _skip, description="test_hd_vectors (skipped)"))
+        else:
+            suite.addTest(_u.FunctionTestCase(fn, description=name))
+    return suite

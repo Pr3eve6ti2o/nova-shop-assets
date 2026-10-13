@@ -1185,7 +1185,7 @@ class Database:
                     if not order:
                         await db.execute("ROLLBACK")
                         return False, "not_found"
-                    if order["status"] == "fulfilled":
+                    if order["fulfilled_at"]:
                         await db.execute("ROLLBACK")
                         return False, "already_fulfilled"
 
@@ -1239,9 +1239,14 @@ class Database:
                                     await db.execute("ROLLBACK")
                                     return False, f"out of stock: {p['name']}"
 
+                    # Fulfilment marker, NOT a status: 'fulfilled' is
+                    # not in the orders CHECK vocabulary (confirmed →
+                    # shipped → delivered is canonical) — writing it
+                    # raised IntegrityError on every real fulfilment
+                    # (usability-smoke find, 2026-10-13).
                     await db.execute(
-                        "UPDATE orders SET status='fulfilled', updated_at=?"
-                        " WHERE id=?", (now, order_id),
+                        "UPDATE orders SET fulfilled_at=?, updated_at=?"
+                        " WHERE id=?", (now, now, order_id),
                     )
                     await db.execute("COMMIT")
                     return True, ""

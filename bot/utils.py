@@ -63,6 +63,9 @@ def cb(*parts) -> str:
     # Opus P1: validate parts contain only safe characters. Colons are
     # allowed in hardcoded namespace prefixes (e.g. "ad:ord") but the
     # character whitelist prevents injection of malicious content.
+    # '+' is allowed for the quantity steppers' "+1" delta (keyboards
+    # product_kb/cart_kb) — found by the usability smoke: without it,
+    # opening a product card raised ValueError in this validator.
     # User-controlled values must still be validated by callers before
     # being passed here.
     import re
@@ -71,7 +74,7 @@ def cb(*parts) -> str:
         s = str(p)
         if not s:
             raise ValueError(f"callback part must be non-empty: {s!r}")
-        if not re.fullmatch(r"[A-Za-z0-9_:\-]+", s):
+        if not re.fullmatch(r"[A-Za-z0-9_:\-+]+", s):
             raise ValueError(f"callback part has unsafe characters: {s!r}")
         cleaned.append(s)
     data = ":".join(cleaned)

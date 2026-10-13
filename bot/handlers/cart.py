@@ -23,7 +23,7 @@ async def render_cart(target, user_id: int, state: FSMContext, dropped: list = N
     dropped = list(dropped or [])
     for it in list(items):
         p = await db.get_product(it["product_id"])
-        if not product_available(p, it["qty"]):
+        if not await product_available(p, it["qty"]):
             await db.cart_remove(user_id, it["product_id"])
             dropped.append(it["name"])
             items = [i for i in items if i["product_id"] != it["product_id"]]
@@ -125,7 +125,7 @@ async def cb_cart_qty(query: types.CallbackQuery, state: FSMContext):
         # Opus: upper bound — silently ignore, matching shop stepper behaviour.
         await query.answer()
         return
-    if new_qty > 0 and not product_available(p, new_qty):
+    if new_qty > 0 and not await product_available(p, new_qty):
         await query.answer(texts.ERR_OUT_OF_STOCK, show_alert=True)
         return
     # Atomic adjust prevents read-modify-write race on rapid taps
