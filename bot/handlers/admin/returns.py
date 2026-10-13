@@ -17,7 +17,7 @@ import config
 import texts
 from loader import bot, db, dp
 from states import AdminReturnFlow
-from utils import fmt_money
+from utils import fmt_money, h
 
 _STATUS_ICON = {"requested": "🕐", "approved": "✅",
                 "denied": "⛔", "refunded": "💸"}
@@ -96,10 +96,10 @@ async def _render_detail(query, rid: int):
         f"{r['status']}",
         f"Order: #{r['order_id']} (total {total})",
         f"Requested: {r['created_at']}",
-        f"\n<b>Customer's reason:</b>\n{r['reason']}",
+        f"\n<b>Customer's reason:</b>\n{h(r['reason'])}",
     ]
     if r["admin_note"]:
-        lines.append(f"\n<b>Admin note:</b>\n{r['admin_note']}")
+        lines.append(f"\n<b>Admin note:</b>\n{h(r['admin_note'])}")
     if r["status"] == "refunded":
         lines.append(f"Refunded: {fmt_money(r['refund_cents'] or 0)} "
                      f"via {r['refund_target']}")

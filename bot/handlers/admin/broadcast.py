@@ -23,7 +23,7 @@ async def cb_broadcast(query: types.CallbackQuery, state: FSMContext):
     await query.message.answer(texts.MSG_BROADCAST_ASK, reply_markup=kb.force_reply())
 
 
-@dp.message_handler(state=BroadcastFlow.content,
+@dp.message_handler(state=BroadcastFlow.content, is_admin=config.PERM_BROADCAST,
                     content_types=types.ContentType.ANY)
 async def bc_content(message: types.Message, state: FSMContext):
     if message.text and await handle_escape(message, state):
@@ -45,14 +45,14 @@ async def bc_content(message: types.Message, state: FSMContext):
                          reply_markup=kb.broadcast_confirm_kb())
 
 
-@dp.callback_query_handler(text="bcx", state=BroadcastFlow.confirm)
+@dp.callback_query_handler(text="bcx", state=BroadcastFlow.confirm, is_admin=config.PERM_BROADCAST)
 async def bc_cancel(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     await state.finish()
     await edit_text_safe(query, texts.MSG_WIZARD_CANCELLED, None)
 
 
-@dp.callback_query_handler(text="bcy", state=BroadcastFlow.confirm)
+@dp.callback_query_handler(text="bcy", state=BroadcastFlow.confirm, is_admin=config.PERM_BROADCAST)
 async def bc_send(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     data = await state.get_data()

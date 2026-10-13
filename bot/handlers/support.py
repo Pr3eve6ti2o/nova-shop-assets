@@ -10,6 +10,7 @@ import texts
 from loader import bot, db, dp
 from states import SupportFlow, AdminReplyFlow
 from .common import get_or_register, edit_text_safe, handle_escape, notify_admins
+from utils import h
 import config
 
 
@@ -119,8 +120,11 @@ async def cb_support_list(query: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("supt:"), state="*")
 async def cb_support_ticket(query: types.CallbackQuery):
+    try:
+        tid = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        return await query.answer(texts.ERR_GENERIC, show_alert=True)
     await query.answer()
-    tid = int(query.data.split(":")[1])
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     t = await db.ticket_get(tid)
     if not t or t["user_id"] != user["id"]:
@@ -130,14 +134,14 @@ async def cb_support_ticket(query: types.CallbackQuery):
     # Port 3.1: render the thread, not just the subject line.
     thread = await db.ticket_messages(tid, limit=10)
     lines = [texts.MSG_SUPPORT_TICKET_DETAIL.format(
-        id=t["id"], status=t["status"], subject=t["subject"],
+        id=t["id"], status=t["status"], subject=h(t["subject"] or ""),
         created=created or "\u2014")]
     if thread:
         lines.append("")
         for m in thread:
             who = "\U0001f9d1 You" if m["sender"] == "user" else "\U0001f6df Support"
             when = (m["created_at"] or "")[:16].replace("T", " ")
-            lines.append(f"<b>{who}</b> \u00b7 {when}\n{m['body']}")
+            lines.append(f"<b>{who}</b> \u00b7 {when}\n{h(m['body'])}")
     markup = types.InlineKeyboardMarkup()
     if t["status"] == "open":
         markup.add(InlineKeyboardButton(
@@ -151,7 +155,10 @@ async def cb_support_ticket(query: types.CallbackQuery):
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("supa:"),
                            state="*")
 async def cb_support_add(query: types.CallbackQuery, state: FSMContext):
-    tid = int(query.data.split(":")[1])
+    try:
+        tid = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        return await query.answer(texts.ERR_GENERIC, show_alert=True)
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     t = await db.ticket_get(tid)
     if not t or t["user_id"] != user["id"] or t["status"] != "open":
@@ -186,7 +193,7 @@ async def support_followup(message: types.Message, state: FSMContext):
         return await message.answer(f"\u26a0\ufe0f {e}")
     await notify_admins(
         f"\u2709\ufe0f <b>Ticket #{tid}</b> \u2014 new message from the "
-        f"customer:\n\n{text}",
+        f"customer:\n\n{h(text)}",
         min_bit=0, reply_markup=kb.admin_reply_kb(user["tg_id"]),
         topic=config.ADMIN_TOPIC_SUPPORT or None)
     await message.answer("\u2705 Added to your ticket. We'll reply here.")
@@ -194,7 +201,10 @@ async def support_followup(message: types.Message, state: FSMContext):
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("suptc:"), state="*")
 async def cb_support_ticket_close(query: types.CallbackQuery):
-    tid = int(query.data.split(":")[1])
+    try:
+        tid = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        return await query.answer(texts.ERR_GENERIC, show_alert=True)
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     if await _close_ticket(tid, user["id"]):
         await query.answer(texts.TOAST_TICKET_CLOSED)
@@ -230,8 +240,8 @@ async def support_message(message: types.Message, state: FSMContext):
     ticket_id = await db.ticket_create(user["id"], text)
     await notify_admins(
         texts.MSG_SUPPORT_TICKET_ADMIN.format(
-            ticket_id=ticket_id, name=user["name"] or "?",
-            tg_id=user["tg_id"], text=text),
+            ticket_id=ticket_id, name=h(user["name"] or "?"),
+            tg_id=user["tg_id"], text=h(text)),
         min_bit=0, reply_markup=kb.admin_reply_kb(user["tg_id"]),
         topic=config.ADMIN_TOPIC_SUPPORT or None)
     await message.answer(texts.MSG_SUPPORT_TICKET_OPEN.format(id=ticket_id))
@@ -259,6 +269,11 @@ async def cb_support_reply(query: types.CallbackQuery, state: FSMContext):
 
 @dp.message_handler(state=AdminReplyFlow.waiting_text)
 async def admin_reply_text(message: types.Message, state: FSMContext):
+    # Defence in depth (stress-audit LOW-3): this handler was gated by
+    # FSM state alone; re-check the same gate as the reply button.
+    if not await _support_admin(message.from_user.id):
+        await state.finish()
+        return
     if await handle_escape(message, state):
         return
     data = await state.get_data()

@@ -58,6 +58,7 @@ class Webhooks(unittest.TestCase):
             async def handler(request):
                 seen["body"] = await request.read()
                 seen["sig"] = request.headers.get("X-Nova-Signature")
+                seen["ts"] = request.headers.get("X-Nova-Timestamp")
                 seen["event"] = request.headers.get("X-Nova-Event")
                 return web.Response(status=200)
 
@@ -76,9 +77,14 @@ class Webhooks(unittest.TestCase):
                 payload = json.loads(seen["body"])
                 self.assertEqual(payload["data"]["order_id"], 7)
                 self.assertEqual(seen["event"], "order.paid")
+                # Signature covers "<timestamp>.<body>" (stress-audit
+                # LOW-4: verbatim replay protection); the timestamp
+                # header must be present and fresh.
+                self.assertTrue(seen["ts"] and seen["ts"].isdigit())
                 self.assertEqual(
                     seen["sig"],
-                    hmac.new(b"s3cret", seen["body"],
+                    hmac.new(b"s3cret",
+                             seen["ts"].encode() + b"." + seen["body"],
                              hashlib.sha256).hexdigest())
             finally:
                 await runner.cleanup()

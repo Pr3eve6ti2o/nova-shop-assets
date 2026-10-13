@@ -1,5 +1,6 @@
 """Payments: pre-checkout verification, successful payment, fulfillment."""
 import logging
+import uuid
 
 from aiogram import types
 from aiogram.dispatcher import FSMContext
@@ -138,7 +139,8 @@ async def payment_success(message: types.Message, state: FSMContext):
         # silently drop it. Record the payment and alert admins for manual
         # reconciliation.
         logger.error("payment for unknown/foreign order: %s", sp.invoice_payload)
-        charge_id = sp.telegram_payment_charge_id or sp.invoice_payload or ""
+        charge_id = (sp.telegram_payment_charge_id or sp.invoice_payload
+                or f"nochargeid_{uuid.uuid4().hex}")
         await db.record_payment(
             provider=provider, external_id=charge_id,
             user_id=user["id"], order_id=None,
@@ -170,7 +172,8 @@ async def payment_success(message: types.Message, state: FSMContext):
             f"{sp.currency}, expected {expected_amount}",
             min_bit=config.PERM_ORDERS)
         # Still record it — do not lose the money — but do not fulfill.
-        charge_id = sp.telegram_payment_charge_id or sp.invoice_payload or ""
+        charge_id = (sp.telegram_payment_charge_id or sp.invoice_payload
+                or f"nochargeid_{uuid.uuid4().hex}")
         await db.record_payment(
             provider=provider, external_id=charge_id,
             user_id=user["id"], order_id=oid,
@@ -183,7 +186,8 @@ async def payment_success(message: types.Message, state: FSMContext):
     # Fall back to the invoice payload if Telegram ever sends an empty charge
     # ID (e.g. some Stars flows) -- otherwise every such payment would collide
     # on UNIQUE(provider, "") and only the first would be recorded.
-    charge_id = sp.telegram_payment_charge_id or sp.invoice_payload or ""
+    charge_id = (sp.telegram_payment_charge_id or sp.invoice_payload
+                or f"nochargeid_{uuid.uuid4().hex}")
     is_new = await db.record_payment(
         provider=provider, external_id=charge_id,
         user_id=user["id"], order_id=oid,

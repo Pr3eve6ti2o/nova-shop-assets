@@ -19,7 +19,7 @@ async def cb_users_home(query: types.CallbackQuery, state: FSMContext):
     await query.message.answer(texts.MSG_USER_SEARCH_ASK, reply_markup=kb.force_reply())
 
 
-@dp.message_handler(state=UserSearch.query)
+@dp.message_handler(state=UserSearch.query, is_admin=config.PERM_USERS)
 async def user_search_received(message: types.Message, state: FSMContext):
     if await handle_escape(message, state):
         return
