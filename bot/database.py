@@ -1163,9 +1163,11 @@ class Database:
             return
         async with self._db() as db:
             await db.execute(
-                "INSERT INTO cart_items(user_id, product_id, qty) VALUES (?, ?, ?)"
-                " ON CONFLICT(user_id, product_id) DO UPDATE SET qty=qty+excluded.qty",
-                (user_id, product_id, qty),
+                "INSERT INTO cart_items(user_id, product_id, qty, updated_at)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(user_id, product_id) DO UPDATE SET"
+                " qty=qty+excluded.qty, updated_at=excluded.updated_at",
+                (user_id, product_id, qty, utcnow_iso()),
             )
             await db.commit()
 
@@ -1175,11 +1177,12 @@ class Database:
         Prevents read-modify-write race on rapid taps."""
         async with self._db() as db:
             await db.execute(
-                "INSERT INTO cart_items(user_id, product_id, qty) VALUES (?, ?, ?)"
+                "INSERT INTO cart_items(user_id, product_id, qty, updated_at)"
+                " VALUES (?, ?, ?, ?)"
                 " ON CONFLICT(user_id, product_id) DO UPDATE SET"
-                " qty = max(?, min(?, qty + ?))",
+                " qty = max(?, min(?, qty + ?)), updated_at=excluded.updated_at",
                 (user_id, product_id, max(min_qty, min(delta, max_qty)),
-                 min_qty, max_qty, delta),
+                 utcnow_iso(), min_qty, max_qty, delta),
             )
             async with db.execute(
                 "SELECT qty FROM cart_items WHERE user_id=? AND product_id=?",
@@ -1203,11 +1206,47 @@ class Database:
                 )
             else:
                 await db.execute(
-                    "INSERT INTO cart_items(user_id, product_id, qty) VALUES (?, ?, ?)"
-                    " ON CONFLICT(user_id, product_id) DO UPDATE SET qty=excluded.qty",
-                    (user_id, product_id, qty),
+                    "INSERT INTO cart_items(user_id, product_id, qty,"
+                    " updated_at) VALUES (?, ?, ?, ?)"
+                    " ON CONFLICT(user_id, product_id) DO UPDATE SET"
+                    " qty=excluded.qty, updated_at=excluded.updated_at",
+                    (user_id, product_id, qty, utcnow_iso()),
                 )
             await db.commit()
+
+    async def cart_mirror(self, user_id: int, items):
+        """Replace the server cart with a client-reported snapshot
+        (port 8.1: Mini App cart_sync). items = [{product_id, qty}] —
+        already validated by the caller. One transaction."""
+        now = utcnow_iso()
+        async with self._db() as db:
+            await db.execute("DELETE FROM cart_items WHERE user_id=?",
+                             (user_id,))
+            for it in items:
+                await db.execute(
+                    "INSERT INTO cart_items(user_id, product_id, qty,"
+                    " updated_at) VALUES (?, ?, ?, ?)",
+                    (user_id, it["product_id"], it["qty"], now))
+            await db.commit()
+
+    async def carts_idle(self, idle_minutes: int, limit: int = 200):
+        """Carts untouched for >= idle_minutes (port Part 2 input):
+        one row per user with item count, total cents, last activity."""
+        from datetime import datetime, timedelta, timezone
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(minutes=idle_minutes)).isoformat(
+                      timespec="seconds")
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT ci.user_id AS user_id, COUNT(*) AS items,"
+                " SUM(ci.qty * p.price_cents) AS total_cents,"
+                " MAX(ci.updated_at) AS last_at"
+                " FROM cart_items ci JOIN products p ON p.id = ci.product_id"
+                " GROUP BY ci.user_id"
+                " HAVING MAX(ci.updated_at) <= ?"
+                " ORDER BY last_at ASC LIMIT ?",
+                (cutoff, limit)) as cur:
+                return await cur.fetchall()
 
     async def cart_remove(self, user_id: int, product_id: int):
         await self.cart_set_qty(user_id, product_id, 0)
@@ -1318,7 +1357,8 @@ class Database:
     async def cart_items(self, user_id: int):
         async with self._db() as db:
             async with db.execute(
-                "SELECT ci.product_id, ci.qty, p.name, p.price_cents, p.stock,"
+                "SELECT ci.product_id, ci.qty, ci.updated_at, p.name,"
+                " p.price_cents, p.stock,"
                 " p.kind, p.is_active, p.photo_file_id"
                 " FROM cart_items ci JOIN products p ON p.id = ci.product_id"
                 " WHERE ci.user_id=? ORDER BY ci.rowid",

@@ -174,6 +174,39 @@ async def webapp_data(message: types.Message, state: FSMContext):
         await message.answer(texts.MSG_MINIAPP_BAD_PAYLOAD,
                              reply_markup=await main_reply_kb(message.from_user.id))
         return
+    # Port 8.1: cart_sync piggyback — the Mini App includes its current
+    # cart in non-checkout sendData calls (get_orders / get_referral), so
+    # the server keeps a last-known cart for abandoned-cart recovery.
+    # Same validation rules as checkout: known active products only,
+    # qty 1..99 clamped to stock. Mirroring never blocks the real action.
+    sync_raw = payload.get("cart_sync")
+    if isinstance(sync_raw, list) and len(sync_raw) <= MAX_ITEMS:
+        try:
+            _user, _ = await get_or_register(message.from_user.id,
+                                             message.from_user.full_name)
+            _clean = []
+            for _it in sync_raw:
+                try:
+                    _pid = int(_it.get("id"))
+                    _qty = int(_it.get("qty"))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if not 1 <= _qty <= 99:
+                    continue
+                _p = await db.get_product(_pid)
+                if not _p or not _p["is_active"]:
+                    continue
+                if _p["stock"] != -1:
+                    _qty = min(_qty, _p["stock"])
+                if _qty >= 1:
+                    _clean.append({"product_id": _pid, "qty": _qty})
+            # Only mirror a non-empty snapshot: an empty app cart must
+            # never erase items the customer added inside the bot itself.
+            if _clean:
+                await db.cart_mirror(_user["id"], _clean)
+        except Exception as e:
+            logger.warning("cart_sync failed for %s: %s",
+                           message.from_user.id, e)
     # Get order history (from Mini App "My Orders").
     if payload.get("type") == "get_orders":
         user, _ = await get_or_register(message.from_user.id,

@@ -401,8 +401,16 @@
   /* ---------------- derived helpers ---------------- */
   function maxQty(p) { return p.stock === -1 ? 99 : Math.max(0, Math.min(99, Number(p.stock) || 0)); }
   function isDigital(p) { return p.kind === "digital" || p.stock === -1; }
-  function cartCount() {
-    var n = 0;
+  /* Port 8.1: the current cart as a sync payload for the bot — included
+     in non-checkout sendData calls so the server keeps a last-known cart
+     (abandoned-cart recovery). sendData closes the app (C3), so this
+     piggybacks on sends that already exist; it never sends on its own. */
+  function cartSyncItems() {
+    return Object.keys(S.cart).filter(function (id) { return S.byId[id]; })
+      .map(function (id) { return { id: Number(id), qty: S.cart[id] }; });
+  }
+
+  function cartCount() {    var n = 0;
     Object.keys(S.cart).forEach(function (id) { n += S.cart[id]; });
     return n;
   }
@@ -1420,7 +1428,7 @@
           if (IN_TG && tg.sendData) {
             toast("Opening bot chat with your orders…", "success");
             setTimeout(function () {
-              try { tg.sendData(JSON.stringify({ type: "get_orders" })); } catch (e) {}
+              try { tg.sendData(JSON.stringify({ type: "get_orders", cart_sync: cartSyncItems() })); } catch (e) {}
             }, 700);
           } else {
             toast("Open the store from Telegram to view orders.", "info");
@@ -1434,7 +1442,7 @@
           if (IN_TG && tg.sendData) {
             toast("Opening bot chat with your referral link…", "success");
             setTimeout(function () {
-              try { tg.sendData(JSON.stringify({ type: "get_referral" })); } catch (e) {}
+              try { tg.sendData(JSON.stringify({ type: "get_referral", cart_sync: cartSyncItems() })); } catch (e) {}
             }, 700);
           } else {
             toast("Open the store from Telegram to get your referral link.", "info");
