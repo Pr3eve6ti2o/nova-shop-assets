@@ -33,3 +33,4 @@ admin/.env.local
 miniapp/.tmp/
 miniapp/catalog.json
 miniapp/policies.json
+nova-shop-bot.pid
