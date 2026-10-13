@@ -46,8 +46,16 @@ if an HTTP API is ever added, requests must pass
 ```bash
 python tools/export_catalog.py --db <live-shop-db> \
   && python tools/export_policies.py \
+  && (cd pricing-engine && npm run build:browser) \
   && python tools/build_miniapp_bundle.py
 ```
+
+The Pricing Engine step builds `miniapp/vendor/pricing-engine.js`
+(Dinero.js + Decimal.js, exposed as `window.NovaPricing`) from
+`pricing-engine/`; the bundle builder inlines it before app.js. app.js
+uses it for cart subtotals and the TON Connect nanoton conversion and
+falls back to built-in integer math when it is absent. See
+`pricing-engine/README.md` for the parity contract with the bot.
 
 The `--db` matters: the default path is the repo's placeholder DB, which
 is how an empty bundle (`products: []`, no merchant TON address, TON pay

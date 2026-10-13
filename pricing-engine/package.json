@@ -1,0 +1,20 @@
+{
+  "name": "@nova-shop/pricing-engine",
+  "version": "1.0.0",
+  "description": "Nova Shop Payment & Pricing Engine: Dinero.js fiat money math + Decimal.js crypto amounts. Mirrors the Python bot's integer-cents contract cent-for-cent.",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build:browser": "node build-browser.mjs"
+  },
+  "dependencies": {
+    "decimal.js": "^10.6.0",
+    "dinero.js": "2.0.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.9"
+  }
+}

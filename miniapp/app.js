@@ -430,6 +430,16 @@
     return n;
   }
   function cartSubtotal() {
+    // Payment & Pricing Engine (Dinero.js) when the bundle includes it —
+    // exact integer-cent pricing, identical results to the fallback below.
+    if (window.NovaPricing) {
+      var lines = [];
+      Object.keys(S.cart).forEach(function (id) {
+        var p = S.byId[id];
+        if (p) lines.push({ priceCents: Number(p.price_cents) || 0, qty: S.cart[id] });
+      });
+      return window.NovaPricing.priceOrder({ items: lines }).subtotal;
+    }
     var t = 0;
     Object.keys(S.cart).forEach(function (id) {
       var p = S.byId[id];
@@ -853,12 +863,16 @@
         syncTonButton();
         return;
       }
-      // Convert USD total to nanotons (1 TON = 1e9 nanotons).
-      // Uses the same rate logic as the bot; bot re-validates server-side.
-      var usdTotal = cartSubtotal() / 100;
+      // Convert USD total to nanotons (1 TON = 1e9 nanotons) with the
+      // Pricing Engine's Decimal.js conversion — exact decimal math,
+      // rounded UP, byte-identical to the bot's usd_cents_to_base_units;
+      // the bot re-validates server-side. (Previously binary-float
+      // division + Math.round, which could drift by a nanoton.)
       var tonRate = await fetchTonRate(); // USD per TON
       if (!tonRate) throw new Error("Rate unavailable");
-      var nanoAmount = String(Math.round((usdTotal / tonRate) * 1e9));
+      var nanoAmount = window.NovaPricing
+        ? window.NovaPricing.usdCentsToTonNano(cartSubtotal(), String(tonRate))
+        : String(Math.round((cartSubtotal() / 100 / tonRate) * 1e9));
       var claimCode = tonClaimCode();
       var tx = {
         validUntil: Math.floor(Date.now() / 1000) + 300,

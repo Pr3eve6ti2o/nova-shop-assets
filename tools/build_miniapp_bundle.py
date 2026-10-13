@@ -7,6 +7,8 @@ bundled into ONE self-contained miniapp/dist/index.html:
 
   - styles.css  -> inlined <style>
   - catalog.json -> inlined as window.NOVA_CATALOG (app.js prefers it over fetch)
+  - vendor/pricing-engine.js -> inlined as window.NOVA_PRICING (Payment &
+    Pricing Engine: Dinero.js + Decimal.js; built by pricing-engine/)
   - app.js      -> inlined <script> (localStorage-free; uses Telegram CloudStorage)
 
 Source of truth stays miniapp/index.html + styles.css + app.js + catalog.json.
@@ -61,6 +63,22 @@ def main() -> int:
                     + policies_json.replace("</script", "<\\/script")
                     + ";</script>")
 
+    # Inline the Payment & Pricing Engine (built by pricing-engine/:
+    # `npm run build:browser`). Optional by design: app.js falls back to
+    # its built-in integer math when window.NOVA_PRICING is absent, so a
+    # missing vendor build degrades precision tooling, never the shop.
+    engine_tag = ""
+    engine_path = os.path.join(SRC, "vendor", "pricing-engine.js")
+    if os.path.exists(engine_path):
+        with open(engine_path, encoding="utf-8") as f:
+            engine_js = f.read()
+        engine_tag = ('<script>/*NOVA_PRICING_ENGINE*/\n'
+                      + engine_js.replace("</script", "<\\/script")
+                      + "\n</script>")
+    else:
+        print("WARN: miniapp/vendor/pricing-engine.js missing — bundle "
+              "will rely on app.js fallback math", file=sys.stderr)
+
     # Inline the app script (escape any literal </script> inside strings).
     # Idempotent: strips any previously-inlined NOVA_POLICIES / NOVA_CATALOG
     # blocks and the inline app.js, then re-inlines fresh.
@@ -69,14 +87,17 @@ def main() -> int:
                   html, flags=re.DOTALL)
     html = re.sub(r'<script>window\.NOVA_CATALOG=.*?</script>\n?', '',
                   html, flags=re.DOTALL)
+    html = re.sub(r'<script>/\*NOVA_PRICING_ENGINE\*/.*?</script>\n?', '',
+                  html, flags=re.DOTALL)
     js_safe = js.replace("</script", "<\\/script")
     script_tag = '<script src="app.js"></script>'
     inline_marker = "Nova Shop Mini App \u2014 storefront SPA"
     if script_tag in html:
         html = html.replace(
             script_tag,
-            policies_tag + "\n" + catalog_tag + "\n<script>\n"
-            + js_safe + "\n</script>")
+            policies_tag + "\n" + catalog_tag + "\n"
+            + (engine_tag + "\n" if engine_tag else "")
+            + "<script>\n" + js_safe + "\n</script>")
     elif inline_marker in html:
         # Already-bundled index.html: replace the inline app.js block.
         # Find the last <script> block containing the marker and swap it.
@@ -89,13 +110,15 @@ def main() -> int:
             print("WARN: could not locate inline app.js; appending fresh copy",
                   file=sys.stderr)
             html = html.replace("</body>",
-                                policies_tag + "\n" + catalog_tag + "\n<script>\n"
-                                + js_safe + "\n</script>\n</body>")
+                                policies_tag + "\n" + catalog_tag + "\n"
+                                + (engine_tag + "\n" if engine_tag else "")
+                                + "<script>\n" + js_safe + "\n</script>\n</body>")
         else:
-            # Insert policies/catalog before the (now fresh) app script.
+            # Insert policies/catalog/engine before the (now fresh) app script.
             html = html.replace("<script>\n" + js_safe[:50],
-                                policies_tag + "\n" + catalog_tag
-                                + "\n<script>\n" + js_safe[:50], 1)
+                                policies_tag + "\n" + catalog_tag + "\n"
+                                + (engine_tag + "\n" if engine_tag else "")
+                                + "<script>\n" + js_safe[:50], 1)
     else:
         print(f"ERROR: expected {script_tag!r} or bundled app.js in index.html",
               file=sys.stderr)
