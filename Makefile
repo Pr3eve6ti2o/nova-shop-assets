@@ -32,3 +32,6 @@ seed: ## Seed a demo database (DATABASE_PATH or bot/data/demo.db)
 
 smoke: ## Run offline smoke checks
 	python3 tools/smoke.py
+
+usability: ## Run the usability smoke (fake Telegram API journey)
+	python3 tools/usability_smoke.py
