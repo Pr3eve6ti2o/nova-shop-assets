@@ -1,0 +1,19 @@
+services:
+  bot:
+    build: .
+    image: nova-shop-bot
+    container_name: nova-shop-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Keep the database on the mounted volume.
+      DATABASE_PATH: /app/data/nova_shop.db
+    volumes:
+      - nova-shop-data:/app/data
+    # Uncomment when running in webhook mode behind a reverse proxy:
+    # ports:
+    #   - "8080:8080"
+
+volumes:
+  nova-shop-data:
