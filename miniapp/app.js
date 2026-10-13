@@ -414,7 +414,7 @@
   }
 
   /* ---------------- derived helpers ---------------- */
-  function maxQty(p) { return p.stock === -1 ? 99 : Math.max(0, Math.min(99, Number(p.stock) || 0)); }
+  function maxQty(p) { return p.stock === -1 ? 999 : Math.max(0, Math.min(999, Number(p.stock) || 0)); }
   function isDigital(p) { return p.kind === "digital" || p.stock === -1; }
   /* Port 8.1: the current cart as a sync payload for the bot — included
      in non-checkout sendData calls so the server keeps a last-known cart

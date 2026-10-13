@@ -178,6 +178,10 @@ async def support_followup(message: types.Message, state: FSMContext):
     if await handle_escape(message, state):
         return
     text = (message.text or "").strip()
+    if len(text) > 2000:
+        return await message.answer(
+            "⚠️ That message is too long (max 2,000 characters). "
+            "Please shorten it and send again.")
     data = await state.get_data()
     tid = data.get("followup_ticket")
     await state.finish()
@@ -234,6 +238,10 @@ async def support_message(message: types.Message, state: FSMContext):
     text = (message.text or "").strip()
     if not text:
         return
+    if len(text) > 2000:
+        return await message.answer(
+            "⚠️ That message is too long (max 2,000 characters). "
+            "Please shorten it and send again.")
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
     await state.finish()
     # Port 3.1: the ticket now stores its first message in the thread.
@@ -280,6 +288,10 @@ async def admin_reply_text(message: types.Message, state: FSMContext):
     target = data.get("reply_to")
     reply_ticket = data.get("reply_ticket")
     text = (message.text or "").strip()
+    if len(text) > 2000:
+        return await message.answer(
+            "⚠️ That reply is too long (max 2,000 characters). "
+            "Please shorten it and send again.")
     await state.finish()
     if target and text:
         try:

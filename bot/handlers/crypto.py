@@ -86,8 +86,8 @@ async def _cancel_invoice_at_provider(prior: dict) -> None:
     await db.set_cryptobot_status(inv_id, "cancelled")
 
 
-MIN_TOPUP_CENTS = 100       # $1.00
-MAX_TOPUP_CENTS = 250_000   # $2,500.00
+MIN_TOPUP_CENTS = config.MIN_TOPUP_CENTS  # policy bounds live in config
+MAX_TOPUP_CENTS = config.MAX_TOPUP_CENTS
 
 
 def _valid_topup_amount(amount_cents) -> int:

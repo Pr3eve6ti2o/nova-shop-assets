@@ -139,6 +139,15 @@ PAYMENTS_PROVIDER_TOKEN = (os.getenv("PAYMENTS_PROVIDER_TOKEN") or "").strip() o
 # Opus: upper bounds — a fat-fingered value overcharges by orders of magnitude.
 STARS_PER_USD: int = _int_env("STARS_PER_USD", 60, min_val=1, max_val=10000)
 
+# Top-up bounds (stress-audit Part G): these used to be hardcoded in
+# handlers/crypto.py and handlers/balance.py. They are policy, not
+# safety limits — invoice creation and balance math are safe at any
+# positive amount (CryptoBot's own minimum is ~0.01 USDT) — so they
+# live here, tunable via env. Keep the user-facing texts in sync if
+# you change the defaults (texts.MSG_BALANCE_CUSTOM_*).
+MIN_TOPUP_CENTS: int = _int_env("MIN_TOPUP_CENTS", 50, min_val=1, max_val=100_000_000)
+MAX_TOPUP_CENTS: int = _int_env("MAX_TOPUP_CENTS", 250_000, min_val=1, max_val=100_000_000)
+
 # Opus: validate ISO 4217 shape; Telegram uses currency-specific exponents
 # (JPY=0, KWD=3) so callers must use CURRENCY_EXPONENT, not assume 2.
 CURRENCY: str = (os.getenv("CURRENCY", "USD") or "USD").strip().upper()

@@ -140,6 +140,6 @@ async def msg_review_text(message: types.Message, state: FSMContext):
     user, _ = await get_or_register(message.from_user.id,
                                     message.from_user.full_name)
     await db.add_review(user["id"], int(pid), int(stars),
-                        (message.text or "").strip()[:1000])
+                        (message.text or "").strip()[:500])
     await message.answer(texts.TOAST_REVIEW_SAVED)
     await _render_reviews(message, int(pid), user)

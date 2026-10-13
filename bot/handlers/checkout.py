@@ -305,16 +305,14 @@ async def details_typed(message: types.Message, state: FSMContext):
     address = data.get("address") or user.get("address")
     # Fill the first empty field: phone, then address (delivery only).
     # The share buttons above overwrite at any time.
+    # (Stress-audit Part G: the old >=5-char heuristic was fake
+    # validation — it accepted "12345" as a phone and rejected genuine
+    # short addresses. Any non-empty text is accepted now; text is
+    # guaranteed non-empty by the check above.)
     if not phone:
-        if len(text) < 5:
-            await message.answer(texts.MSG_INVALID_PHONE)
-            return
         await state.update_data(phone=text)
         await db.update_user(user["id"], phone=text)
     elif kind == "delivery" and not address:
-        if len(text) < 5:
-            await message.answer(texts.MSG_INVALID_ADDRESS)
-            return
         await state.update_data(address=text)
         await db.update_user(user["id"], address=text)
     else:

@@ -97,7 +97,24 @@ class RateLimitMiddleware(BaseMiddleware):
         if not await self._allowed_distributed("global", uid, RATE_GLOBAL):
             await query.answer(texts.ERR_RATE_LIMITED, show_alert=True)
             raise CancelHandler()
-        if (query.data or "").startswith(("pay", "cok", "crypto")) or data.get("state"):
+        # Payment bucket: payment callbacks + the two money flows'
+        # states ONLY. The old `or data.get("state")` clause counted
+        # EVERY callback made while in ANY FSM state (search results,
+        # support, wizards) against the 5/min payment budget — pure
+        # browsing burned it. Note the crypto deposit callbacks are
+        # cry:* (the old "crypto" prefix never matched them; the state
+        # clause was silently doing all the work, far too broadly).
+        _state = None
+        _ctx = data.get("state")
+        if _ctx is not None:
+            try:
+                _state = await _ctx.get_state()
+            except Exception:
+                _state = None
+        _pay_state = bool(_state) and _state.split(":")[0] in (
+            "Checkout", "BalanceFlow")
+        if (query.data or "").startswith(
+                ("pay", "cok", "cop", "co", "cry", "bal:", "tup")) or _pay_state:
             if not await self._allowed_distributed("payment", uid, RATE_PAYMENT):
                 await query.answer(texts.ERR_PAY_RATE_LIMITED, show_alert=True)
                 raise CancelHandler()

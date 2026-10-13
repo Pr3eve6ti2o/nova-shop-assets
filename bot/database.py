@@ -1409,6 +1409,14 @@ class Database:
                                   dedup_key: str) -> bool:
         """Atomically claim a campaign send. True = you may send it."""
         async with self._db() as db:
+            # Muted recipients (repeated permanent delivery failures)
+            # never get new send slots — see m013.
+            async with db.execute(
+                    "SELECT campaign_muted FROM users WHERE id=?",
+                    (user_id,)) as cur:
+                row = await cur.fetchone()
+            if row and row["campaign_muted"]:
+                return False
             cur = await db.execute(
                 "INSERT OR IGNORE INTO campaign_sends"
                 "(campaign, user_id, dedup_key, sent_at) VALUES (?, ?, ?, ?)",
@@ -1416,6 +1424,36 @@ class Database:
             claimed = cur.rowcount > 0
             await db.commit()
             return claimed
+
+    async def campaign_note_send_result(self, user_id: int, ok: bool,
+                                        permanent: bool = False):
+        """Track campaign delivery outcomes for dead-recipient pruning.
+
+        A success resets the consecutive-failure counter. A PERMANENT
+        failure (chat not found / bot blocked / user deactivated)
+        increments it; at 3 the user is campaign-muted. Transient
+        failures change nothing — the released claim already retries.
+        """
+        async with self._db() as db:
+            if ok:
+                await db.execute(
+                    "UPDATE users SET campaign_fails=0 WHERE id=?",
+                    (user_id,))
+            elif permanent:
+                await db.execute(
+                    "UPDATE users SET campaign_fails=campaign_fails+1,"
+                    " campaign_muted=CASE WHEN campaign_fails+1>=3"
+                    " THEN 1 ELSE campaign_muted END WHERE id=?",
+                    (user_id,))
+            await db.commit()
+
+    async def user_campaign_muted(self, user_id: int) -> bool:
+        async with self._db() as db:
+            async with db.execute(
+                    "SELECT campaign_muted FROM users WHERE id=?",
+                    (user_id,)) as cur:
+                row = await cur.fetchone()
+                return bool(row and row["campaign_muted"])
 
     async def campaign_release_send(self, campaign: str, user_id: int,
                                     dedup_key: str):

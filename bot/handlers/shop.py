@@ -15,7 +15,7 @@ from .common import (
 )
 from .checkout import start_checkout
 
-PER_PAGE = 6
+PER_PAGE = 10
 
 
 async def _try_delete_user_tap(message: types.Message):
@@ -82,7 +82,7 @@ async def _qty_in_view(state: FSMContext, pid: int) -> int:
 
 
 async def _set_qty_in_view(state: FSMContext, pid: int, qty: int):
-    await state.update_data(**{f"qv:{pid}": max(1, min(99, qty))})
+    await state.update_data(**{f"qv:{pid}": max(1, min(999, qty))})
 
 
 def _rating_of(p):
@@ -172,7 +172,7 @@ async def cb_stepper(query: types.CallbackQuery, state: FSMContext):
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
         return
     qty = await _qty_in_view(state, pid)
-    new_qty = max(1, min(99, qty + delta))
+    new_qty = max(1, min(999, qty + delta))
     if new_qty == qty and delta < 0:
         await query.answer(texts.TOAST_QTY_MIN)
         return

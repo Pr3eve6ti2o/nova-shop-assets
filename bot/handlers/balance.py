@@ -62,14 +62,15 @@ async def cb_balance_amount(query: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query_handler(text="bal:custom", state="*")
 async def cb_balance_custom(query: types.CallbackQuery, state: FSMContext):
-    """User tapped Custom Amount: ask them to type an amount (min $1)."""
+    """User tapped Custom Amount: ask them to type an amount (config min)."""
     await query.answer()
     prev = await state.get_state()
     await state.update_data(_prev_state=prev)
     await BalanceFlow.topup_custom.set()
+    _min = fmt_money(config.MIN_TOPUP_CENTS, config.CURRENCY)
     await query.message.answer(
-        texts.MSG_BALANCE_CUSTOM_PROMPT,
-        reply_markup=types.ForceReply(input_field_placeholder="Minimum $1"))
+        texts.MSG_BALANCE_CUSTOM_PROMPT.format(min=_min),
+        reply_markup=types.ForceReply(input_field_placeholder=f"Minimum {_min}"))
 
 
 def _parse_usd_to_cents(raw: str) -> int | None:
@@ -90,13 +91,16 @@ def _parse_usd_to_cents(raw: str) -> int | None:
 
 @dp.message_handler(state=BalanceFlow.topup_custom)
 async def cb_balance_custom_amount(message: types.Message, state: FSMContext):
-    """User typed a custom top-up amount: validate ($1 min) and proceed."""
+    """User typed a custom top-up amount: validate (config min) and proceed."""
     cents = _parse_usd_to_cents(message.text)
     if cents is None:
         await message.answer(texts.MSG_BALANCE_CUSTOM_INVALID, parse_mode="HTML")
         return
-    if cents < 100:
-        await message.answer(texts.MSG_BALANCE_CUSTOM_TOO_SMALL, parse_mode="HTML")
+    if cents < config.MIN_TOPUP_CENTS:
+        await message.answer(
+            texts.MSG_BALANCE_CUSTOM_TOO_SMALL.format(
+                min=fmt_money(config.MIN_TOPUP_CENTS, config.CURRENCY)),
+            parse_mode="HTML")
         return
     data = await state.get_data()
     prev = data.get("_prev_state")

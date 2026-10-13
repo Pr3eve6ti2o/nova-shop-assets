@@ -36,6 +36,17 @@ async def bc_content(message: types.Message, state: FSMContext):
     # for every recipient or injects unintended HTML.
     from html import escape as _escape
     text = _escape(text)
+    # Pre-send length check (on the ESCAPED text, which is what
+    # Telegram counts): without it an over-long broadcast raised
+    # mid-loop and left a partial, un-tracked send.
+    _limit = 1024 if photo else 4096
+    if len(text) > _limit:
+        await message.answer(
+            f"⚠️ That message is too long ({len(text)} characters; "
+            f"Telegram allows {_limit} for "
+            f"{'a photo caption' if photo else 'a message'}). "
+            "Please shorten it.")
+        return
     users = list(dict.fromkeys(await db.all_active_tg_ids()))
     await state.update_data(bc_text=text, bc_photo=photo, bc_tg_ids=users)
     await BroadcastFlow.confirm.set()

@@ -182,6 +182,15 @@ async def pw_description(message: types.Message, state: FSMContext):
     if await handle_escape(message, state):
         return
     desc = (message.text or "").strip()
+    # Product cards render via photo captions (Telegram limit 1,024
+    # chars including name/price/buttons text). An uncapped
+    # description broke every card for that product.
+    if len(desc) > 900:
+        await message.answer(
+            "⚠️ That description is too long (max 900 characters — "
+            "product cards have a 1,024-character caption limit). "
+            "Please shorten it.")
+        return
     await state.update_data(pw_description="" if desc == "-" else desc)
     await ProductWizard.photo.set()
     await message.answer(texts.MSG_PROD_WIZ_PHOTO, reply_markup=kb.force_reply())

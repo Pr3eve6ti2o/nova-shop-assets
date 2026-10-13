@@ -23,7 +23,7 @@ from .common import (get_or_register, main_reply_kb, product_available,
 
 logger = logging.getLogger(__name__)
 
-MAX_ITEMS = 50
+MAX_ITEMS = 100
 
 
 async def find_tonconnect_tx(merchant: str, sender: str, amount_nano: int,
@@ -176,7 +176,7 @@ async def webapp_data(message: types.Message, state: FSMContext):
     # cart in non-checkout sendData calls (get_orders / get_referral), so
     # the server keeps a last-known cart for abandoned-cart recovery.
     # Same validation rules as checkout: known active products only,
-    # qty 1..99 clamped to stock. Mirroring never blocks the real action.
+    # qty 1..999 clamped to stock. Mirroring never blocks the real action.
     sync_raw = payload.get("cart_sync")
     if isinstance(sync_raw, list) and len(sync_raw) <= MAX_ITEMS:
         try:
@@ -189,7 +189,7 @@ async def webapp_data(message: types.Message, state: FSMContext):
                     _qty = int(_it.get("qty"))
                 except (TypeError, ValueError, AttributeError):
                     continue
-                if not 1 <= _qty <= 99:
+                if not 1 <= _qty <= 999:
                     continue
                 _p = await db.get_product(_pid)
                 if not _p or not _p["is_active"]:
@@ -295,7 +295,7 @@ async def webapp_data(message: types.Message, state: FSMContext):
             qty = int(it.get("qty"))
         except (TypeError, ValueError, AttributeError):
             continue
-        if not 1 <= qty <= 99:
+        if not 1 <= qty <= 999:
             continue
         p = await db.get_product(pid)
         if not p or not p["is_active"]:
@@ -382,7 +382,7 @@ async def handle_tonconnect_paid(message: types.Message, user: dict,
             qty = int(it.get("qty"))
         except (TypeError, ValueError, AttributeError):
             continue
-        if not 1 <= qty <= 99:
+        if not 1 <= qty <= 999:
             continue
         p = await db.get_product(pid)
         if not p or not p["is_active"]:

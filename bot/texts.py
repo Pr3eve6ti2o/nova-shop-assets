@@ -454,10 +454,10 @@ MSG_BALANCE_INSUFFICIENT = (
 )
 MSG_BALANCE_CUSTOM_PROMPT = (
     "\u270f\ufe0f <b>Custom amount</b>\n\n"
-    "Enter the amount in USD (minimum $1)."
+    "Enter the amount in USD (minimum {min})."
 )
 MSG_BALANCE_CUSTOM_TOO_SMALL = (
-    "\u274c Minimum top-up is <b>$1</b>. Please enter $1 or more."
+    "\u274c Minimum top-up is <b>{min}</b>. Please enter {min} or more."
 )
 MSG_BALANCE_CUSTOM_INVALID = (
     "\u274c That doesn't look like an amount. Type a number like <b>5</b> or <b>5.50</b>."

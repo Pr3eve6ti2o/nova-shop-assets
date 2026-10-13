@@ -36,13 +36,21 @@ def _iso_before(**delta) -> str:
         timespec="seconds")
 
 
-async def _send(bot, tg_id: int, text: str, reply_markup=None) -> bool:
+_PERMANENT_SEND_ERRORS = ("chat not found", "bot was blocked",
+                          "user is deactivated", "bot can't initiate")
+
+
+async def _send(db, bot, user_id: int, tg_id: int, text: str,
+                reply_markup=None) -> bool:
     try:
         await bot.send_message(tg_id, text, reply_markup=reply_markup,
                                disable_web_page_preview=True)
+        await db.campaign_note_send_result(user_id, True)
         return True
     except Exception as e:
         logger.info("campaign send to %s failed: %s", tg_id, e)
+        permanent = any(s in str(e).lower() for s in _PERMANENT_SEND_ERRORS)
+        await db.campaign_note_send_result(user_id, False, permanent)
         return False
 
 
@@ -64,7 +72,7 @@ async def _pass_abandoned_cart(db, bot) -> int:
             kb = InlineKeyboardMarkup().add(InlineKeyboardButton(
                 "🛒 View cart", callback_data="cart"))
             ok = await _send(
-                bot, tg_id,
+                db, bot, uid, tg_id,
                 "🛒 <b>Your cart is waiting</b>\n\n"
                 f"You left {row['items']} item(s) worth "
                 f"{fmt_money(row['total_cents'] or 0, config.CURRENCY)} "
@@ -89,13 +97,17 @@ async def _pass_back_in_stock(db, bot) -> int:
             # keeps future restocks working — a fresh subscription is a
             # fresh row, never blocked by an old campaign claim.
             await db.stock_alert_remove(uid, pid)
+            if await db.user_campaign_muted(uid):
+                # Permanently unreachable — drop the alert silently
+                # instead of retrying the send every restock (m013).
+                continue
             tg_id = await _tg_of(db, uid)
             ok = False
             if tg_id:
                 kb = InlineKeyboardMarkup().add(InlineKeyboardButton(
                     "🛍 View product", callback_data=f"p:{pid}"))
                 ok = await _send(
-                    bot, tg_id,
+                    db, bot, uid, tg_id,
                     f"🔔 <b>Back in stock</b>\n\n<b>{name}</b> is available "
                     "again. Stock can go quickly — grab it while it lasts.",
                     reply_markup=kb)
@@ -123,7 +135,7 @@ async def _pass_post_purchase(db, bot) -> int:
             kb = InlineKeyboardMarkup().add(InlineKeyboardButton(
                 "📦 View order", callback_data=f"o:{order['id']}"))
             ok = await _send(
-                bot, tg_id,
+                db, bot, uid, tg_id,
                 f"🙏 <b>Thank you for order #{order['id']}</b>\n\n"
                 "We hope everything arrived exactly as expected. If "
                 "anything isn't right, our support team is one tap away "
@@ -145,7 +157,7 @@ async def _pass_onboarding(db, bot) -> int:
         if not await db.campaign_claim_send("onboarding", uid, "welcome"):
             continue
         ok = await _send(
-            bot, user["tg_id"],
+            db, bot, uid, user["tg_id"],
             "👋 <b>Still browsing?</b>\n\n"
             "Your account is ready and your first order only takes a "
             "minute. If you have any questions before buying, just ask "
@@ -172,7 +184,7 @@ async def _pass_wishlist_drops(db, bot) -> int:
             kb = InlineKeyboardMarkup().add(InlineKeyboardButton(
                 "🛍 View product", callback_data=f"p:{pid}"))
             ok = await _send(
-                bot, tg_id,
+                db, bot, uid, tg_id,
                 f"💸 <b>Price drop</b>\n\n<b>{row['name']}</b> fell from "
                 f"{fmt_money(row['price_at_add_cents'], config.CURRENCY)} "
                 f"to {fmt_money(row['price_cents'], config.CURRENCY)} — "
