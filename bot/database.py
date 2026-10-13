@@ -602,7 +602,10 @@ class Database:
     async def add_balance(self, user_id: int, amount_cents: int,
                          tx_type: str = "topup", order_id: int = None,
                          lot_cents: int = None,
-                         expires_days: int = None) -> int:
+                         expires_days: int = None,
+                         actor_type: str = None, actor_id: str = None,
+                         note: str = None, reference: str = None,
+                         reference_id: str = None) -> int:
         """Add to balance (topup/refund). Applies 5% bonus on topups. Returns new balance.
 
         Port Part 4: every credit also opens a credit LOT (FIFO-spent,
@@ -630,9 +633,11 @@ class Database:
                 new_bal = (await cur.fetchone())["balance_cents"]
             await db.execute(
                 "INSERT INTO balance_transactions"
-                "(user_id, type, amount_cents, balance_after_cents, order_id)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (user_id, tx_type, total, new_bal, order_id))
+                "(user_id, type, amount_cents, balance_after_cents, order_id,"
+                " actor_type, actor_id, note, reference, reference_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (user_id, tx_type, total, new_bal, order_id,
+                 actor_type, actor_id, note, reference, reference_id))
             lot_amount = total if lot_cents is None else int(lot_cents)
             if lot_amount > 0:
                 expires = None
@@ -651,7 +656,10 @@ class Database:
             return new_bal
 
     async def deduct_balance(self, user_id: int, amount_cents: int,
-                            order_id: int = None) -> int | None:
+                            order_id: int = None, tx_type: str = "purchase",
+                            actor_type: str = None, actor_id: str = None,
+                            note: str = None, reference: str = None,
+                            reference_id: str = None) -> int | None:
         """Deduct from balance for purchase. Returns new balance or None if insufficient.
         Uses atomic UPDATE to prevent double-spend race conditions."""
         if amount_cents <= 0:
@@ -670,9 +678,12 @@ class Database:
                     new_bal = (await cur2.fetchone())["balance_cents"]
                 await db.execute(
                     "INSERT INTO balance_transactions"
-                    "(user_id, type, amount_cents, balance_after_cents, order_id)"
-                    " VALUES (?, 'purchase', ?, ?, ?)",
-                    (user_id, -amount_cents, new_bal, order_id))
+                    "(user_id, type, amount_cents, balance_after_cents,"
+                    " order_id, actor_type, actor_id, note, reference,"
+                    " reference_id)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (user_id, tx_type, -amount_cents, new_bal, order_id,
+                     actor_type, actor_id, note, reference, reference_id))
                 # Port Part 4: consume credit lots FIFO in the same
                 # locked transaction — oldest, non-expired lots first,
                 # each with a conditional decrement whose rowcount is
@@ -706,6 +717,268 @@ class Database:
                     need -= take
                 await db.commit()
                 return new_bal
+
+    # ------------------------------------- store credit (Medusa-style) --
+    async def adjust_balance(self, user_id: int, delta_cents: int, *,
+                             tx_type: str, actor_type: str, actor_id=None,
+                             note: str = None, reference: str = None,
+                             reference_id: str = None,
+                             expires_days: int = None):
+        """Admin/system credit or debit on a customer's store-credit
+        account (Medusa's creditAccounts / debitAccounts pair, one signed
+        operation). Positive delta credits, negative debits.
+
+        Credits NEVER earn the top-up deposit bonus — add_balance applies
+        it only to tx_type='topup', and admin/gift credits use their own
+        types. Debits reuse deduct_balance's guarded atomic path (FIFO
+        lot consumption included) and fail closed: None when the debit
+        exceeds the balance. Returns the new balance otherwise. Every
+        movement lands in balance_transactions with actor/note/reference
+        (migration m014)."""
+        if delta_cents == 0:
+            raise ValueError("delta_cents must be non-zero")
+        kw = dict(tx_type=tx_type, actor_type=actor_type,
+                  actor_id=None if actor_id is None else str(actor_id),
+                  note=note, reference=reference, reference_id=reference_id)
+        if delta_cents > 0:
+            return await self.add_balance(
+                user_id, delta_cents, expires_days=expires_days, **kw)
+        return await self.deduct_balance(user_id, -delta_cents, **kw)
+
+    async def account_stats(self, user_id: int) -> dict:
+        """Medusa retrieveAccountStats equivalent, derived from the ledger."""
+        async with self._db() as db:
+            async with db.execute(
+                    "SELECT balance_cents FROM users WHERE id=?",
+                    (user_id,)) as cur:
+                row = await cur.fetchone()
+            balance = int(row["balance_cents"]) if row else 0
+            async with db.execute(
+                    "SELECT COALESCE(SUM(CASE WHEN amount_cents > 0"
+                    " THEN amount_cents END), 0) AS credits,"
+                    " COALESCE(SUM(CASE WHEN amount_cents < 0"
+                    " THEN -amount_cents END), 0) AS debits,"
+                    " COUNT(*) AS n FROM balance_transactions"
+                    " WHERE user_id=?", (user_id,)) as cur:
+                agg = await cur.fetchone()
+            return {"balance_cents": balance,
+                    "total_credits_cents": int(agg["credits"]),
+                    "total_debits_cents": int(agg["debits"]),
+                    "transactions": int(agg["n"])}
+
+    async def list_balance_transactions(self, user_id: int, limit: int = 50,
+                                        offset: int = 0):
+        """Newest-first ledger rows for one customer (bot + Payload views)."""
+        async with self._db() as db:
+            async with db.execute(
+                    "SELECT * FROM balance_transactions WHERE user_id=?"
+                    " ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (user_id, int(limit), int(offset))) as cur:
+                return await cur.fetchall()
+
+    # ------------------------------------------------------- gift cards --
+    @staticmethod
+    def _giftcard_code() -> str:
+        import secrets
+        alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O/1/I/L ambiguity
+        groups = ["".join(secrets.choice(alphabet) for _ in range(4))
+                  for _ in range(3)]
+        return "NOVA-" + "-".join(groups)
+
+    async def giftcard_create(self, value_cents: int, *,
+                              created_by: str = None, note: str = None,
+                              expires_days: int = None):
+        """Create a stored-value gift card. Returns the card row (dict-like)."""
+        if int(value_cents) <= 0:
+            raise ValueError("value_cents must be positive")
+        expires = None
+        if expires_days:
+            from datetime import datetime, timedelta, timezone
+            expires = (datetime.now(timezone.utc)
+                       + timedelta(days=int(expires_days))).isoformat(
+                           timespec="seconds")
+        for _attempt in range(5):
+            code = self._giftcard_code()
+            try:
+                async with self._db() as db:
+                    await db.execute(
+                        "INSERT INTO gift_cards(code, value_cents,"
+                        " remaining_cents, status, expires_at, created_by,"
+                        " note, created_at) VALUES (?, ?, ?, 'active', ?,"
+                        " ?, ?, ?)",
+                        (code, int(value_cents), int(value_cents), expires,
+                         created_by, note, utcnow_iso()))
+                    await db.commit()
+                return await self.giftcard_get(code)
+            except aiosqlite.IntegrityError:
+                continue  # code collision — mint another
+        raise RuntimeError("could not allocate a gift card code")
+
+    async def giftcard_get(self, code: str):
+        async with self._db() as db:
+            async with db.execute(
+                    "SELECT * FROM gift_cards WHERE code=?",
+                    (str(code).strip().upper(),)) as cur:
+                return await cur.fetchone()
+
+    async def giftcard_redeem(self, code: str, user_id: int,
+                              amount_cents: int = None):
+        """Redeem a gift card into the customer's balance, atomically.
+
+        One locked transaction: card decrement (guarded on the remaining
+        amount), balance credit, ledger row (type 'giftcard', reference
+        the card) and a credit lot carrying the card's expiry. Partial
+        redemption is supported; the card flips to 'redeemed' at zero.
+        Returns (True, {amount_cents, balance_cents, remaining_cents})
+        or (False, reason): 'not_found', the card's status, 'expired',
+        'amount', 'user'."""
+        code = str(code).strip().upper()
+        async with self._claim_lock:
+            async with self._db() as db:
+                async with db.execute(
+                        "SELECT * FROM gift_cards WHERE code=?",
+                        (code,)) as cur:
+                    card = await cur.fetchone()
+                if not card:
+                    return False, "not_found"
+                if card["status"] != "active":
+                    return False, card["status"]
+                now = utcnow_iso()
+                if card["expires_at"] and card["expires_at"] <= now:
+                    await db.execute(
+                        "UPDATE gift_cards SET status='expired'"
+                        " WHERE id=?", (card["id"],))
+                    await db.commit()
+                    return False, "expired"
+                remaining = int(card["remaining_cents"])
+                amount = remaining if amount_cents is None \
+                    else int(amount_cents)
+                if amount <= 0 or amount > remaining:
+                    return False, "amount"
+                new_remaining = remaining - amount
+                cur = await db.execute(
+                    "UPDATE gift_cards SET remaining_cents=?,"
+                    " status=?, redeemed_by_user_id=?, redeemed_at=?"
+                    " WHERE id=? AND remaining_cents=?",
+                    (new_remaining,
+                     "redeemed" if new_remaining == 0 else "active",
+                     user_id, now, card["id"], remaining))
+                if cur.rowcount == 0:
+                    await db.rollback()
+                    return False, "race"
+                cur = await db.execute(
+                    "UPDATE users SET balance_cents = balance_cents + ?"
+                    " WHERE id=?", (amount, user_id))
+                if cur.rowcount == 0:
+                    await db.rollback()
+                    return False, "user"
+                async with db.execute(
+                        "SELECT balance_cents FROM users WHERE id=?",
+                        (user_id,)) as cur:
+                    new_bal = int((await cur.fetchone())["balance_cents"])
+                await db.execute(
+                    "INSERT INTO balance_transactions"
+                    "(user_id, type, amount_cents, balance_after_cents,"
+                    " order_id, actor_type, actor_id, note, reference,"
+                    " reference_id) VALUES (?, 'giftcard', ?, ?, NULL,"
+                    " 'customer', ?, ?, 'gift_card', ?)",
+                    (user_id, amount, new_bal, str(user_id),
+                     card["note"], code))
+                await db.execute(
+                    "INSERT INTO credit_lots"
+                    "(user_id, source, amount_cents, remaining_cents,"
+                    " expires_at, created_at) VALUES (?, 'giftcard', ?,"
+                    " ?, ?, ?)",
+                    (user_id, amount, amount, card["expires_at"], now))
+                await db.commit()
+                return True, {"amount_cents": amount,
+                              "balance_cents": new_bal,
+                              "remaining_cents": new_remaining,
+                              "code": code}
+
+    async def giftcard_list(self, limit: int = 50, offset: int = 0,
+                            status: str = None):
+        async with self._db() as db:
+            if status:
+                async with db.execute(
+                        "SELECT * FROM gift_cards WHERE status=?"
+                        " ORDER BY id DESC LIMIT ? OFFSET ?",
+                        (status, int(limit), int(offset))) as cur:
+                    return await cur.fetchall()
+            async with db.execute(
+                    "SELECT * FROM gift_cards ORDER BY id DESC"
+                    " LIMIT ? OFFSET ?",
+                    (int(limit), int(offset))) as cur:
+                return await cur.fetchall()
+
+    async def giftcard_revoke(self, card_id: int) -> bool:
+        async with self._db() as db:
+            cur = await db.execute(
+                "UPDATE gift_cards SET status='revoked'"
+                " WHERE id=? AND status='active'", (int(card_id),))
+            await db.commit()
+            return cur.rowcount > 0
+
+    # ---------------------------------------------------- manual orders --
+    async def create_manual_order(self, user_id: int, items, *,
+                                  kind: str, actor_tg_id: int,
+                                  note: str = None):
+        """Admin-created order (Medusa draft-order pattern, converted
+        immediately). kind='comp' charges nothing; kind='balance' charges
+        the customer's store credit through deduct_balance. Prices always
+        come from the catalogue rows, never from the caller. The order is
+        born 'confirmed' with a provider='manual' payment row and an
+        audit_log entry. Returns (order_id, None) or (None, reason):
+        'empty', 'bad_qty', 'bad_product', 'insufficient_balance'."""
+        if kind not in ("comp", "balance"):
+            raise ValueError("kind must be 'comp' or 'balance'")
+        lines = []
+        subtotal = 0
+        for product_id, qty in items:
+            if int(qty) <= 0:
+                return None, "bad_qty"
+            p = await self.get_product(int(product_id))
+            if not p:
+                return None, "bad_product"
+            price = int(p["price_cents"])
+            lines.append((int(product_id), p["name"], int(qty), price))
+            subtotal += price * int(qty)
+        if not lines:
+            return None, "empty"
+        order_id = await self.create_order(
+            user_id=user_id, subtotal_cents=subtotal, discount_cents=0,
+            total_cents=subtotal, payment_method=kind, delivery_kind=None,
+            address=None, phone=None)
+        async with self._db() as db:
+            await db.execute(
+                "UPDATE orders SET origin='admin' WHERE id=?", (order_id,))
+            for pid, name, qty, price in lines:
+                await db.execute(
+                    "INSERT INTO order_items(order_id, product_id, name,"
+                    " qty, price_cents) VALUES (?, ?, ?, ?, ?)",
+                    (order_id, pid, name, qty, price))
+            await db.commit()
+        if kind == "balance" and subtotal > 0:
+            new_bal = await self.deduct_balance(
+                user_id, subtotal, order_id=order_id,
+                actor_type="admin", actor_id=str(actor_tg_id),
+                reference="order", reference_id=str(order_id))
+            if new_bal is None:
+                await self.set_order_status(order_id, "cancelled")
+                await self.audit(actor_tg_id, "manual_order_failed",
+                                 f"order {order_id}: insufficient balance")
+                return None, "insufficient_balance"
+        await self.record_payment(
+            provider="manual", external_id=f"manual_{order_id}",
+            user_id=user_id, order_id=order_id,
+            amount_cents=subtotal if kind == "balance" else 0,
+            currency="USD", status="paid")
+        await self.set_order_status(order_id, "confirmed")
+        await self.audit(
+            actor_tg_id, "manual_order",
+            f"order {order_id} kind={kind} total={subtotal}"
+            + (f" note={note}" if note else ""))
+        return order_id, None
 
     # ------------------------------------------------- credit lots (4) --
     async def credit_lots_total(self, user_id: int) -> int:
