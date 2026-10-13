@@ -148,6 +148,15 @@ STARS_PER_USD: int = _int_env("STARS_PER_USD", 60, min_val=1, max_val=10000)
 MIN_TOPUP_CENTS: int = _int_env("MIN_TOPUP_CENTS", 50, min_val=1, max_val=100_000_000)
 MAX_TOPUP_CENTS: int = _int_env("MAX_TOPUP_CENTS", 250_000, min_val=1, max_val=100_000_000)
 
+# Store credit internal API (Medusa borrow, Phase 3): a localhost-only
+# aiohttp server in the bot process that lets the Payload admin perform
+# credit/debit, gift-card and manual-order operations WITHOUT touching
+# the bot database directly — the bot's DB layer stays the single
+# writer of money. Disabled unless a port is set; refuses to start
+# without a >= 32 char secret (INTERNAL_API_SECRET).
+INTERNAL_API_PORT: int = _int_env("INTERNAL_API_PORT", 0, min_val=0, max_val=65535)
+INTERNAL_API_SECRET: str = (os.getenv("INTERNAL_API_SECRET", "") or "").strip()
+
 # Opus: validate ISO 4217 shape; Telegram uses currency-specific exponents
 # (JPY=0, KWD=3) so callers must use CURRENCY_EXPONENT, not assume 2.
 CURRENCY: str = (os.getenv("CURRENCY", "USD") or "USD").strip().upper()

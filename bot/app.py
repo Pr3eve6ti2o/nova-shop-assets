@@ -51,6 +51,7 @@ else:
 _watcher_task: asyncio.Task | None = None
 _outbox_task: asyncio.Task | None = None
 _campaign_task: asyncio.Task | None = None
+_api_runner = None  # store-credit internal API (Payload), Phase 3
 
 # Bind custom filters BEFORE handlers register (they use is_admin=...).
 # Opus P2: bind once — duplicate bind was dead code.
@@ -182,6 +183,12 @@ async def on_startup(dp_):
     else:
         logger.info("Campaign engine disabled (CAMPAIGNS_ENABLED=0)")
 
+    # Store-credit internal API for Payload (Phase 3): localhost-only,
+    # off unless INTERNAL_API_PORT + a >=32-char secret are configured.
+    global _api_runner
+    from internal_api import start_internal_api
+    _api_runner = await start_internal_api(_db)
+
 
 async def on_shutdown(dp_):
     logger.warning("Shutting down...")
@@ -200,6 +207,13 @@ async def on_shutdown(dp_):
     _watcher_task = None
     _outbox_task = None
     _campaign_task = None
+    global _api_runner
+    if _api_runner is not None:
+        try:
+            await _api_runner.cleanup()
+        except Exception:
+            pass
+        _api_runner = None
     # Opus P2: do not delete the webhook on shutdown in webhook mode —
     # it drops the production webhook on every restart.
     if not config.WEBHOOK_URL:
