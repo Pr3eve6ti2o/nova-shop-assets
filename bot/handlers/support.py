@@ -122,27 +122,73 @@ async def cb_support_ticket(query: types.CallbackQuery):
     await query.answer()
     tid = int(query.data.split(":")[1])
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
-    await _ensure_tickets_table()
-    async with db._db() as conn:
-        async with conn.execute(
-                "SELECT id, subject, status, created_at FROM support_tickets"
-                " WHERE id=? AND user_id=?", (tid, user["id"])) as cur:
-            t = await cur.fetchone()
-    if not t:
+    t = await db.ticket_get(tid)
+    if not t or t["user_id"] != user["id"]:
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
         return
     created = (t["created_at"] or "")[:16].replace("T", " ")
+    # Port 3.1: render the thread, not just the subject line.
+    thread = await db.ticket_messages(tid, limit=10)
+    lines = [texts.MSG_SUPPORT_TICKET_DETAIL.format(
+        id=t["id"], status=t["status"], subject=t["subject"],
+        created=created or "\u2014")]
+    if thread:
+        lines.append("")
+        for m in thread:
+            who = "\U0001f9d1 You" if m["sender"] == "user" else "\U0001f6df Support"
+            when = (m["created_at"] or "")[:16].replace("T", " ")
+            lines.append(f"<b>{who}</b> \u00b7 {when}\n{m['body']}")
     markup = types.InlineKeyboardMarkup()
     if t["status"] == "open":
+        markup.add(InlineKeyboardButton(
+            "\u2709\ufe0f Add a message", callback_data=f"supa:{tid}"))
         markup.add(InlineKeyboardButton(texts.BTN_CLOSE_TICKET,
                                        callback_data=f"suptc:{tid}"))
     markup.add(InlineKeyboardButton(texts.BTN_BACK, callback_data="sup_list"))
-    await edit_text_safe(
-        query,
-        texts.MSG_SUPPORT_TICKET_DETAIL.format(
-            id=t["id"], status=t["status"], subject=t["subject"],
-            created=created or "\u2014"),
-        markup)
+    await edit_text_safe(query, "\n\n".join(lines), markup)
+
+
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("supa:"),
+                           state="*")
+async def cb_support_add(query: types.CallbackQuery, state: FSMContext):
+    tid = int(query.data.split(":")[1])
+    user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
+    t = await db.ticket_get(tid)
+    if not t or t["user_id"] != user["id"] or t["status"] != "open":
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
+    await query.answer()
+    await SupportFlow.followup.set()
+    await state.update_data(followup_ticket=tid)
+    await query.message.answer(
+        f"\u2709\ufe0f <b>Ticket #{tid}</b> \u2014 type your message and it "
+        "will be added to this conversation.",
+        reply_markup=kb.force_reply())
+
+
+@dp.message_handler(state=SupportFlow.followup)
+async def support_followup(message: types.Message, state: FSMContext):
+    if await handle_escape(message, state):
+        return
+    text = (message.text or "").strip()
+    data = await state.get_data()
+    tid = data.get("followup_ticket")
+    await state.finish()
+    if not text or not tid:
+        return
+    user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
+    t = await db.ticket_get(int(tid))
+    if not t or t["user_id"] != user["id"]:
+        return await message.answer(texts.ERR_NOT_FOUND)
+    try:
+        await db.ticket_add_message(int(tid), "user", text)
+    except ValueError as e:
+        return await message.answer(f"\u26a0\ufe0f {e}")
+    await notify_admins(
+        f"\u2709\ufe0f <b>Ticket #{tid}</b> \u2014 new message from the "
+        f"customer:\n\n{text}",
+        min_bit=0, reply_markup=kb.admin_reply_kb(user["tg_id"]))
+    await message.answer("\u2705 Added to your ticket. We'll reply here.")
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("suptc:"))
@@ -179,7 +225,8 @@ async def support_message(message: types.Message, state: FSMContext):
         return
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
     await state.finish()
-    ticket_id = await _create_ticket(user["id"], text)
+    # Port 3.1: the ticket now stores its first message in the thread.
+    ticket_id = await db.ticket_create(user["id"], text)
     await notify_admins(
         texts.MSG_SUPPORT_TICKET_ADMIN.format(
             ticket_id=ticket_id, name=user["name"] or "?",
@@ -214,11 +261,146 @@ async def admin_reply_text(message: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     target = data.get("reply_to")
+    reply_ticket = data.get("reply_ticket")
     text = (message.text or "").strip()
     await state.finish()
     if target and text:
         try:
             await bot.send_message(target, texts.MSG_SUPPORT_FROM_ADMIN.format(text=text))
+            # Port 3.1: store the reply in the thread so both sides keep
+            # the full conversation. Explicit ticket (inbox) wins; else
+            # the customer's most recent open ticket.
+            try:
+                tuser = await db.get_user_by_tg(target)
+                if tuser:
+                    tid = reply_ticket
+                    if not tid:
+                        open_ts = await db.user_open_tickets(tuser["id"])
+                        tid = open_ts[0]["id"] if open_ts else None
+                    if tid:
+                        await db.ticket_add_message(int(tid), "admin", text)
+            except Exception:
+                pass  # storage must never block the reply itself
             await message.answer(texts.MSG_SUPPORT_REPLIED)
         except Exception:
             await message.answer(texts.ERR_GENERIC)
+
+
+# ------------------------------------------------------- admin inbox (3.2)
+async def _support_admin(tg_id: int) -> bool:
+    """Same gate as the reply button: config admins or any role mask."""
+    if tg_id in config.ADMINS:
+        return True
+    u = await db.get_user_by_tg(tg_id)
+    return bool(u and u["role_mask"])
+
+
+def _inbox_kb(rows):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for t in rows:
+        arrow = "🧑" if t["last_sender"] == "user" else "🛟"
+        preview = (t["last_body"] or t["subject"] or "")[:28]
+        order = f" · order #{t['order_id']}" if t["order_id"] else ""
+        markup.add(InlineKeyboardButton(
+            f"#{t['id']} {arrow} {preview}{order}",
+            callback_data=f"supv:{t['id']}"))
+    return markup
+
+
+async def _render_inbox(target):
+    rows = await db.tickets_inbox(limit=15)
+    if rows:
+        text = ("📥 <b>Support inbox</b>\n\nOpen conversations, latest "
+                "first. 🧑 = waiting on us, 🛟 = we replied last.")
+        kb = _inbox_kb(rows)
+    else:
+        text = "📥 <b>Support inbox</b>\n\nNo open conversations. 🎉"
+        kb = None
+    if isinstance(target, types.CallbackQuery):
+        await edit_text_safe(target, text, kb)
+    else:
+        await target.answer(text, reply_markup=kb,
+                            disable_web_page_preview=True)
+
+
+@dp.message_handler(commands=["inbox"], state="*")
+async def cmd_inbox(message: types.Message, state: FSMContext):
+    if not await _support_admin(message.from_user.id):
+        return await message.answer(texts.MSG_ADMIN_DENIED)
+    await state.finish()
+    await _render_inbox(message)
+
+
+@dp.callback_query_handler(text="supi", state="*")
+async def cb_inbox(query: types.CallbackQuery, state: FSMContext):
+    if not await _support_admin(query.from_user.id):
+        return await query.answer(texts.MSG_ADMIN_DENIED, show_alert=True)
+    await state.finish()
+    await query.answer()
+    await _render_inbox(query)
+
+
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("supv:"),
+                           state="*")
+async def cb_inbox_view(query: types.CallbackQuery, state: FSMContext):
+    if not await _support_admin(query.from_user.id):
+        return await query.answer(texts.MSG_ADMIN_DENIED, show_alert=True)
+    await state.finish()
+    tid = int(query.data.split(":")[1])
+    t = await db.ticket_get(tid)
+    if not t:
+        return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+    await query.answer()
+    customer = await db.get_user(t["user_id"])
+    thread = await db.ticket_messages(tid, limit=15)
+    lines = [f"🎫 <b>Ticket #{tid}</b> — {t['status']}"
+             + (f" · order #{t['order_id']}" if t["order_id"] else ""),
+             f"Customer: {customer['name'] if customer else '?'}"
+             f" (<code>{customer['tg_id'] if customer else '?'}</code>)",
+             ""]
+    for m in thread:
+        who = "🧑 Customer" if m["sender"] == "user" else "🛟 Support"
+        when = (m["created_at"] or "")[:16].replace("T", " ")
+        lines.append(f"<b>{who}</b> · {when}\n{m['body']}")
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    if t["status"] == "open":
+        markup.add(InlineKeyboardButton(
+            "✉️ Reply", callback_data=f"supr:{tid}"),
+            InlineKeyboardButton(
+                "✅ Close ticket", callback_data=f"supx:{tid}"))
+    markup.add(InlineKeyboardButton("⬅️ Inbox", callback_data="supi"))
+    await edit_text_safe(query, "\n\n".join(lines), markup)
+
+
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("supr:"),
+                           state="*")
+async def cb_inbox_reply(query: types.CallbackQuery, state: FSMContext):
+    if not await _support_admin(query.from_user.id):
+        return await query.answer(texts.MSG_ADMIN_DENIED, show_alert=True)
+    tid = int(query.data.split(":")[1])
+    t = await db.ticket_get(tid)
+    if not t or t["status"] != "open":
+        return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+    customer = await db.get_user(t["user_id"])
+    if not customer:
+        return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+    await query.answer()
+    await AdminReplyFlow.waiting_text.set()
+    await state.update_data(reply_to=customer["tg_id"], reply_ticket=tid)
+    await query.message.answer(
+        texts.MSG_SUPPORT_REPLY_ASK.format(tg_id=customer["tg_id"]),
+        reply_markup=kb.force_reply())
+
+
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("supx:"),
+                           state="*")
+async def cb_inbox_close(query: types.CallbackQuery):
+    if not await _support_admin(query.from_user.id):
+        return await query.answer(texts.MSG_ADMIN_DENIED, show_alert=True)
+    tid = int(query.data.split(":")[1])
+    if await db.ticket_close(tid):
+        await query.answer("Ticket closed ✅")
+    else:
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
+    await _render_inbox(query)

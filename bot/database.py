@@ -1322,6 +1322,123 @@ class Database:
             ) as cur:
                 return await cur.fetchall()
 
+    # -------------------------------------------------- support threads
+    # Port plan Part 3: every ticket owns a message thread. The ticket
+    # row keeps the subject + status; bodies live in support_messages.
+
+    async def ticket_create(self, user_id: int, body: str,
+                            order_id: int = None) -> int:
+        """Open a ticket and store the first message in its thread."""
+        body = (body or "").strip()
+        if not body:
+            raise ValueError("Message is empty.")
+        now = utcnow_iso()
+        async with self._db() as db:
+            cur = await db.execute(
+                "INSERT INTO support_tickets"
+                "(user_id, subject, status, created_at, updated_at, order_id)"
+                " VALUES (?, ?, 'open', ?, ?, ?)",
+                (user_id, body[:60], now, now, order_id))
+            tid = cur.lastrowid
+            await db.execute(
+                "INSERT INTO support_messages(ticket_id, sender, body,"
+                " created_at) VALUES (?, 'user', ?, ?)",
+                (tid, body[:4000], now))
+            await db.commit()
+            return tid
+
+    async def ticket_add_message(self, ticket_id: int, sender: str,
+                                 body: str) -> int:
+        """Append to a thread. Only open tickets accept messages; a user
+        message on a closed ticket reopens it (the customer is back)."""
+        if sender not in ("user", "admin"):
+            raise ValueError("sender must be 'user' or 'admin'")
+        body = (body or "").strip()
+        if not body:
+            raise ValueError("Message is empty.")
+        now = utcnow_iso()
+        async with self._claim_lock:
+            async with self._db() as db:
+                async with db.execute(
+                    "SELECT status FROM support_tickets WHERE id=?",
+                    (ticket_id,)) as cur:
+                    row = await cur.fetchone()
+                if not row:
+                    raise ValueError("Ticket not found.")
+                if row["status"] != "open" and sender == "admin":
+                    raise ValueError("Ticket is closed.")
+                cur = await db.execute(
+                    "INSERT INTO support_messages(ticket_id, sender, body,"
+                    " created_at) VALUES (?, ?, ?, ?)",
+                    (ticket_id, sender, body[:4000], now))
+                mid = cur.lastrowid
+                await db.execute(
+                    "UPDATE support_tickets SET updated_at=?, status='open'"
+                    " WHERE id=?", (now, ticket_id))
+                await db.commit()
+                return mid
+
+    async def ticket_get(self, ticket_id: int):
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT * FROM support_tickets WHERE id=?",
+                (ticket_id,)) as cur:
+                return await cur.fetchone()
+
+    async def ticket_messages(self, ticket_id: int, limit: int = 50):
+        """The thread, oldest first, capped at the most recent `limit`."""
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT * FROM (SELECT * FROM support_messages"
+                " WHERE ticket_id=? ORDER BY id DESC LIMIT ?)"
+                " ORDER BY id ASC",
+                (ticket_id, limit)) as cur:
+                return await cur.fetchall()
+
+    async def ticket_close(self, ticket_id: int, user_id: int = None) -> bool:
+        """Close a ticket. With user_id, only the owner can close."""
+        async with self._db() as db:
+            if user_id is not None:
+                cur = await db.execute(
+                    "UPDATE support_tickets SET status='closed',"
+                    " updated_at=? WHERE id=? AND user_id=?"
+                    " AND status='open'",
+                    (utcnow_iso(), ticket_id, user_id))
+            else:
+                cur = await db.execute(
+                    "UPDATE support_tickets SET status='closed',"
+                    " updated_at=? WHERE id=? AND status='open'",
+                    (utcnow_iso(), ticket_id))
+            won = cur.rowcount > 0
+            await db.commit()
+            return won
+
+    async def tickets_inbox(self, limit: int = 20):
+        """Admin inbox (port 3.2): open tickets, most recent activity
+        first, each with its last message for preview."""
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT t.*, "
+                " (SELECT body FROM support_messages m"
+                "   WHERE m.ticket_id = t.id ORDER BY m.id DESC LIMIT 1)"
+                "   AS last_body,"
+                " (SELECT sender FROM support_messages m"
+                "   WHERE m.ticket_id = t.id ORDER BY m.id DESC LIMIT 1)"
+                "   AS last_sender"
+                " FROM support_tickets t WHERE t.status='open'"
+                " ORDER BY COALESCE((SELECT MAX(m2.id) FROM support_messages"
+                "   m2 WHERE m2.ticket_id = t.id), 0) DESC,"
+                " t.updated_at DESC LIMIT ?", (limit,)) as cur:
+                return await cur.fetchall()
+
+    async def user_open_tickets(self, user_id: int):
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT * FROM support_tickets WHERE user_id=?"
+                " AND status='open' ORDER BY updated_at DESC",
+                (user_id,)) as cur:
+                return await cur.fetchall()
+
     async def cart_remove(self, user_id: int, product_id: int):
         await self.cart_set_qty(user_id, product_id, 0)
 

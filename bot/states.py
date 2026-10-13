@@ -19,6 +19,7 @@ class ReviewFlow(StatesGroup):
 
 class SupportFlow(StatesGroup):
     waiting_message = State()
+    followup = State()  # port 3.1: adding a message to an open ticket thread
 
 
 class AdminReplyFlow(StatesGroup):
