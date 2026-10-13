@@ -13,6 +13,7 @@ from utils import fmt_money
 from .common import get_or_register, edit_text_safe
 
 
+@dp.message_handler(commands=["balance"], state="*")
 async def cmd_balance(message: types.Message, state: FSMContext):
     await state.finish()
     if message.chat.type != "private":

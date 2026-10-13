@@ -5,6 +5,7 @@ State-specific text handlers (checkout, cart promo, search, wizards) are
 registered before the generic reply-keyboard text handlers.
 """
 from . import start  # noqa: F401  (commands first)
+from . import admin  # noqa: F401  (admin console + management; registered early so the permission-filtered admin /refund in payreview wins over the public policy /refund in legal — every admin handler carries an is_admin filter, so users still fall through to legal)
 from . import legal  # noqa: F401  (legal commands: /terms /privacy /refund)
 from . import checkout  # noqa: F401  (FSM text states: contact/address)
 from . import cart  # noqa: F401  (CartPromo state, checkout entry)
@@ -23,4 +24,3 @@ from . import support  # noqa: F401  (SupportFlow / AdminReplyFlow states)
 from . import orders  # noqa: F401
 from . import returns  # noqa: F401  (port 1.1: customer return requests)
 from . import profile  # noqa: F401
-from . import admin  # noqa: F401  (admin console + management)

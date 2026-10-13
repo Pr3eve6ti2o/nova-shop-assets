@@ -1,4 +1,6 @@
 """Admin orders: filter by status, detail, status transitions with user notify."""
+from html import escape as _escape
+
 from aiogram import types
 
 import config

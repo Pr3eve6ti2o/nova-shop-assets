@@ -812,6 +812,7 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
                 provider="balance", external_id=f"bal_{oid}_{user['id']}",
                 user_id=user["id"], order_id=oid,
                 amount_cents=t["total"], currency=config.CURRENCY, status="paid")
+            await maybe_credit_referral(await db.get_order(oid))
             await db.audit(user["tg_id"], "balance_purchase",
                            f"order={oid} total={t['total']} new_bal={new_bal}")
         else:

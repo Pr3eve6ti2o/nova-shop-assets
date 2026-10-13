@@ -23,7 +23,8 @@ async def cb_return_start(query: types.CallbackQuery, state: FSMContext):
         oid = int(query.data.split(":")[2])
     except (IndexError, ValueError):
         return await query.answer(texts.ERR_GENERIC, show_alert=True)
-    user = await get_or_register(query.from_user)
+    user, _ = await get_or_register(query.from_user.id,
+                                    query.from_user.full_name)
     order = await db.get_order(oid)
     if not order or order["user_id"] != user["id"]:
         return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
@@ -53,7 +54,8 @@ async def msg_return_reason(message: types.Message, state: FSMContext):
     await state.finish()
     if not oid:
         return await message.answer(texts.ERR_GENERIC)
-    user = await get_or_register(message.from_user)
+    user, _ = await get_or_register(message.from_user.id,
+                                    message.from_user.full_name)
     try:
         rid = await db.create_return(user["id"], int(oid),
                                      message.text or "")

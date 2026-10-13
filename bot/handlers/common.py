@@ -236,6 +236,11 @@ async def maybe_credit_referral(order) -> int:
     if not await db.claim_and_record_referral_credit(
             user["id"], user["referred_by"], order["id"], amount):
         return 0
+    # The reward is a balance credit (ledger entry alone left it
+    # unspendable — the notification promised "+amount" the user
+    # never actually received on any rail).
+    await db.add_balance(user["referred_by"], amount,
+                         tx_type="referral", order_id=order["id"])
     referrer = await db.get_user(user["referred_by"])
     if referrer:
         try:
