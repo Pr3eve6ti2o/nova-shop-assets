@@ -5,6 +5,7 @@ All notable changes to Nova Shop are recorded here. Format follows
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+- Scraped-port completion (plan 1.3, 7.3, 7.4, 8.4): Doctor CLI ported from JumpCodeFrog's doctor.go; seed + smoke tools ported from their cmd/seed and cmd/telegram-smoke; inline product sharing ported from DoktorShift's handle_inline_query; buyer-info checkout modes (none/email/address, default none) on DoktorShift's buyer fields model.
 
 ### Added — Repo port programme (DoktorShift/telegramshop + JumpCodeFrog/telegram-shop-bot)
 - Returns workflow with fulfilment stamps (shipped_at/delivered_at),

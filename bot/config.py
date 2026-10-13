@@ -184,6 +184,15 @@ POST_PURCHASE_DELAY_HOURS: int = _int_env(
 ONBOARDING_NUDGE_HOURS: int = _int_env(
     "ONBOARDING_NUDGE_HOURS", 24, min_val=1, max_val=720)
 
+# Buyer-info collection (port plan 1.3, DoktorShift model): what the
+# checkout asks before payment — none (default; checkout unchanged),
+# email (buyer email), address (email + full name; the delivery
+# address itself is collected for physical orders as before).
+BUYER_INFO_MODE: str = (os.getenv("BUYER_INFO_MODE") or "none").strip().lower()
+if BUYER_INFO_MODE not in ("none", "email", "address"):
+    raise RuntimeError(
+        f"BUYER_INFO_MODE must be none|email|address, got {BUYER_INFO_MODE!r}")
+
 # Outbound shop webhooks (port plan 6.4): signed event POSTs via outbox.
 SHOP_WEBHOOK_URL = (os.getenv("SHOP_WEBHOOK_URL") or "").strip() or None
 SHOP_WEBHOOK_SECRET = (os.getenv("SHOP_WEBHOOK_SECRET") or "").strip() or None

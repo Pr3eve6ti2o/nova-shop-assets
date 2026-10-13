@@ -2,6 +2,7 @@
 import asyncio
 import html
 import logging
+import re
 
 from aiogram import types
 from aiogram.dispatcher import FSMContext
@@ -468,7 +469,52 @@ async def cb_payment_method(query: types.CallbackQuery, state: FSMContext):
     await state.update_data(payment_method=method)
     await query.answer()
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
+    # Port 1.3: buyer-info modes — fields only, asked once per checkout
+    # before the confirm screen. Default mode "none" skips this entirely
+    # and checkout behaves exactly as before.
+    if config.BUYER_INFO_MODE != "none":
+        _data = await state.get_data()
+        if not _data.get("buyer_email"):
+            await Checkout.buyer_email.set()
+            await query.message.answer(
+                "📧 <b>Almost done</b>\n\nWhat email should we send your "
+                "receipt and order updates to?",
+                reply_markup=kb.force_reply())
+            return
     await render_confirm(query, state, user["id"])
+
+
+@dp.message_handler(state=Checkout.buyer_email)
+async def buyer_email_step(message: types.Message, state: FSMContext):
+    if await handle_escape(message, state):
+        return
+    email = (message.text or "").strip()
+    if len(email) > 254 or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return await message.answer(
+            "⚠️ That doesn't look like an email address — please try again.")
+    await state.update_data(buyer_email=email)
+    user, _ = await get_or_register(message.from_user.id,
+                                    message.from_user.full_name)
+    if config.BUYER_INFO_MODE == "address":
+        await Checkout.buyer_name.set()
+        await message.answer(
+            "👤 <b>Your full name</b>, as it should appear on the order:",
+            reply_markup=kb.force_reply())
+        return
+    await render_confirm(message, state, user["id"])
+
+
+@dp.message_handler(state=Checkout.buyer_name)
+async def buyer_name_step(message: types.Message, state: FSMContext):
+    if await handle_escape(message, state):
+        return
+    name = (message.text or "").strip()[:120]
+    if not name:
+        return await message.answer("⚠️ Please type your full name.")
+    await state.update_data(buyer_name=name)
+    user, _ = await get_or_register(message.from_user.id,
+                                    message.from_user.full_name)
+    await render_confirm(message, state, user["id"])
 
 
 # ------------------------------------------------------------- confirm ---
@@ -488,6 +534,11 @@ def _confirm_text_and_kb(state_data: dict, t: dict):
         else:
             address_line = texts.MSG_CO_CONFIRM_PICKUP_LINE
         contact_block = f"\U0001f4de {phone}\n{address_line}"
+    # Port 1.3: show the collected buyer email on the confirm screen.
+    if state_data.get("buyer_email"):
+        email_line = f"\U0001f4e7 {html.escape(str(state_data['buyer_email']))}"
+        contact_block = (contact_block + "\n" + email_line) \
+            if contact_block else email_line
     text = texts.MSG_CO_CONFIRM.format(
         step=step, lines=render_lines(t["items"]), contact_block=contact_block,
         payment=payment_label(state_data.get("payment_method"), kind),
@@ -648,6 +699,8 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
         payment_method=method, delivery_kind=kind,
         address=data.get("address") if kind == "delivery" else None,
         phone=data.get("phone"),
+        buyer_email=data.get("buyer_email"),
+        buyer_name=data.get("buyer_name"),
         promo_code=t["promo_code"], promo_id=promo_id,
         items=[(it["product_id"], it["name"], it["qty"], it["price_cents"])
                for it in t["items"]])

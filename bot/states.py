@@ -6,6 +6,8 @@ class Checkout(StatesGroup):
     """Sleek 2-screen checkout: payment -> confirm. (Details removed for digital-only.)"""
     payment = State()   # payment method (chains listed directly)
     confirm = State()   # merged review & confirm; promo via reply
+    buyer_email = State()  # port 1.3: BUYER_INFO_MODE=email|address prompt
+    buyer_name = State()   # port 1.3: BUYER_INFO_MODE=address prompt
 
 
 class SearchFlow(StatesGroup):

@@ -2287,7 +2287,8 @@ class Database:
     async def create_checkout_atomic(self, *, user_id, subtotal_cents,
                                      discount_cents, total_cents, payment_method,
                                      delivery_kind, address, phone, promo_code=None,
-                                     promo_id=None, items=()) -> tuple:
+                                     promo_id=None, items=(),
+                                     buyer_email=None, buyer_name=None) -> tuple:
         """Create order + items + promo claim + cart clear in one transaction.
 
         Unlike create_order_atomic, this does NOT decrement stock — stock
@@ -2310,11 +2311,12 @@ class Database:
                 cur = await db.execute(
                     "INSERT INTO orders(user_id, status, subtotal_cents,"
                     " discount_cents, total_cents, payment_method, delivery_kind,"
-                    " address, phone, promo_code, created_at, updated_at)"
-                    " VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " address, phone, promo_code, created_at, updated_at,"
+                    " buyer_email, buyer_name)"
+                    " VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (user_id, subtotal_cents, discount_cents, total_cents,
                      payment_method, delivery_kind, address, phone, promo_code,
-                     now, now),
+                     now, now, buyer_email, buyer_name),
                 )
                 order_id = cur.lastrowid
 
