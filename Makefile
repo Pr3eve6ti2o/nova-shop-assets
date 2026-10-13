@@ -26,3 +26,9 @@ docker-up: ## Start the bot with docker compose
 
 docker-down: ## Stop the docker compose stack
 	docker compose down
+
+seed: ## Seed a demo database (DATABASE_PATH or bot/data/demo.db)
+	python3 tools/seed_demo.py
+
+smoke: ## Run offline smoke checks
+	python3 tools/smoke.py
