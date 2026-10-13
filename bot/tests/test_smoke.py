@@ -498,7 +498,7 @@ def _payment_rails_body(cp, cfg, importlib):
         os.environ["CRYPTOBOT_TOKEN"] = "cb-test"
         os.environ["PAYMENTS_PROVIDER_TOKEN"] = "stripe-test"
         os.environ["XPUB_BTC"] = "zpub6jftahH18ngZw8pWFPu9ff2FJLn2WGdipSRX1NZ9uUN6m2oCedCycnGtJWMDaQ7ez8qXt5Ru9bcFifYHfXBg9RLS9g1RjmUC1L2dsCsVGoy"
-        os.environ["TON_DEPOSIT_ADDRESS"] = "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        os.environ["TON_DEPOSIT_ADDRESS"] = "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         importlib.reload(cfg)
         importlib.reload(cp)
         rails = await cp.payment_rails(None, 1000)
@@ -517,6 +517,40 @@ def _payment_rails_body(cp, cfg, importlib):
         importlib.reload(cp)
 
     asyncio.run(run())
+
+
+def test_ton_address_shape():
+    """Real TON friendly addresses are 48 chars and must LOAD.
+
+    Regression (2026-10-13): the config validator demanded 46 chars
+    ({44} after the prefix), so any real TON_DEPOSIT_ADDRESS crashed
+    the bot at import — the old 46-char fixture here matched the bug
+    and kept the suite green while the bot could not boot.
+    """
+    import importlib
+    import config as cfg
+
+    real = "UQ" + "A" * 46          # 48 chars, real friendly shape
+    old_fixture_shape = "EQ" + "A" * 44  # 46 chars, the buggy shape
+    with _no_dotenv():
+        os.environ["BOT_TOKEN"] = \
+            "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        try:
+            os.environ["TON_DEPOSIT_ADDRESS"] = real
+            importlib.reload(cfg)
+            assert cfg.TON_DEPOSIT_ADDRESS == real
+            for bad in (old_fixture_shape, "not-an-address", "UQ" + "A" * 45):
+                os.environ["TON_DEPOSIT_ADDRESS"] = bad
+                try:
+                    importlib.reload(cfg)
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError(
+                        f"malformed TON address accepted: {bad!r}")
+        finally:
+            os.environ.pop("TON_DEPOSIT_ADDRESS", None)
+            importlib.reload(cfg)
 
 
 def test_miniapp_payload():

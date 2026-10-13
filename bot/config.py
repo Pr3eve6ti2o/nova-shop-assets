@@ -245,8 +245,14 @@ XPUB_TRX = (os.getenv("XPUB_TRX") or "").strip() or None
 TON_DEPOSIT_ADDRESS = (os.getenv("TON_DEPOSIT_ADDRESS") or "").strip() or None
 
 # Opus: validate TON address shape — a typo sends funds nowhere.
+# Friendly addresses are 48 chars total (2-char prefix + 46). The
+# original {44} pattern demanded 46 chars and rejected EVERY real
+# address, crashing startup whenever one was configured (found
+# 2026-10-13 when the test bot refused to boot with its real address;
+# the test fixture had been shaped to the buggy pattern, so the suite
+# stayed green).
 if TON_DEPOSIT_ADDRESS and not re.fullmatch(
-        r"[UEk]Q[A-Za-z0-9_-]{44}", TON_DEPOSIT_ADDRESS):
+        r"[UEk]Q[A-Za-z0-9_-]{46}", TON_DEPOSIT_ADDRESS):
     raise RuntimeError(
         f"TON_DEPOSIT_ADDRESS looks malformed: {TON_DEPOSIT_ADDRESS[:12]!r}...")
 
