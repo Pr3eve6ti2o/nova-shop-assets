@@ -14,9 +14,9 @@ import { botFetch, newIdempotencyKey, readJsonBody, requireRole, withBotErrors }
  *   endpoint that calls the bot's internal API; the bot is the writer.
  * - "Refund to store credit" calls the bot API (fail-closed ceiling
  *   lives there) and mirrors the refunded total back onto the doc.
- * - Buyer-info edits (name/phone/address) write back to the bot via an
- *   afterChange hook while the order is still eligible; if the bot
- *   refuses, the panel save fails too — no silent drift.
+ * - Buyer-info edits (name/phone/address) write back to the bot via a
+ *   beforeChange hook while the order is still eligible; if the bot
+ *   refuses, the panel save never happens — no silent drift.
  */
 
 const BOT_STATUS_TO_PAYLOAD: Record<string, string> = {
@@ -51,33 +51,43 @@ export const Orders: CollectionConfig = {
     delete: () => false,
   },
   hooks: {
-    afterChange: [
-      async ({ doc, previousDoc, req, operation }) => {
+    beforeChange: [
+      async ({ data, originalDoc, req, operation }) => {
         // Only panel edits of buyer info write back — bot pushes
         // (service role) and endpoint updates (context flag) skip.
-        if (operation !== 'update' || !previousDoc) return doc
-        if (req.context?.skipBotSync) return doc
+        // This runs BEFORE the save on purpose: the bot is asked
+        // first, and if it refuses (e.g. order already shipped) the
+        // hook throws and the panel save never happens — an
+        // afterChange version of this hook demonstrably let the
+        // document drift when the bot said no (E2E, 2026-10-14).
+        if (operation !== 'update' || !originalDoc) return data
+        if (req.context?.skipBotSync) return data
         const role = (req.user as { role?: string } | null)?.role
-        if (role !== 'admin' && role !== 'staff') return doc
-        const oid = botOrderId(doc.orderNumber)
-        if (!oid) return doc
+        if (role !== 'admin' && role !== 'staff') return data
+        const oid = botOrderId(originalDoc.orderNumber)
+        if (!oid) return data
         const changed: Record<string, unknown> = {}
-        if (doc.customerName !== previousDoc.customerName) changed.name = doc.customerName
-        if (doc.phone !== previousDoc.phone) changed.phone = doc.phone
-        if (doc.address !== previousDoc.address) changed.address = doc.address
-        if (!Object.keys(changed).length) return doc
+        if (data.customerName !== undefined && data.customerName !== originalDoc.customerName) {
+          changed.name = data.customerName
+        }
+        if (data.phone !== undefined && data.phone !== originalDoc.phone) {
+          changed.phone = data.phone
+        }
+        if (data.address !== undefined && data.address !== originalDoc.address) {
+          changed.address = data.address
+        }
+        if (!Object.keys(changed).length) return data
         try {
           await botFetch(`/internal/orders/${oid}/buyer`, {
             method: 'POST',
             body: changed,
           })
         } catch (e) {
-          // No silent drift: fail the panel save when the bot refuses.
           throw new Error(
             `Bot write-back failed (${(e as Error).message}). The order was NOT updated.`,
           )
         }
-        return doc
+        return data
       },
     ],
   },
