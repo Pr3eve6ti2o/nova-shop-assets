@@ -95,6 +95,50 @@ async def _get_user_or_404(request: web.Request):
     return user, None
 
 
+async def list_customers(request: web.Request) -> web.Response:
+    try:
+        limit = min(max(int(request.query.get("limit", 100)), 1), 500)
+        offset = max(int(request.query.get("offset", 0)), 0)
+    except ValueError:
+        return _err(400, "bad_pagination", "limit/offset must be integers")
+    rows = await request.app["db"].list_customers(limit=limit, offset=offset)
+    return web.json_response({"customers": [
+        {"tg_id": int(r["tg_id"]), "user_id": int(r["id"]),
+         "name": r["name"], "balance_cents": int(r["balance_cents"]),
+         "is_blocked": bool(r["is_blocked"])} for r in rows]})
+
+
+async def list_gift_cards(request: web.Request) -> web.Response:
+    rows = await request.app["db"].giftcard_list(limit=200)
+    return web.json_response({"gift_cards": [dict(r) for r in rows]})
+
+
+async def update_buyer(request: web.Request) -> web.Response:
+    try:
+        order_id = int(request.match_info["order_id"])
+    except (KeyError, ValueError):
+        return _err(400, "bad_order_id", "order id must be an integer")
+    db = request.app["db"]
+    order = await db.get_order(order_id)
+    if not order:
+        return _err(404, "order_not_found", "no such order")
+    body = await _body(request)
+    fields = {}
+    for key in ("name", "phone", "address"):
+        if key in body:
+            value = body[key]
+            if value is not None and (not isinstance(value, str)
+                                      or len(value) > 500):
+                return _err(400, "bad_field", f"{key} must be a short string")
+            fields[key] = value
+    if not fields:
+        return _err(400, "no_fields", "nothing to update")
+    if not await db.update_order_buyer(order_id, **fields):
+        return _err(409, "not_eligible",
+                    "buyer info can only change before shipping")
+    return web.json_response({"order_id": order_id, "updated": fields})
+
+
 async def get_customer(request: web.Request) -> web.Response:
     user, err = await _get_user_or_404(request)
     if err:
@@ -334,6 +378,9 @@ def create_app(db, secret: str) -> web.Application:
     app["secret"] = secret
     r = app.router
     r.add_get("/healthz", lambda req: web.json_response({"ok": True}))
+    r.add_get("/internal/customers", list_customers)
+    r.add_get("/internal/gift-cards", list_gift_cards)
+    r.add_post("/internal/orders/{order_id}/buyer", update_buyer)
     r.add_get("/internal/customers/{tg_id}", get_customer)
     r.add_get("/internal/customers/{tg_id}/transactions", list_transactions)
     r.add_post("/internal/customers/{tg_id}/credit", credit)

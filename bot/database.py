@@ -776,6 +776,40 @@ class Database:
                     (user_id, int(limit), int(offset))) as cur:
                 return await cur.fetchall()
 
+    async def list_customers(self, limit: int = 100, offset: int = 0):
+        """All customers, newest first (Payload mirror sync source)."""
+        async with self._db() as db:
+            async with db.execute(
+                    "SELECT * FROM users ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (int(limit), int(offset))) as cur:
+                return await cur.fetchall()
+
+    async def update_order_buyer(self, order_id: int, *, name: str = None,
+                                 phone: str = None,
+                                 address: str = None) -> bool:
+        """Eligible-order buyer-info edit (Payload write-back): only
+        while the order has not shipped. Returns True when applied."""
+        sets, params = ["updated_at=?"], [utcnow_iso()]
+        if name is not None:
+            sets.append("buyer_name=?")
+            params.append(name)
+        if phone is not None:
+            sets.append("phone=?")
+            params.append(phone)
+        if address is not None:
+            sets.append("address=?")
+            params.append(address)
+        if len(sets) == 1:
+            return False
+        params.append(int(order_id))
+        async with self._db() as db:
+            cur = await db.execute(
+                f"UPDATE orders SET {', '.join(sets)} WHERE id=?"
+                " AND status IN ('pending','confirmed','processing')",
+                params)
+            await db.commit()
+            return cur.rowcount > 0
+
     # ------------------------------------------------------- gift cards --
     @staticmethod
     def _giftcard_code() -> str:

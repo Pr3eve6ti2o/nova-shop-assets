@@ -156,6 +156,27 @@ class InternalApi(unittest.TestCase):
                                      headers=H)
                 self.assertEqual(r.status, 200)
                 self.assertEqual(len((await r.json())["items"]), 1)
+                # Sync lists for the Payload mirror.
+                r = await client.get("/internal/customers", headers=H)
+                custs = (await r.json())["customers"]
+                self.assertEqual(len(custs), 1)
+                self.assertEqual(custs[0]["tg_id"], 777)
+                r = await client.get("/internal/gift-cards", headers=H)
+                self.assertEqual(len((await r.json())["gift_cards"]), 1)
+                # Buyer edit: comp order is 'confirmed' (eligible);
+                # the refunded one is not.
+                comp = await db.create_manual_order(
+                    uid, [(p1, 1)], kind="comp", actor_tg_id=1)
+                r = await client.post(
+                    f"/internal/orders/{comp[0]}/buyer", headers=H,
+                    json={"phone": "+1 555 0100", "address": "1 Main St"})
+                self.assertEqual(r.status, 200)
+                o = await db.get_order(comp[0])
+                self.assertEqual(o["phone"], "+1 555 0100")
+                r = await client.post(
+                    f"/internal/orders/{charged_oid}/buyer", headers=H,
+                    json={"phone": "x"})
+                self.assertEqual(r.status, 409)
             finally:
                 await client.close()
                 os.unlink(path)
