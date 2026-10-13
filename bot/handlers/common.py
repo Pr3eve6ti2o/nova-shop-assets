@@ -149,8 +149,13 @@ def render_roadmap(status: str) -> str:
     return "\n".join(lines)
 
 
-async def notify_admins(text: str, min_bit: int = 0, reply_markup=None):
-    """Send a message to config admins + users holding min_bit. Returns sent count."""
+async def notify_admins(text: str, min_bit: int = 0, reply_markup=None,
+                        topic: int = None):
+    """Send a message to config admins + users holding min_bit. Returns sent count.
+
+    Port 6.5: when ADMIN_FORUM_CHAT_ID is configured, one extra copy
+    goes to the forum supergroup (into `topic` when given), so a team
+    can triage from a shared chat instead of personal DMs."""
     targets = set(config.ADMINS)
     for tg_id, mask in await db.admin_tg_ids():
         if min_bit == 0 or (mask & min_bit):
@@ -163,6 +168,16 @@ async def notify_admins(text: str, min_bit: int = 0, reply_markup=None):
             sent += 1
         except Exception as e:
             logger.warning("notify_admins -> %s failed: %s", tg_id, e)
+    forum = getattr(config, "ADMIN_FORUM_CHAT_ID", 0)
+    if forum:
+        try:
+            await bot.send_message(
+                forum, text, reply_markup=reply_markup,
+                message_thread_id=topic or None,
+                disable_web_page_preview=True)
+            sent += 1
+        except Exception as e:
+            logger.warning("notify_admins -> forum %s failed: %s", forum, e)
     return sent
 
 
@@ -174,7 +189,23 @@ async def fulfill_order(order_id: int):
     compensation rollback needed, so inventory can never be stranded by
     a failed rollback.
     """
-    return await db.fulfill_order_atomic(order_id)
+    result = await db.fulfill_order_atomic(order_id)
+    if result and result[0]:
+        # Port 6.4: outbound webhook for paid+fulfilled orders. Every
+        # fulfilment path funnels through here. Never allowed to fail
+        # the fulfilment itself.
+        try:
+            order = await db.get_order(order_id)
+            if order:
+                from webhooks import webhook_emit
+                await webhook_emit(db, "order.paid", {
+                    "order_id": order_id,
+                    "total_cents": order["total_cents"],
+                    "currency": config.CURRENCY,
+                    "payment_method": order["payment_method"]})
+        except Exception:
+            pass
+    return result
 
 
 async def maybe_credit_referral(order) -> int:

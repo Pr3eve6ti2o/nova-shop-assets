@@ -54,6 +54,9 @@ async def process_outbox_once(db, limit: int = 10) -> int:
         ok = False
         if ev_type == "order.created":
             ok = await _deliver_payload_order(payload)
+        elif ev_type.startswith("webhook:"):
+            from webhooks import deliver_webhook
+            ok = await deliver_webhook(payload)
         else:
             logger.warning("outbox: unknown event type %s (id=%s)", ev_type, ev_id)
 

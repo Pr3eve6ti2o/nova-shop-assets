@@ -1439,6 +1439,152 @@ class Database:
                 (user_id,)) as cur:
                 return await cur.fetchall()
 
+    # ------------------------------------------- payreview + refunds (6)
+    # Port plan Part 6 (JumpCodeFrog payreview pattern): quarantined
+    # payments, append-only resolutions, and a refunds ledger whose
+    # fail-closed rule — refunds for an order never exceed its total —
+    # is enforced at write time.
+
+    @staticmethod
+    def anomaly_fingerprint(provider: str, *parts) -> str:
+        import hashlib
+        raw = ":".join([str(provider)] + [str(p) for p in parts])
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    async def anomaly_record(self, provider: str, fingerprint: str,
+                             reason: str, external_id: str = None,
+                             user_id: int = None, amount_text: str = None,
+                             amount_cents: int = None,
+                             currency: str = None, raw: str = None) -> int:
+        """Record an anomaly (idempotent on fingerprint). Returns the
+        anomaly id (existing row's id when already recorded)."""
+        async with self._db() as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO payment_anomalies"
+                "(provider, fingerprint, external_id, user_id, amount_text,"
+                " amount_cents, currency, reason, raw, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (provider, fingerprint, external_id, user_id, amount_text,
+                 amount_cents, currency, reason, raw, utcnow_iso()))
+            await db.commit()
+            async with db.execute(
+                "SELECT id FROM payment_anomalies WHERE fingerprint=?",
+                (fingerprint,)) as cur:
+                row = await cur.fetchone()
+            return row["id"] if row else 0
+
+    async def anomaly_get(self, anomaly_id: int):
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT * FROM payment_anomalies WHERE id=?",
+                (anomaly_id,)) as cur:
+                return await cur.fetchone()
+
+    async def anomaly_exists(self, fingerprint: str) -> bool:
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT 1 FROM payment_anomalies WHERE fingerprint=?",
+                (fingerprint,)) as cur:
+                return await cur.fetchone() is not None
+
+    async def anomalies_open(self, limit: int = 20):
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT * FROM payment_anomalies WHERE status='open'"
+                " ORDER BY created_at ASC LIMIT ?", (limit,)) as cur:
+                return await cur.fetchall()
+
+    async def anomaly_resolve(self, anomaly_id: int, admin_id: int,
+                              action: str, note: str = "",
+                              amount_cents: int = None) -> bool:
+        """Settle or dismiss an open anomaly; appends the resolution.
+        Only an 'open' anomaly can be resolved (atomic claim)."""
+        if action not in ("settled", "dismissed"):
+            raise ValueError("action must be 'settled' or 'dismissed'")
+        if not (note or "").strip():
+            raise ValueError("A note is required (it is the audit trail).")
+        async with self._claim_lock:
+            async with self._db() as db:
+                cur = await db.execute(
+                    "UPDATE payment_anomalies SET status=?, resolved_at=?"
+                    " WHERE id=? AND status='open'",
+                    (action, utcnow_iso(), anomaly_id))
+                won = cur.rowcount > 0
+                if won:
+                    await db.execute(
+                        "INSERT INTO payment_resolutions"
+                        "(anomaly_id, action, admin_id, note, amount_cents,"
+                        " created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (anomaly_id, action, admin_id, note.strip(),
+                         amount_cents, utcnow_iso()))
+                await db.commit()
+                return won
+
+    async def anomaly_resolutions(self, anomaly_id: int):
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT * FROM payment_resolutions WHERE anomaly_id=?"
+                " ORDER BY id", (anomaly_id,)) as cur:
+                return await cur.fetchall()
+
+    async def record_refund(self, order_id: int, user_id: int,
+                            amount_cents: int, method: str,
+                            admin_id: int = None, note: str = "") -> int:
+        """Write a refund ledger row. FAIL-CLOSED (JumpCodeFrog rule):
+        the sum of all refunds for an order may never exceed the order
+        total — a divergence raises instead of double-paying."""
+        if amount_cents < 0:
+            raise ValueError("amount_cents must be >= 0")
+        async with self._claim_lock:
+            async with self._db() as db:
+                async with db.execute(
+                    "SELECT total_cents FROM orders WHERE id=?",
+                    (order_id,)) as cur:
+                    order = await cur.fetchone()
+                if not order:
+                    raise ValueError("Order not found.")
+                async with db.execute(
+                    "SELECT COALESCE(SUM(amount_cents), 0) s FROM refunds"
+                    " WHERE order_id=?", (order_id,)) as cur:
+                    already = (await cur.fetchone())["s"]
+                if already + amount_cents > int(order["total_cents"]):
+                    raise ValueError(
+                        "Refund would exceed the order total "
+                        f"({already} + {amount_cents} > "
+                        f"{order['total_cents']} cents) — refused.")
+                cur = await db.execute(
+                    "INSERT INTO refunds(order_id, user_id, amount_cents,"
+                    " method, admin_id, note, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (order_id, user_id, amount_cents, method, admin_id,
+                     note, utcnow_iso()))
+                rid = cur.lastrowid
+                await db.commit()
+                return rid
+
+    async def refunds_for_order(self, order_id: int):
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT * FROM refunds WHERE order_id=? ORDER BY id",
+                (order_id,)) as cur:
+                return await cur.fetchall()
+
+    async def revenue_by_day(self, days: int = 7):
+        """Daily revenue for the last N days (port 6.6, DoktorShift
+        get_daily_revenue pattern): (date, cents, orders) ascending."""
+        from datetime import datetime, timedelta, timezone
+        since = (datetime.now(timezone.utc)
+                 - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT substr(created_at, 1, 10) AS day,"
+                " COALESCE(SUM(total_cents), 0) AS cents, COUNT(*) AS n"
+                " FROM orders WHERE status IN"
+                " ('confirmed','processing','shipped','delivered')"
+                " AND substr(created_at, 1, 10) >= ?"
+                " GROUP BY day ORDER BY day ASC", (since,)) as cur:
+                return await cur.fetchall()
+
     async def cart_remove(self, user_id: int, product_id: int):
         await self.cart_set_qty(user_id, product_id, 0)
 
@@ -2331,8 +2477,17 @@ class Database:
                 (order_id,)) as cur:
                 order = await cur.fetchone()
         total = int(order["total_cents"]) if order else 0
-        if total > 0:
-            await self.add_balance(user_id, total, tx_type="refund",
+        # Credit only what has not already been refunded (the refunds
+        # ledger is the source of truth; record_refund fail-closes any
+        # attempt to exceed the order total).
+        already = sum(int(r["amount_cents"])
+                      for r in await self.refunds_for_order(order_id))
+        credit = max(0, total - already)
+        if credit > 0:
+            await self.record_refund(order_id, user_id, credit, "balance",
+                                     admin_id=admin_id,
+                                     note=f"return #{return_id}")
+            await self.add_balance(user_id, credit, tx_type="refund",
                                    order_id=order_id)
         async with self._db() as db:
             await db.execute(
@@ -2350,25 +2505,48 @@ class Database:
         refund happened). Only valid from 'approved' + manual target."""
         if refund_cents < 0:
             raise ValueError("refund_cents must be >= 0")
+        # Flip + ledger write in ONE transaction: if the refund would
+        # exceed the order total, nothing is written at all.
         order_id = None
         async with self._claim_lock:
             async with self._db() as db:
+                async with db.execute(
+                    "SELECT order_id, user_id FROM returns WHERE id=?",
+                    (return_id,)) as cur:
+                    ret = await cur.fetchone()
+                if not ret:
+                    return False
+                order_id, user_id = ret["order_id"], ret["user_id"]
                 cur = await db.execute(
                     "UPDATE returns SET status='refunded', refund_cents=?"
                     " WHERE id=? AND status='approved'"
                     " AND refund_target='manual'",
                     (refund_cents, return_id))
                 won = cur.rowcount > 0
-                if won:
-                    async with db.execute(
-                        "SELECT order_id FROM returns WHERE id=?",
-                        (return_id,)) as cur2:
-                        row = await cur2.fetchone()
-                    order_id = row["order_id"] if row else None
+                if not won:
+                    return False
+                async with db.execute(
+                    "SELECT total_cents FROM orders WHERE id=?",
+                    (order_id,)) as cur:
+                    order = await cur.fetchone()
+                async with db.execute(
+                    "SELECT COALESCE(SUM(amount_cents), 0) s FROM refunds"
+                    " WHERE order_id=?", (order_id,)) as cur:
+                    already = (await cur.fetchone())["s"]
+                if order is None or already + refund_cents > int(
+                        order["total_cents"]):
+                    raise ValueError(
+                        "Refund would exceed the order total — refused.")
+                await db.execute(
+                    "INSERT INTO refunds(order_id, user_id, amount_cents,"
+                    " method, admin_id, note, created_at)"
+                    " VALUES (?, ?, ?, 'manual', NULL, ?, ?)",
+                    (order_id, user_id, refund_cents,
+                     f"return #{return_id}", utcnow_iso()))
                 await db.commit()
-        if won and order_id:
+        if order_id:
             await self.set_order_status(order_id, "refunded")
-        return won
+        return True
 
     async def cancel_order_atomic(self, order_id: int) -> bool:
         """P1-3: Atomically cancel order AND release promo in one transaction.

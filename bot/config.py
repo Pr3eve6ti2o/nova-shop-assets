@@ -184,6 +184,17 @@ POST_PURCHASE_DELAY_HOURS: int = _int_env(
 ONBOARDING_NUDGE_HOURS: int = _int_env(
     "ONBOARDING_NUDGE_HOURS", 24, min_val=1, max_val=720)
 
+# Outbound shop webhooks (port plan 6.4): signed event POSTs via outbox.
+SHOP_WEBHOOK_URL = (os.getenv("SHOP_WEBHOOK_URL") or "").strip() or None
+SHOP_WEBHOOK_SECRET = (os.getenv("SHOP_WEBHOOK_SECRET") or "").strip() or None
+
+# Admin forum routing (port plan 6.5): mirror admin notifications into a
+# forum supergroup, optionally per-topic. 0/unset disables each.
+ADMIN_FORUM_CHAT_ID: int = _int_env("ADMIN_FORUM_CHAT_ID", 0)
+ADMIN_TOPIC_ORDERS: int = _int_env("ADMIN_TOPIC_ORDERS", 0)
+ADMIN_TOPIC_SUPPORT: int = _int_env("ADMIN_TOPIC_SUPPORT", 0)
+ADMIN_TOPIC_PAYMENTS: int = _int_env("ADMIN_TOPIC_PAYMENTS", 0)
+
 # Opus P0 money-sanity: referral + bonus must never exceed 100%.
 if REFERRAL_PERCENT + DEPOSIT_BONUS_PERCENT > 100:
     raise RuntimeError(

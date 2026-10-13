@@ -575,6 +575,48 @@ async def _sweep_tonconnect_pending():
             matched = await find_tonconnect_tx(merchant, p["sender"], p["amount_nano"],
                                                p.get("claim_code"))
             if not matched:
+                # Port 6.1: a pending that stays unmatched for >24h means
+                # money may have arrived with nothing to attach it to.
+                # Quarantine it in the payreview queue (fingerprint makes
+                # this once-only) and alert the admins exactly once.
+                try:
+                    from datetime import datetime, timezone
+                    created = str(p.get("created_at") or "")
+                    when = None
+                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S%z",
+                                "%Y-%m-%dT%H:%M:%S"):
+                        try:
+                            when = datetime.strptime(
+                                created.replace("+00:00", ""), fmt)
+                            break
+                        except ValueError:
+                            continue
+                    if when is not None:
+                        age_h = (datetime.now(timezone.utc).replace(
+                            tzinfo=None) - when).total_seconds() / 3600
+                        if age_h > 24:
+                            fp = db.anomaly_fingerprint(
+                                "tonconnect", "pending", p["id"])
+                            known = await db.anomaly_exists(fp)
+                            aid = await db.anomaly_record(
+                                "tonconnect", fp,
+                                "TON Connect payment unmatched for >24h — "
+                                "the watcher never saw a matching transfer.",
+                                external_id=p.get("claim_code"),
+                                user_id=p["user_id"],
+                                amount_text=f"{p['amount_nano']} nanoTON",
+                                raw=f"sender={p['sender']}")
+                            if not known:
+                                from handlers.common import notify_admins
+                                await notify_admins(
+                                    f"⚠️ <b>Payment review #{aid}</b>\n"
+                                    "A TON Connect payment has been "
+                                    "unmatched for over 24 hours. Open "
+                                    "/payreview to settle it.",
+                                    topic=config.ADMIN_TOPIC_PAYMENTS or None)
+                except Exception as e:
+                    logger.warning("anomaly record failed for pending %s: %s",
+                                   p["id"], e)
                 continue
             user = await db.get_user(p["user_id"])
             if not user:
@@ -591,6 +633,27 @@ async def _sweep_tonconnect_pending():
                 logger.warning(
                     "tonconnect slow-path blocked for pending %s (order_id=%s ok=%s)",
                     p["id"], order_id, ok)
+                # Port 6.1: money arrived but could not be fulfilled —
+                # quarantine it for admin review before dropping.
+                try:
+                    fp = db.anomaly_fingerprint(
+                        "tonconnect", "blocked", p["id"],
+                        (matched or {}).get("txid", ""))
+                    await db.anomaly_record(
+                        "tonconnect", fp,
+                        "TON Connect transfer matched but fulfilment was "
+                        "blocked (e.g. tx already claimed).",
+                        external_id=(matched or {}).get("txid"),
+                        user_id=p["user_id"],
+                        amount_text=f"{p['amount_nano']} nanoTON",
+                        raw=f"sender={p['sender']}")
+                    from handlers.common import notify_admins
+                    await notify_admins(
+                        "⚠️ <b>Payment review</b>\nA TON payment matched "
+                        "but could not be fulfilled. Open /payreview.",
+                        topic=config.ADMIN_TOPIC_PAYMENTS or None)
+                except Exception as e:
+                    logger.warning("anomaly record (blocked) failed: %s", e)
                 await db.tonconnect_pending_remove(p["id"])
                 continue
             await db.tonconnect_pending_remove(p["id"])

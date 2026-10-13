@@ -94,3 +94,13 @@ class ReturnFlow(StatesGroup):
 
 class AdminReturnFlow(StatesGroup):
     deny_note = State()  # waiting for the admin to type the (required) denial note
+
+
+class AdminPayreviewFlow(StatesGroup):
+    settle_amount = State()  # USD amount to credit for a settled anomaly
+    settle_note = State()    # required audit note for the settlement
+    dismiss_note = State()   # required audit note for a dismissal
+
+
+class AdminRefundFlow(StatesGroup):
+    order_id = State()  # waiting for the admin to type the order id

@@ -673,6 +673,11 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
          "rawPayload": {"bot_order_id": oid, "delivery_kind": kind,
                         "address": data.get("address"),
                         "phone": data.get("phone")}})
+    # Port 6.4: outbound webhook mirror of the order.created event.
+    from webhooks import webhook_emit
+    await webhook_emit(db, "order.created", {
+        "order_id": oid, "total_cents": t["total"],
+        "currency": config.CURRENCY, "payment_method": method})
     await query.answer()
 
     # Fully discounted: nothing to charge — fulfill as a free order.

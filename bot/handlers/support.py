@@ -187,7 +187,8 @@ async def support_followup(message: types.Message, state: FSMContext):
     await notify_admins(
         f"\u2709\ufe0f <b>Ticket #{tid}</b> \u2014 new message from the "
         f"customer:\n\n{text}",
-        min_bit=0, reply_markup=kb.admin_reply_kb(user["tg_id"]))
+        min_bit=0, reply_markup=kb.admin_reply_kb(user["tg_id"]),
+        topic=config.ADMIN_TOPIC_SUPPORT or None)
     await message.answer("\u2705 Added to your ticket. We'll reply here.")
 
 
@@ -231,7 +232,8 @@ async def support_message(message: types.Message, state: FSMContext):
         texts.MSG_SUPPORT_TICKET_ADMIN.format(
             ticket_id=ticket_id, name=user["name"] or "?",
             tg_id=user["tg_id"], text=text),
-        min_bit=0, reply_markup=kb.admin_reply_kb(user["tg_id"]))
+        min_bit=0, reply_markup=kb.admin_reply_kb(user["tg_id"]),
+        topic=config.ADMIN_TOPIC_SUPPORT or None)
     await message.answer(texts.MSG_SUPPORT_TICKET_OPEN.format(id=ticket_id))
 
 

@@ -83,12 +83,18 @@ async def cb_stats(query: types.CallbackQuery):
     top_lines = "\n".join(
         f"\u2022 {_escape(str(t['name']))} \u2014 {t['qty']} sold ({fmt_money(t['revenue'], config.CURRENCY)})"
         for t in top) or "\u2014"
+    # Port 6.6: daily revenue for the last 7 days (DoktorShift pattern).
+    daily = await db.revenue_by_day(7)
+    daily_lines = "\n".join(
+        f"\u2022 {d['day']}: {fmt_money(d['cents'], config.CURRENCY)} "
+        f"({d['n']} orders)" for d in daily) or "\u2014"
     text = texts.MSG_ADMIN_STATS.format(
         total=total, new24=new24, blocked=blocked,
         rev14=fmt_money(rev14, config.CURRENCY), orders14=orders14,
         rev_total=fmt_money(rev_total, config.CURRENCY),
         avg_check=fmt_money(avg, config.CURRENCY),
         by_status=by_status, top=top_lines)
+    text += f"\n\n\U0001f4c5 <b>Revenue by day (last 7 days)</b>\n{daily_lines}"
     back = kb.InlineKeyboardMarkup()
     back.row(kb.InlineKeyboardButton(texts.BTN_BACK, callback_data="adm"))
     await edit_text_safe(query, text, back)

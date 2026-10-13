@@ -9,6 +9,7 @@ from aiogram import types
 from aiogram.dispatcher import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+import config
 import texts
 from loader import bot, db, dp
 from states import ReturnFlow
@@ -68,4 +69,5 @@ async def msg_return_reason(message: types.Message, state: FSMContext):
     await notify_admins(
         f"↩️ <b>New return request #{rid}</b>\n"
         f"Order #{oid} — tap below to review.",
-        min_bit=4, reply_markup=markup)
+        min_bit=4, reply_markup=markup,
+        topic=config.ADMIN_TOPIC_ORDERS or None)
