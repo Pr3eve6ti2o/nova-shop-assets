@@ -17,7 +17,7 @@ import config
 import crypto_payments as cp
 import keyboards as kb
 import texts
-from crypto_watcher import finalize_crypto_order
+from crypto_watcher import finalize_crypto_order, quarantine_cryptobot_invoice
 from loader import bot, db, dp
 from utils import cb, fmt_money
 from .common import edit_text_safe, get_or_register, notify_admins
@@ -458,20 +458,39 @@ async def cb_cryptobot_check(query: types.CallbackQuery):
         await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
                              kb.crypto_other_methods_kb())
         return
-    paid = any(str(p.get("invoice_id")) == str(invoice_id)
-               and p.get("status") == "paid" for p in items)
-    if not paid:
+    paid_item = next(
+        (p for p in items if str(p.get("invoice_id")) == str(invoice_id)
+         and p.get("status") == "paid"), None)
+    if paid_item is None:
         # still_unpaid — named state with the next action.
         await query.answer()  # dismiss loading; the status message follows
         await query.message.answer(texts.MSG_CRYPTO_STILL_UNPAID)
         return
-    await db.set_cryptobot_status(invoice_id, "paid")
+    # Receipt check (CryptoBot fix 2026-10-13): the provider's amount,
+    # asset and payload must match the stored invoice exactly before any
+    # money moves; a mismatch is quarantined for /payreview, not credited.
+    try:
+        cp.validate_cryptobot_receipt(
+            paid_item, expected_amount=inv["amount"],
+            expected_asset=inv["asset"] or "USDT",
+            expected_payload=str(inv["order_id"]))
+    except ValueError as e:
+        await quarantine_cryptobot_invoice(paid_item, reason=str(e), local=inv)
+        await query.answer()
+        await edit_text_safe(
+            query,
+            texts.MSG_FULFILL_FAIL.format(note="payment held for manual review"),
+            kb.main_menu_kb())
+        return
     # M5: order was already loaded + ownership-checked above; never finalize
     # with amount 0 on a failed fetch.
-    await finalize_crypto_order(inv["order_id"], provider="cryptobot",
-                                external_id=f"cb_{invoice_id}",
-                                amount_cents=order["total_cents"],
-                                currency="USDT")
+    ok = await finalize_crypto_order(inv["order_id"], provider="cryptobot",
+                                     external_id=f"cb_{invoice_id}",
+                                     amount_cents=order["total_cents"],
+                                     currency="USDT")
+    # F1 pattern: 'paid' only once finalised; otherwise paid_unfinalized
+    # so the recovery sweep keeps retrying instead of stranding it.
+    await db.set_cryptobot_status(invoice_id, "paid" if ok else "paid_unfinalized")
     await query.answer()  # dismiss loading before removing the message
     try:
         await query.message.delete()
@@ -496,15 +515,18 @@ async def cb_topup_cryptobot_check(query: types.CallbackQuery):
             or not user or inv["topup_user_id"] != user["id"]):
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
         return
-    # Recover the NET amount EXACTLY from the stored gross string:
+    # Recover the NET amount EXACTLY from the gross amount:
     # gross = ceil(net * 100 / (100 - fee)) implies
     # net <= gross * (100 - fee) / 100 < net + 1, hence the floor below
-    # yields net precisely (no rounding ambiguity).
-    gross_cents = int(round(float(inv["amount"]) * 100))
+    # yields net precisely (no rounding ambiguity). The gross is parsed
+    # with the strict integer parser (CryptoBot fix 2026-10-13) — the old
+    # float() round-trip could misread amounts such as 2.675.
     fee_pct = int(inv["fee_pct"] if inv["fee_pct"] is not None else config.CRYPTOBOT_FEE_PERCENT)
-    net_cents = (gross_cents * (100 - fee_pct)) // 100
 
-    async def _finalize_and_show():
+    def _net_from_gross(gross_cents: int) -> int:
+        return (gross_cents * (100 - fee_pct)) // 100
+
+    async def _finalize_and_show(net_cents: int):
         ok, new_bal, bonus = await db.finalize_topup_payment(
             provider="cryptobot", external_id=f"cb_{invoice_id}",
             user_id=user["id"], amount_cents=net_cents, currency="USDT")
@@ -516,10 +538,26 @@ async def cb_topup_cryptobot_check(query: types.CallbackQuery):
             bonus_line=bonus_line,
             balance=fmt_money(new_bal, config.CURRENCY)), kb.balance_kb())
 
+    async def _quarantine_and_show(item, reason: str):
+        await quarantine_cryptobot_invoice(item, reason=reason, local=inv)
+        await query.answer()
+        await edit_text_safe(
+            query,
+            texts.MSG_FULFILL_FAIL.format(note="payment held for manual review"),
+            kb.balance_topup_kb())
+
     if inv["status"] == "paid":
         # Idempotent credit: a prior crash may have marked the invoice paid
         # without crediting the balance (finalize_topup_payment is idempotent).
-        await _finalize_and_show()
+        try:
+            gross_cents = cp.parse_strict_provider_amount(inv["amount"])
+        except ValueError:
+            await _quarantine_and_show(
+                {"invoice_id": invoice_id, "amount": inv["amount"],
+                 "asset": inv["asset"], "payload": "topup", "status": "paid"},
+                "stored invoice amount unparseable")
+            return
+        await _finalize_and_show(_net_from_gross(gross_cents))
         await query.answer(texts.TOAST_CRYPTO_ALREADY)
         return
     try:
@@ -530,14 +568,25 @@ async def cb_topup_cryptobot_check(query: types.CallbackQuery):
         await edit_text_safe(query, texts.MSG_CRYPTO_PROVIDER_DOWN,
                              kb.balance_topup_kb())
         return
-    paid = any(str(p.get("invoice_id")) == str(invoice_id)
-               and p.get("status") == "paid" for p in items)
-    if not paid:
+    paid_item = next(
+        (p for p in items if str(p.get("invoice_id")) == str(invoice_id)
+         and p.get("status") == "paid"), None)
+    if paid_item is None:
         await query.answer()
         await query.message.answer(texts.MSG_CRYPTO_STILL_UNPAID)
         return
+    # Receipt check (CryptoBot fix 2026-10-13): provider amount, asset and
+    # payload must match the stored invoice exactly before crediting.
+    try:
+        gross_cents = cp.validate_cryptobot_receipt(
+            paid_item, expected_amount=inv["amount"],
+            expected_asset=inv["asset"] or "USDT",
+            expected_payload="topup")
+    except ValueError as e:
+        await _quarantine_and_show(paid_item, str(e))
+        return
+    await _finalize_and_show(_net_from_gross(gross_cents))
     await db.set_cryptobot_status(invoice_id, "paid")
-    await _finalize_and_show()
     await query.answer()
 
 

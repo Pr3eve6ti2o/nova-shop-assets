@@ -500,46 +500,234 @@ async def _sweep_late_deposits():
         await asyncio.sleep(0.1)
 
 
+# --- CryptoBot quarantine + receipt-checked finalisation ---------------
+# Separate CryptoBot fix (2026-10-13), ported from JumpCodeFrog
+# internal/payment/cryptobot.go + internal/storage/payment_anomalies.go:
+# a paid invoice that cannot be turned into a valid receipt (bad/mismatched
+# amount, asset or payload; unknown or cancelled order) is PRESERVED in the
+# Part 6 payreview queue with its raw provider facts, never silently
+# finalised at the amount we merely expected, and never dropped.
+
+_CB_HISTORY_OFFSET = 0  # continuation cursor for the history window scan
+
+
+async def _alert_payment_anomaly(aid: int, invoice_id) -> None:
+    """Best-effort admin alert for a newly quarantined CryptoBot payment."""
+    try:
+        from handlers.common import notify_admins
+        await notify_admins(
+            f"⚠️ <b>Payment review #{aid}</b>\n"
+            f"A CryptoBot payment (invoice {invoice_id}) arrived but "
+            "could not be validated against its order. Open /payreview "
+            "to settle it.",
+            topic=config.ADMIN_TOPIC_PAYMENTS or None)
+    except Exception as e:
+        logger.warning("cryptobot anomaly alert failed: %s", e)
+
+
+async def quarantine_cryptobot_invoice(item, *, reason: str, local=None) -> int:
+    """Record a paid-but-invalid CryptoBot invoice in the payreview queue.
+
+    Idempotent on the provider fact (invoice id + raw amount + raw
+    payload + asset, JCF canonical-fact fingerprint); the admin alert
+    fires exactly once, when the anomaly is first recorded. The local
+    invoice row (when known) is parked in the terminal 'quarantined'
+    status so the sweep and the expiry pass leave it alone until an
+    admin settles or dismisses it in /payreview.
+    """
+    invoice_id = None
+    if isinstance(item, dict) and item.get("invoice_id") is not None:
+        invoice_id = item.get("invoice_id")
+    elif local is not None:
+        invoice_id = local["invoice_id"]
+    raw_amount = item.get("amount") if isinstance(item, dict) else None
+    raw_payload = item.get("payload") if isinstance(item, dict) else None
+    asset = item.get("asset") if isinstance(item, dict) else None
+    if local is not None:
+        if raw_amount is None:
+            raw_amount = local["amount"]
+        if asset is None:
+            asset = local["asset"]
+    try:
+        amount_cents = cp.parse_strict_provider_amount(raw_amount)
+    except (ValueError, TypeError):
+        amount_cents = None
+    user_id = None
+    if local is not None:
+        if (local["purpose"] or "order") == "topup":
+            user_id = local["topup_user_id"]
+        elif local["order_id"]:
+            order = await db.get_order(local["order_id"])
+            user_id = order["user_id"] if order else None
+    raw_parts = []
+    if raw_payload:
+        raw_parts.append(f"invoice_payload:{raw_payload}")
+    if isinstance(item, dict) and item.get("paid_at"):
+        raw_parts.append(f"paid_at:{item['paid_at']}")
+    if isinstance(item, dict) and item.get("status"):
+        raw_parts.append(f"provider_status:{item['status']}")
+    fp = db.anomaly_fingerprint(
+        "cryptobot", invoice_id, raw_amount, raw_payload, asset)
+    known = await db.anomaly_exists(fp)
+    aid = await db.anomaly_record(
+        "cryptobot", fp, f"CryptoBot: {reason}",
+        external_id=str(invoice_id) if invoice_id is not None else None,
+        user_id=user_id,
+        amount_text=str(raw_amount) if raw_amount is not None else None,
+        amount_cents=amount_cents, currency=asset,
+        raw="\n".join(raw_parts) or None)
+    if local is not None and local["status"] != "paid":
+        await db.set_cryptobot_status(int(local["invoice_id"]), "quarantined")
+    if not known:
+        await _alert_payment_anomaly(aid, invoice_id)
+    logger.warning("cryptobot invoice %s quarantined (anomaly #%s): %s",
+                   invoice_id, aid, reason)
+    return aid
+
+
+async def _process_paid_cryptobot_invoice(inv, item) -> None:
+    """Validate one provider-paid invoice, then finalise it.
+
+    The provider's own amount/asset/payload are checked strictly against
+    the stored invoice BEFORE any money moves (JCF PaymentReceipt
+    pattern). Validation failures are quarantined, not finalised.
+    Top-ups branch to the balance credit — the pre-fix sweep sent every
+    invoice down the order path, so a paid top-up could never be
+    recovered by the poller and looped in paid_unfinalized forever.
+    """
+    iid = int(inv["invoice_id"])
+    purpose = inv["purpose"] or "order"
+    expected_payload = str(inv["order_id"]) if purpose == "order" else "topup"
+    try:
+        gross_cents = cp.validate_cryptobot_receipt(
+            item, expected_amount=inv["amount"],
+            expected_asset=inv["asset"] or "USDT",
+            expected_payload=expected_payload)
+    except ValueError as e:
+        await quarantine_cryptobot_invoice(item, reason=str(e), local=inv)
+        return
+    if purpose == "topup":
+        fee_pct = inv["fee_pct"]
+        if fee_pct is None:
+            fee_pct = config.CRYPTOBOT_FEE_PERCENT
+        # Exact net recovery (same identity the check button uses):
+        # gross = ceil(net*100/(100-fee)) implies the floor below is net.
+        net_cents = (gross_cents * (100 - int(fee_pct))) // 100
+        try:
+            ok, _bal, _bonus = await db.finalize_topup_payment(
+                provider="cryptobot", external_id=f"cb_{iid}",
+                user_id=inv["topup_user_id"], amount_cents=net_cents,
+                currency="USDT")
+        except Exception as e:
+            logger.warning("cryptobot topup %s finalize raised: %s", iid, e)
+            ok = False
+        if not ok:
+            await db.set_cryptobot_status(iid, "paid_unfinalized")
+            return
+        await db.set_cryptobot_status(iid, "paid")
+        logger.info("cryptobot topup invoice %s recovered as paid", iid)
+        return
+    order = await db.get_order(inv["order_id"])
+    if not order:
+        await quarantine_cryptobot_invoice(
+            item, reason=f"paid invoice references unknown order "
+                         f"{inv['order_id']}", local=inv)
+        return
+    if order["status"] == "confirmed":
+        await db.set_cryptobot_status(iid, "paid")
+        logger.info("cryptobot invoice %s already fulfilled; marked paid", iid)
+        return
+    if order["status"] == "cancelled":
+        await quarantine_cryptobot_invoice(
+            item, reason=f"paid invoice for cancelled order "
+                         f"#{inv['order_id']}", local=inv)
+        return
+    ok = await finalize_crypto_order(
+        inv["order_id"], provider="cryptobot", external_id=f"cb_{iid}",
+        amount_cents=order["total_cents"], currency="USDT")
+    # F1: only mark the invoice 'paid' once the order is finalized. If
+    # finalize fails, mark 'paid_unfinalized' so the next sweep retries
+    # it (and expiry never touches it) instead of stranding the payment.
+    if not ok:
+        logger.warning(
+            "cryptobot invoice %s paid but finalize failed; "
+            "marking paid_unfinalized for retry", iid)
+        await db.set_cryptobot_status(iid, "paid_unfinalized")
+        return
+    await db.set_cryptobot_status(iid, "paid")
+    logger.info("cryptobot invoice %s recovered as paid", iid)
+
+
+async def _sweep_cryptobot_history(seen_ids: set) -> None:
+    """Provider-history scan (port of JCF GetInvoicesWindow polling).
+
+    The own-ids sweep above can only see invoices whose local row is
+    still sweepable. This bounded window over the provider's paid list
+    catches the rest: paid invoices for locally expired/cancelled rows
+    (late money) and paid invoices with no local row at all (orphans)
+    are quarantined for /payreview — never auto-credited.
+    """
+    global _CB_HISTORY_OFFSET
+    items, next_offset = await cp.cryptobot_get_invoices_window(
+        status="paid", start_offset=_CB_HISTORY_OFFSET)
+    if next_offset is not None:
+        logger.warning(
+            "cryptobot history window incomplete; resuming at offset %s "
+            "next sweep", next_offset)
+    _CB_HISTORY_OFFSET = next_offset or 0
+    for item in items:
+        try:
+            iid = int(item.get("invoice_id"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if iid in seen_ids:
+            continue
+        seen_ids.add(iid)
+        local = await db.get_cryptobot_invoice(iid)
+        if local is None:
+            await quarantine_cryptobot_invoice(
+                item, reason="paid invoice unknown to this shop "
+                             "(no local record)", local=None)
+        elif local["status"] in ("expired", "cancelled"):
+            await quarantine_cryptobot_invoice(
+                item, reason=f"paid at provider but local invoice is "
+                             f"'{local['status']}' (late payment)",
+                local=local)
+        # 'paid' and 'quarantined' rows are already resolved; 'active' /
+        # 'paid_unfinalized' rows were handled by the own-ids sweep.
+
+
 async def _sweep_cryptobot():
     """Recovery poller: finalize newly-paid CryptoBot invoices (idempotent)."""
     if not config.CRYPTOBOT_TOKEN:
         return
+    seen_ids = set()
     try:
         invoices = await db.sweepable_cryptobot_invoices()
-        if not invoices:
-            return
-        ids = [inv["invoice_id"] for inv in invoices]
-        paid = await cp.cryptobot_get_invoices(invoice_ids=ids, status="paid")
-        paid_ids = {int(p.get("invoice_id")) for p in paid if p.get("invoice_id")}
-        for inv in invoices:
-            if int(inv["invoice_id"]) in paid_ids:
-                order = await db.get_order(inv["order_id"])
-                if order and order["status"] == "confirmed":
-                    await db.set_cryptobot_status(int(inv["invoice_id"]), "paid")
-                    logger.info(
-                        "cryptobot invoice %s already fulfilled; marked paid",
-                        inv["invoice_id"])
+        if invoices:
+            ids = [inv["invoice_id"] for inv in invoices]
+            seen_ids = {int(i) for i in ids}
+            paid = await cp.cryptobot_get_invoices(invoice_ids=ids, status="paid")
+            paid_by_id = {}
+            for p in paid or []:
+                try:
+                    paid_by_id[int(p.get("invoice_id"))] = p
+                except (TypeError, ValueError, AttributeError):
                     continue
-                ok = await finalize_crypto_order(
-                    inv["order_id"], provider="cryptobot",
-                    external_id=f"cb_{inv['invoice_id']}",
-                    amount_cents=order["total_cents"] if order else 0,
-                    currency="USDT")
-                # F1: only mark the invoice 'paid' once the order is
-                # finalized. If finalize fails, mark 'paid_unfinalized' so the
-                # next sweep retries it (and expiry never touches it) instead
-                # of stranding the user's payment.
-                if not ok:
-                    logger.warning(
-                        "cryptobot invoice %s paid but finalize failed; "
-                        "marking paid_unfinalized for retry", inv["invoice_id"])
-                    await db.set_cryptobot_status(int(inv["invoice_id"]), "paid_unfinalized")
-                    continue
-                await db.set_cryptobot_status(int(inv["invoice_id"]), "paid")
-                logger.info("cryptobot invoice %s recovered as paid",
-                            inv["invoice_id"])
+            for inv in invoices:
+                item = paid_by_id.get(int(inv["invoice_id"]))
+                if item is not None:
+                    await _process_paid_cryptobot_invoice(inv, item)
     except Exception as e:
         logger.warning("cryptobot recovery sweep error: %s", e)
+    # Provider-history window: catches late/orphan paid invoices the
+    # own-ids sweep cannot see. Runs before expiry for the same M5
+    # reason — a paid invoice is never expired before being credited
+    # or quarantined.
+    try:
+        await _sweep_cryptobot_history(seen_ids)
+    except Exception as e:
+        logger.warning("cryptobot history sweep error: %s", e)
     # M5: expire stale invoices server-side so the poll list stays bounded
     # and dead invoices can't finalize. Runs AFTER the paid-poll above so a
     # paid-but-not-yet-polled invoice is never expired before being credited.

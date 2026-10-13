@@ -563,14 +563,133 @@ async def cryptobot_delete_invoice(invoice_id: int) -> dict:
     return await _cryptobot_call("deleteInvoice", {"invoice_id": iid})
 
 
-async def cryptobot_get_invoices(invoice_ids=None, status: str = None) -> list:
+async def cryptobot_get_invoices(invoice_ids=None, status: str = None,
+                                 offset: int = None, count: int = None) -> list:
     params = {}
     if invoice_ids:
         params["invoice_ids"] = ",".join(str(i) for i in invoice_ids)
     if status:
         params["status"] = status
+    if offset is not None:
+        params["offset"] = int(offset)
+    if count is not None:
+        params["count"] = int(count)
     res = await _cryptobot_call("getInvoices", params)
     return res.get("items", res) if isinstance(res, dict) else res
+
+
+# --- CryptoBot receipt validation (ported from JumpCodeFrog
+# internal/payment/cryptobot.go, separate CryptoBot fix 2026-10-13) ---
+
+def parse_strict_provider_amount(raw) -> int:
+    """Convert a provider amount to integer cents WITHOUT rounding.
+
+    Port of JCF parseStrictProviderAmount/parsePositiveFixedDecimal:
+    only an unsigned, positive fixed decimal with at most two fractional
+    digits is accepted. Signs, whitespace, exponent notation, empty or
+    dot-edge strings, and precision that would have to be rounded are
+    all rejected with ValueError. Integer math only — no floats.
+    """
+    if raw is None or isinstance(raw, bool):
+        raise ValueError(f"invalid provider amount: {raw!r}")
+    s = raw if isinstance(raw, str) else str(raw)
+    if not s or s.count(".") > 1:
+        raise ValueError(f"invalid provider amount: {raw!r}")
+    if "." in s:
+        int_part, frac_part = s.split(".")
+        if not int_part or not frac_part or len(frac_part) > 2:
+            raise ValueError(f"invalid provider amount: {raw!r}")
+    else:
+        int_part, frac_part = s, ""
+    digits = "0123456789"
+    if (any(c not in digits for c in int_part)
+            or any(c not in digits for c in frac_part)):
+        raise ValueError(f"invalid provider amount: {raw!r}")
+    units = int(int_part + frac_part)
+    if units <= 0:
+        raise ValueError(f"invalid provider amount: {raw!r}")
+    return units * (10 ** (2 - len(frac_part)))
+
+
+def validate_cryptobot_receipt(item, *, expected_amount,
+                               expected_asset: str = "USDT",
+                               expected_payload=None) -> int:
+    """Validate a provider-paid CryptoBot invoice against our record.
+
+    Returns the provider-reported gross amount in cents. Raises
+    ValueError with a human reason for anything that must NOT be
+    finalised as-is (not paid, wrong asset, unparseable or mismatched
+    amount, mismatched payload when the provider reports one). Callers
+    quarantine the invoice on ValueError instead of crediting it.
+    """
+    if not isinstance(item, dict):
+        raise ValueError("provider invoice is not an object")
+    if str(item.get("status")) != "paid":
+        raise ValueError("provider invoice is not paid")
+    asset = item.get("asset")
+    if asset != expected_asset:
+        raise ValueError(
+            f"asset mismatch: provider={asset!r} expected={expected_asset!r}")
+    try:
+        got = parse_strict_provider_amount(item.get("amount"))
+    except ValueError:
+        raise ValueError(
+            f"amount unparseable: provider={item.get('amount')!r}") from None
+    try:
+        want = parse_strict_provider_amount(expected_amount)
+    except ValueError:
+        raise ValueError(
+            f"stored invoice amount unparseable: {expected_amount!r}") from None
+    if got != want:
+        raise ValueError(
+            f"amount mismatch: provider={item.get('amount')!r} "
+            f"expected={expected_amount!r}")
+    payload = item.get("payload")
+    if expected_payload is not None and payload not in (None, "") \
+            and str(payload) != str(expected_payload):
+        raise ValueError(
+            f"payload mismatch: provider={payload!r} "
+            f"expected={expected_payload!r}")
+    return got
+
+
+async def cryptobot_get_invoices_window(status: str = "paid",
+                                        start_offset: int = 0,
+                                        max_invoices: int = 1000,
+                                        page_size: int = 100):
+    """Bounded provider-history scan (port of JCF GetInvoicesWindow).
+
+    Fetches at most max_invoices invoices beginning at start_offset, in
+    pages of page_size. Returns (items, next_offset): next_offset is
+    None when the window reached the end of the provider's list, or the
+    offset the caller should resume from when more rows exist beyond
+    the bounded window (JCF signals this with ErrCryptoInvoiceWindow; a
+    one-item probe past the window distinguishes an exact fit from an
+    incomplete window).
+    """
+    if start_offset < 0:
+        raise ValueError("start_offset must be >= 0")
+    items = []
+    relative = 0
+    while relative < max_invoices:
+        page = await cryptobot_get_invoices(
+            status=status, offset=start_offset + relative, count=page_size)
+        page = list(page or [])
+        items.extend(page)
+        if len(page) < page_size:
+            return items, None
+        relative += page_size
+    next_offset = start_offset + max_invoices
+    try:
+        probe = await cryptobot_get_invoices(
+            status=status, offset=next_offset, count=1)
+    except Exception:
+        # Probe failed: hand back the window plus the continuation so the
+        # caller resumes there instead of re-scanning the same window.
+        return items, next_offset
+    if not probe:
+        return items, None
+    return items, next_offset
 
 
 def verify_cryptobot_webhook(raw_body: bytes, signature: str, token: str) -> bool:

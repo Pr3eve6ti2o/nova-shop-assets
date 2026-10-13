@@ -5,6 +5,7 @@ All notable changes to Nova Shop are recorded here. Format follows
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+- CryptoBot hardening (separate fix, ported from JumpCodeFrog's cryptobot.go): strict no-rounding provider amount parser; receipt validation (amount/asset/payload must match the stored invoice) on the sweep and both "I've Paid" checks before any money moves; paid-but-invalid invoices quarantined into the /payreview queue with raw provider facts preserved and a one-time admin alert; recovery sweep now credits paid balance top-ups (previously looped unfinalised forever); bounded provider-history window scan (1000-invoice windows, continuation offset) quarantining late payments for expired/cancelled invoices and orphan paid invoices — never auto-crediting them.
 - Scraped-port completion (plan 1.3, 7.3, 7.4, 8.4): Doctor CLI ported from JumpCodeFrog's doctor.go; seed + smoke tools ported from their cmd/seed and cmd/telegram-smoke; inline product sharing ported from DoktorShift's handle_inline_query; buyer-info checkout modes (none/email/address, default none) on DoktorShift's buyer fields model.
 
 ### Added — Repo port programme (DoktorShift/telegramshop + JumpCodeFrog/telegram-shop-bot)
