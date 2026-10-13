@@ -184,12 +184,19 @@ async def _pass_wishlist_drops(db, bot) -> int:
     return sent
 
 
+async def _pass_credit_expiry(db, bot) -> int:
+    # Port 4.1: forfeit expired credit-lot remainders (keeps the
+    # balance == lots invariant). Returns lots touched, not cents.
+    return 1 if await db.credit_sweep_expired() > 0 else 0
+
+
 async def process_campaigns_once(db, bot) -> dict:
     """Run one pass of every campaign type. Returns per-type counts."""
     counts = {}
     counts["abandoned_cart"] = await _pass_abandoned_cart(db, bot)
     counts["back_in_stock"] = await _pass_back_in_stock(db, bot)
     counts["wishlist_drops"] = await _pass_wishlist_drops(db, bot)
+    counts["credit_expiry"] = await _pass_credit_expiry(db, bot)
     counts["post_purchase"] = await _pass_post_purchase(db, bot)
     counts["onboarding"] = await _pass_onboarding(db, bot)
     return counts

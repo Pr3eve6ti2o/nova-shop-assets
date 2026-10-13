@@ -594,8 +594,17 @@ class Database:
                 return row["balance_cents"] if row else 0
 
     async def add_balance(self, user_id: int, amount_cents: int,
-                         tx_type: str = "topup", order_id: int = None) -> int:
-        """Add to balance (topup/refund). Applies 5% bonus on topups. Returns new balance."""
+                         tx_type: str = "topup", order_id: int = None,
+                         lot_cents: int = None,
+                         expires_days: int = None) -> int:
+        """Add to balance (topup/refund). Applies 5% bonus on topups. Returns new balance.
+
+        Port Part 4: every credit also opens a credit LOT (FIFO-spent,
+        LIFO-restored). lot_cents overrides how much of the credit the
+        lot carries — the checkout compensation path passes the
+        un-restored shortfall so restored money is never double-lotted.
+        expires_days gives the lot an expiry (promo grants); default
+        lots never expire."""
         import config as cfg
         if amount_cents <= 0:
             raise ValueError("amount_cents must be positive")
@@ -618,6 +627,20 @@ class Database:
                 "(user_id, type, amount_cents, balance_after_cents, order_id)"
                 " VALUES (?, ?, ?, ?, ?)",
                 (user_id, tx_type, total, new_bal, order_id))
+            lot_amount = total if lot_cents is None else int(lot_cents)
+            if lot_amount > 0:
+                expires = None
+                if expires_days:
+                    from datetime import datetime, timedelta, timezone
+                    expires = (datetime.now(timezone.utc)
+                               + timedelta(days=int(expires_days))).isoformat(
+                                   timespec="seconds")
+                await db.execute(
+                    "INSERT INTO credit_lots"
+                    "(user_id, source, amount_cents, remaining_cents,"
+                    " expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (user_id, tx_type, lot_amount, lot_amount, expires,
+                     utcnow_iso()))
             await db.commit()
             return new_bal
 
@@ -644,8 +667,125 @@ class Database:
                     "(user_id, type, amount_cents, balance_after_cents, order_id)"
                     " VALUES (?, 'purchase', ?, ?, ?)",
                     (user_id, -amount_cents, new_bal, order_id))
+                # Port Part 4: consume credit lots FIFO in the same
+                # locked transaction — oldest, non-expired lots first,
+                # each with a conditional decrement whose rowcount is
+                # trusted (DoktorShift use_credits semantics). Spends
+                # are recorded per lot for LIFO restoration.
+                need = amount_cents
+                now = utcnow_iso()
+                async with db.execute(
+                    "SELECT id, remaining_cents FROM credit_lots"
+                    " WHERE user_id=? AND remaining_cents > 0"
+                    " AND (expires_at IS NULL OR expires_at > ?)"
+                    " ORDER BY created_at ASC, id ASC",
+                    (user_id, now)) as cur:
+                    lots = await cur.fetchall()
+                for lot in lots:
+                    if need <= 0:
+                        break
+                    take = min(int(lot["remaining_cents"]), need)
+                    cur3 = await db.execute(
+                        "UPDATE credit_lots SET remaining_cents ="
+                        " remaining_cents - ? WHERE id=? AND"
+                        " remaining_cents >= ?",
+                        (take, lot["id"], take))
+                    if cur3.rowcount == 0:
+                        continue
+                    await db.execute(
+                        "INSERT INTO credit_lot_spends"
+                        "(lot_id, user_id, order_id, amount_cents,"
+                        " created_at) VALUES (?, ?, ?, ?, ?)",
+                        (lot["id"], user_id, order_id, take, now))
+                    need -= take
                 await db.commit()
                 return new_bal
+
+    # ------------------------------------------------- credit lots (4) --
+    async def credit_lots_total(self, user_id: int) -> int:
+        """Sum of unexpired lot remainders (invariant: == balance)."""
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT COALESCE(SUM(remaining_cents), 0) s FROM credit_lots"
+                " WHERE user_id=? AND (expires_at IS NULL OR expires_at > ?)",
+                (user_id, utcnow_iso())) as cur:
+                return int((await cur.fetchone())["s"])
+
+    async def credit_lots_list(self, user_id: int):
+        async with self._db() as db:
+            async with db.execute(
+                "SELECT * FROM credit_lots WHERE user_id=?"
+                " ORDER BY created_at ASC, id ASC", (user_id,)) as cur:
+                return await cur.fetchall()
+
+    async def credit_restore_for_order(self, user_id: int, order_id: int,
+                                       amount_cents: int) -> int:
+        """LIFO-restore lots spent on an order (port 4.3): newest spends
+        first, each spend marked reversed exactly once. Returns the
+        SHORTFALL that could not be restored from recorded spends
+        (caller covers it with a fresh lot)."""
+        remaining = int(amount_cents)
+        async with self._claim_lock:
+            async with self._db() as db:
+                async with db.execute(
+                    "SELECT s.id, s.lot_id, s.amount_cents"
+                    " FROM credit_lot_spends s WHERE s.user_id=?"
+                    " AND s.order_id=? AND s.reversed_at IS NULL"
+                    " ORDER BY s.id DESC", (user_id, order_id)) as cur:
+                    spends = await cur.fetchall()
+                now = utcnow_iso()
+                for spend in spends:
+                    if remaining <= 0:
+                        break
+                    give = min(int(spend["amount_cents"]), remaining)
+                    await db.execute(
+                        "UPDATE credit_lots SET remaining_cents ="
+                        " remaining_cents + ? WHERE id=?",
+                        (give, spend["lot_id"]))
+                    if give >= int(spend["amount_cents"]):
+                        await db.execute(
+                            "UPDATE credit_lot_spends SET reversed_at=?"
+                            " WHERE id=?", (now, spend["id"]))
+                    else:
+                        # Partial restore: shrink the spend record so a
+                        # later restore can take the rest exactly once.
+                        await db.execute(
+                            "UPDATE credit_lot_spends SET amount_cents ="
+                            " amount_cents - ? WHERE id=?",
+                            (give, spend["id"]))
+                    remaining -= give
+                await db.commit()
+        return remaining
+
+    async def credit_sweep_expired(self, limit: int = 200) -> int:
+        """Forfeit expired lot remainders (port 4.1): zeroes the lot and
+        debits the balance by the same amount, keeping the invariant.
+        Returns the total forfeited cents."""
+        total = 0
+        async with self._claim_lock:
+            async with self._db() as db:
+                now = utcnow_iso()
+                async with db.execute(
+                    "SELECT id, user_id, remaining_cents FROM credit_lots"
+                    " WHERE expires_at IS NOT NULL AND expires_at <= ?"
+                    " AND remaining_cents > 0 LIMIT ?",
+                    (now, limit)) as cur:
+                    lots = await cur.fetchall()
+                for lot in lots:
+                    amt = int(lot["remaining_cents"])
+                    cur2 = await db.execute(
+                        "UPDATE credit_lots SET remaining_cents = 0"
+                        " WHERE id=? AND remaining_cents = ?",
+                        (lot["id"], amt))
+                    if cur2.rowcount == 0:
+                        continue
+                    await db.execute(
+                        "UPDATE users SET balance_cents = balance_cents - ?"
+                        " WHERE id=? AND balance_cents >= ?",
+                        (amt, lot["user_id"], amt))
+                    total += amt
+                await db.commit()
+        return total
 
     async def count_users(self) -> int:
         async with self._db() as db:

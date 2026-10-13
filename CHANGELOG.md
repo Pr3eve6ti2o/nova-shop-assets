@@ -6,6 +6,25 @@ All notable changes to Nova Shop are recorded here. Format follows
 
 ## [Unreleased]
 
+### Added — Repo port programme (DoktorShift/telegramshop + JumpCodeFrog/telegram-shop-bot)
+- Returns workflow with fulfilment stamps (shipped_at/delivered_at),
+  atomic exactly-once refunds, and a /returns admin console (1.1/1.2).
+- Server-side cart timestamps + Mini App cart_sync; campaign engine:
+  abandoned-cart reminders, back-in-stock alerts, wishlist price-drop
+  alerts, post-purchase thank-yous, onboarding nudge, credit expiry (2, 8.1).
+- Threaded support tickets with full conversation history + /inbox (3).
+- Payment review queue (/payreview) with fingerprint-quarantined
+  anomalies and append-only resolutions; refunds ledger with a
+  fail-closed per-order ceiling; /refund; /providers; signed outbound
+  webhooks; admin forum-topic routing; daily revenue stats (6).
+- Reviews restored end-to-end (handlers rebuilt to the codebase's own
+  surviving spec); loyalty tiers (Bronze/Silver/Gold/VIP) accruing on
+  fulfilment; category-scoped and personal promo codes (5).
+- Store credit lots under the balance: FIFO spends, LIFO restores on
+  failed fulfilment, optional grant expiry — balance always equals the
+  sum of lot remainders (4).
+- Test suite grown from 17 to 58 tests covering the money paths above.
+
 ### Added
 - Docker packaging: `Dockerfile` + `docker-compose.yml` (SQLite on a named volume).
 - `.env.example` documenting every environment variable the bot reads.

@@ -763,7 +763,13 @@ async def _place_order(query: types.CallbackQuery, state: FSMContext, user: dict
                            f"order={oid} total={t['total']} new_bal={new_bal}")
         else:
             # H17: fulfillment failed after deduction — refund and leave a ledger trail
-            await db.add_balance(user["id"], t["total"], tx_type="refund", order_id=oid)
+            # Port 4.3: restore the exact credit lots the debit consumed
+            # (LIFO) before minting anything new; only the un-restorable
+            # shortfall becomes a fresh lot.
+            shortfall = await db.credit_restore_for_order(
+                user["id"], oid, t["total"])
+            await db.add_balance(user["id"], t["total"], tx_type="refund",
+                                 order_id=oid, lot_cents=shortfall)
             await db.record_payment(
                 provider="balance", external_id=f"bal_{oid}_{user['id']}",
                 user_id=user["id"], order_id=oid,
