@@ -26,6 +26,21 @@ async def cmd_balance(message: types.Message, state: FSMContext):
         reply_markup=kb.balance_kb())
 
 
+@dp.callback_query_handler(text="bal:home", state="*")
+async def cb_balance_home(query: types.CallbackQuery, state: FSMContext):
+    """Profile Balance button: show the Balance screen itself (balance,
+    Top up, Redeem gift card) — not the top-up flow."""
+    await state.finish()
+    await query.answer()
+    user, _ = await get_or_register(query.from_user.id,
+                                    query.from_user.full_name)
+    balance = await db.get_balance(user["id"])
+    await edit_text_safe(
+        query,
+        texts.MSG_BALANCE.format(balance=fmt_money(balance, config.CURRENCY)),
+        kb.balance_kb())
+
+
 @dp.callback_query_handler(text="bal:topup", state="*")
 async def cb_balance_topup(query: types.CallbackQuery):
     await query.answer()

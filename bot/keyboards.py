@@ -385,7 +385,7 @@ def profile_kb():
         InlineKeyboardButton(texts.BTN_REFERRAL, callback_data="ref"),
         InlineKeyboardButton(texts.BTN_REDEEM, callback_data="pm3"),
     )
-    kb.add(InlineKeyboardButton(texts.BTN_BALANCE, callback_data="bal:topup"))
+    kb.add(InlineKeyboardButton(texts.BTN_BALANCE, callback_data="bal:home"))
     kb.row(BTN_MENU)
     return kb
 

@@ -193,6 +193,34 @@ async def promo_code_received(message: types.Message, state: FSMContext):
         await state.finish()
         return
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
+
+    # Gift cards share this door: a NOVA-… code is a gift card, not a promo.
+    # Look the card up first — an unknown NOVA- code falls through to the
+    # promo validation below, so its error stays the familiar one.
+    if code.upper().startswith("NOVA-"):
+        card = await db.giftcard_get(code)
+        if card is not None:
+            ok, result = await db.giftcard_redeem(code, user["id"])
+            await state.finish()
+            if not ok:
+                errors = {
+                    "not_found": texts.MSG_GIFTCARD_ERR_NOT_FOUND,
+                    "redeemed": texts.MSG_GIFTCARD_ERR_REDEEMED,
+                    "revoked": texts.MSG_GIFTCARD_ERR_REVOKED,
+                    "expired": texts.MSG_GIFTCARD_ERR_EXPIRED,
+                }
+                await message.answer(
+                    errors.get(result, texts.ERR_GENERIC),
+                    reply_markup=await main_reply_kb(message.from_user.id))
+                return
+            await message.answer(
+                texts.MSG_GIFTCARD_OK.format(
+                    amount=fmt_money(result["amount_cents"], config.CURRENCY),
+                    balance=fmt_money(result["balance_cents"],
+                                      config.CURRENCY)),
+                reply_markup=await main_reply_kb(message.from_user.id))
+            return
+
     data = await state.get_data()
     origin = data.get("promo_origin", "cart")
 
