@@ -2914,6 +2914,21 @@ class Database:
                                   (order_id,)) as cur:
                 return await cur.fetchone()
 
+    async def order_has_physical(self, order_id: int) -> bool:
+        """True when any item's product is not digital (the checkout
+        convention: kind == 'digital' is digital; everything else is
+        physical goods). Drives the two post-purchase paths — physical
+        orders get the Medusa fulfilment flow (preparing -> shipped ->
+        customer confirms receipt); digital orders are delivered at
+        fulfilment and skip it entirely."""
+        async with self._db() as db:
+            async with db.execute(
+                    "SELECT 1 FROM order_items oi"
+                    " JOIN products p ON p.id = oi.product_id"
+                    " WHERE oi.order_id=? AND p.kind != 'digital'"
+                    " LIMIT 1", (order_id,)) as cur:
+                return await cur.fetchone() is not None
+
     async def get_order_items(self, order_id: int):
         async with self._db() as db:
             async with db.execute(

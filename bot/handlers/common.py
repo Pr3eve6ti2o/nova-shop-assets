@@ -148,22 +148,43 @@ def _fmt_day(iso) -> str:
         return ""
 
 
-def render_roadmap(status: str, order=None) -> str:
+def render_roadmap(status: str, order=None, digital: bool = False) -> str:
     if status == "cancelled":
         return texts.MSG_ROADMAP_CANCELLED
-    flow = ["pending", "confirmed", "preparing", "shipped", "delivered"]
-    idx = flow.index(status) if status in flow else 0
     # Post-purchase plan Phase 2: date the steps that carry a real stamp
     # (placed/shipped/delivered). Confirmed/preparing have no dedicated
     # timestamp column, so they stay undated rather than guessing.
     stamps = {}
-    if order is not None:
-        try:
-            stamps = {"pending": order["created_at"],
-                      "shipped": order["shipped_at"],
-                      "delivered": order["delivered_at"]}
-        except (KeyError, IndexError):
-            stamps = {}
+    if digital:
+        # Digital goods are delivered at fulfilment (keys on the order
+        # page), so the roadmap collapses to Placed -> Confirmed ->
+        # Delivered — no preparing/shipped theatre for an instant good.
+        flow = ["pending", "confirmed", "delivered"]
+        fulfilled = False
+        if order is not None:
+            try:
+                fulfilled = bool(order["fulfilled_at"])
+                stamps = {"pending": order["created_at"],
+                          "delivered": order["fulfilled_at"]}
+            except (KeyError, IndexError):
+                stamps = {}
+        if status == "delivered" or (
+                status in ("confirmed", "processing") and fulfilled):
+            idx = 2
+        elif status in ("confirmed", "processing"):
+            idx = 1
+        else:
+            idx = 0
+    else:
+        flow = ["pending", "confirmed", "preparing", "shipped", "delivered"]
+        idx = flow.index(status) if status in flow else 0
+        if order is not None:
+            try:
+                stamps = {"pending": order["created_at"],
+                          "shipped": order["shipped_at"],
+                          "delivered": order["delivered_at"]}
+            except (KeyError, IndexError):
+                stamps = {}
     lines = []
     for i, st in enumerate(flow):
         label = texts.STATUS_LABEL[st]

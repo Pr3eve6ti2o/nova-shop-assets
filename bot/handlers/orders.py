@@ -10,7 +10,7 @@ from loader import bot, db, dp
 from utils import fmt_money, h, paginate
 from .common import (
     get_or_register, edit_text_safe, totals_text, render_lines, render_roadmap,
-    product_available,
+    notify_admins, product_available,
 )
 
 PER_PAGE = 6
@@ -152,32 +152,67 @@ async def show_order_detail(target, oid: int, user: dict):
             texts.MSG_FULFILL_VALUE_LINE.format(name=n, qty=q,
                                                 code=f"<code>{_escape(v)}</code>")
             for n, q, v in dvals))
-    # Post-purchase plan Phase 2: delivery block = kind label, the
-    # address/phone on file, and the next-step line for this status.
+    # Post-purchase plan: two fulfilment paths. Physical goods get the
+    # Medusa flow (preparing -> shipped -> customer confirms receipt);
+    # digital goods are delivered at fulfilment and skip all of it, so
+    # the page stays sleek and never asks a digital buyer to confirm
+    # receipt of a key they already have.
+    physical = await db.order_has_physical(oid)
+    # Phase 2: delivery block = kind label, the address/phone on file,
+    # and the next-step line for this status.
     kind = order["delivery_kind"] or None
-    d_lines = [{"pickup": "🤝 Pickup",
-                "delivery": "🚚 Delivery"}.get(kind, kind or "—")]
-    if order["address"]:
-        d_lines.append(f"📍 {h(order['address'])}")
-    if order["phone"]:
-        d_lines.append(f"📞 {h(order['phone'])}")
-    hint = _NEXT_STEP.get((order["status"], kind),
-                          _NEXT_STEP.get((order["status"], None)))
+    if physical:
+        d_lines = [{"pickup": "🤝 Pickup",
+                    "delivery": "🚚 Delivery"}.get(kind, kind or "—")]
+        if order["address"]:
+            d_lines.append(f"📍 {h(order['address'])}")
+        if order["phone"]:
+            d_lines.append(f"📞 {h(order['phone'])}")
+        hint = _NEXT_STEP.get((order["status"], kind),
+                              _NEXT_STEP.get((order["status"], None)))
+    else:
+        d_lines = ["⚡ Digital delivery"]
+        if order["status"] in ("confirmed", "processing") \
+                and order["fulfilled_at"]:
+            hint = ("✅ Delivered digitally — your keys are shown "
+                    "on this page.")
+        else:
+            hint = _NEXT_STEP.get((order["status"], None))
     delivery_block = "\n".join(d_lines)
     if hint:
         delivery_block += f"\n\n{hint}"
     text = texts.MSG_ORDER_DETAIL.format(
         oid=oid, lines=lines, totals=totals_text(t), payment=pay_label,
         delivery=delivery_block,
-        roadmap=render_roadmap(order["status"], order)) + values_block
+        roadmap=render_roadmap(order["status"], order,
+                               digital=not physical)) + values_block
     markup = kb.order_detail_kb(oid)
     if order["status"] == "pending":
         markup.inline_keyboard.insert(
-            2, [InlineKeyboardButton(texts.BTN_CANCEL_ORDER,
-                                    callback_data=f"oc:{oid}")])
+            1, [InlineKeyboardButton(texts.BTN_CANCEL_ORDER,
+                                     callback_data=f"oc:{oid}")])
+    # Post-purchase plan Phase 3 (physical path only): receipt + rating
+    # are fulfilment-gated (Medusa: returns and reviews start after
+    # delivery). Digital orders were delivered at fulfilment, so their
+    # rating is available straight away and no receipt step exists.
+    if physical and order["status"] == "shipped":
+        markup.inline_keyboard.insert(
+            1, [InlineKeyboardButton("✅ I've received it",
+                                     callback_data=f"rcv:{oid}")])
+    if order["status"] == "delivered" or (
+            not physical
+            and order["status"] in ("confirmed", "processing")):
+        markup.inline_keyboard.insert(
+            1, [InlineKeyboardButton(texts.BTN_RATE_ITEMS,
+                                     callback_data=f"or:{oid}")])
     # Port 1.1: append a return entry point for returnable orders with no
-    # open return. Existing buttons are not modified.
-    if order["status"] in db.RETURNABLE_STATUSES:
+    # open return. Existing buttons are not modified. Phase 3 gate: on
+    # the physical path the customer entry appears once the order has
+    # shipped — you cannot return what has not arrived. Digital orders
+    # keep the original gate (they were delivered at fulfilment).
+    # Admin-side returns are unchanged either way.
+    if order["status"] in (("shipped", "delivered") if physical
+                           else db.RETURNABLE_STATUSES):
         _open = await db.get_open_return(oid)
         if not _open:
             markup.inline_keyboard.append([InlineKeyboardButton(
@@ -201,8 +236,65 @@ async def cb_order_detail(query: types.CallbackQuery):
     await show_order_detail(query, oid, user)
 
 
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("or:"), state="*")
+async def cb_order_rate(query: types.CallbackQuery):
+    """Rate items (post-purchase plan Phase 3): the button used to be
+    rendered with no handler behind it. Lists the order's items; each
+    opens the existing product rating picker (rvl:). The button itself
+    is only rendered on delivered orders."""
+    try:
+        oid = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+    user, _ = await get_or_register(query.from_user.id,
+                                    query.from_user.full_name)
+    order = await db.get_order(oid)
+    if not order or order["user_id"] != user["id"]:
+        return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+    await query.answer()
+    markup = InlineKeyboardMarkup()
+    seen = set()
+    for it in await db.get_order_items(oid):
+        pid = it["product_id"]
+        if pid and pid not in seen:
+            seen.add(pid)
+            markup.add(InlineKeyboardButton(
+                f"⭐ {h(it['name'])}", callback_data=f"rvl:{pid}"))
+    markup.row(InlineKeyboardButton(texts.BTN_BACK,
+                                    callback_data=f"o:{oid}"))
+    await edit_text_safe(
+        query,
+        f"⭐ <b>Rate items — order #{oid}</b>\n\nPick an item to rate:",
+        markup)
+
+
+@dp.callback_query_handler(lambda q: q.data and q.data.startswith("rcv:"), state="*")
+async def cb_order_received(query: types.CallbackQuery):
+    """Customer confirms receipt (post-purchase plan Phase 3):
+    shipped -> delivered via compare-and-set, so the delivered stamp —
+    and the rating/return windows — start at the real handover."""
+    try:
+        oid = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+    user, _ = await get_or_register(query.from_user.id,
+                                    query.from_user.full_name)
+    order = await db.get_order(oid)
+    if not order or order["user_id"] != user["id"]:
+        return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+    won = await db.set_order_status(oid, "delivered",
+                                    only_if_status="shipped")
+    if not won:
+        return await query.answer(
+            "This order isn't awaiting receipt.", show_alert=True)
+    await query.answer("✅ Marked as delivered — thank you!")
+    await notify_admins(
+        f"📦 Order #{oid}: customer confirmed receipt (delivered).")
+    await show_order_detail(query, oid, user)
+
+
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ob:"), state="*")
-async def cb_buy_again(query: types.CallbackQuery):
+async def cb_buy_again(query: types.CallbackQuery, state: FSMContext):
     try:
         oid = int(query.data.split(":")[1])
     except (ValueError, IndexError):
@@ -219,8 +311,13 @@ async def cb_buy_again(query: types.CallbackQuery):
         if await product_available(p, it["qty"]):
             await db.cart_add(user["id"], it["product_id"], it["qty"])
             added += 1
-    await query.answer(texts.MSG_REORDER_DONE if added else texts.ERR_OUT_OF_STOCK,
-                       show_alert=not added)
+    if not added:
+        return await query.answer(texts.ERR_OUT_OF_STOCK, show_alert=True)
+    await query.answer(texts.MSG_REORDER_DONE)
+    # Post-purchase plan Phase 3: land the customer in the cart they
+    # just filled, instead of leaving them on the order page.
+    from .cart import render_cart
+    await render_cart(query, user["id"], state)
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("oc:"), state="*")

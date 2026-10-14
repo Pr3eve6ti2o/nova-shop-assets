@@ -147,6 +147,35 @@ class OrderLifecycle(unittest.TestCase):
                 os.unlink(path)
         self.run_async(go())
 
+    def test_order_has_physical_classification(self):
+        async def go():
+            fd, path = tempfile.mkstemp(suffix=".db")
+            os.close(fd)
+            db = Database(path)
+            await db.create_tables()
+            try:
+                cat = await db.add_category("Gear")
+                phys = await db.add_product(
+                    category_id=cat, name="Physical", price_cents=100,
+                    stock=-1, kind="physical")
+                digi = await db.add_product(
+                    category_id=cat, name="Digital", price_cents=100,
+                    stock=-1, kind="digital")
+                u = await db.create_user(889, "Classifier")
+                o_digi, _ = await db.create_manual_order(
+                    u["id"], [(digi, 1)], kind="comp", actor_tg_id=99)
+                o_phys, _ = await db.create_manual_order(
+                    u["id"], [(phys, 1)], kind="comp", actor_tg_id=99)
+                o_mixed, _ = await db.create_manual_order(
+                    u["id"], [(digi, 1), (phys, 1)], kind="comp",
+                    actor_tg_id=99)
+                self.assertFalse(await db.order_has_physical(o_digi))
+                self.assertTrue(await db.order_has_physical(o_phys))
+                self.assertTrue(await db.order_has_physical(o_mixed))
+            finally:
+                os.unlink(path)
+        self.run_async(go())
+
     def test_payment_labels_cover_store_credit_methods(self):
         self.assertIn("balance", texts.PAY_METHOD_LABEL)
         self.assertIn("comp", texts.PAY_METHOD_LABEL)

@@ -364,11 +364,11 @@ def orders_kb(orders, page: int, total: int, per_page: int = 6):
 
 
 def order_detail_kb(order_id: int):
+    # Contextual rows (Cancel / I've received it / Rate items / Request
+    # return) are inserted by show_order_detail per status — the base
+    # keyboard carries only the always-valid actions.
     kb = InlineKeyboardMarkup()
-    kb.row(
-        InlineKeyboardButton(texts.BTN_BUY_AGAIN, callback_data=cb("ob", order_id)),
-        InlineKeyboardButton(texts.BTN_RATE_ITEMS, callback_data=cb("or", order_id)),
-    )
+    kb.add(InlineKeyboardButton(texts.BTN_BUY_AGAIN, callback_data=cb("ob", order_id)))
     kb.row(InlineKeyboardButton(texts.BTN_BACK, callback_data=cb("ord", 0)))
     kb.row(BTN_MENU)
     return kb
