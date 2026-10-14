@@ -26,10 +26,12 @@ async def cmd_balance(message: types.Message, state: FSMContext):
         reply_markup=kb.balance_kb())
 
 
-@dp.callback_query_handler(text="bal:home", state="*")
+@dp.callback_query_handler(text=["bal:home", "bal:back"], state="*")
 async def cb_balance_home(query: types.CallbackQuery, state: FSMContext):
     """Profile Balance button: show the Balance screen itself (balance,
-    Top up, Redeem gift card) — not the top-up flow."""
+    Top up, Redeem gift card) — not the top-up flow. Also the top-up
+    amount picker's Back button (bal:back): it rendered for months with
+    no handler behind it (found in the 2026-10-14 full sweep)."""
     await state.finish()
     await query.answer()
     user, _ = await get_or_register(query.from_user.id,
