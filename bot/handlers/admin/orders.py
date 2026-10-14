@@ -178,7 +178,10 @@ async def cb_order_set_status(query: types.CallbackQuery):
             await bot.send_message(
                 user["tg_id"],
                 texts.MSG_ORDER_NOTIFIED.format(
-                    oid=oid, status=texts.STATUS_LABEL.get(status, status)))
+                    oid=oid, status=texts.STATUS_LABEL.get(status, status)),
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton(
+                        texts.BTN_TRACK_ORDER, callback_data=f"o:{oid}")))
         except Exception:
             pass
     await query.answer(texts.TOAST_ORDER_STATUS.format(

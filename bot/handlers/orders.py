@@ -7,13 +7,49 @@ import config
 import keyboards as kb
 import texts
 from loader import bot, db, dp
-from utils import fmt_money, paginate
+from utils import fmt_money, h, paginate
 from .common import (
     get_or_register, edit_text_safe, totals_text, render_lines, render_roadmap,
     product_available,
 )
 
 PER_PAGE = 6
+
+# Post-purchase plan Phase 2: one plain next-step line per status (and
+# delivery kind where it changes the meaning), so the order page itself
+# answers "what happens now?".
+_NEXT_STEP = {
+    ("pending", None):
+        "⏳ Awaiting payment — complete payment to confirm your order.",
+    ("confirmed", "pickup"):
+        "We're getting it ready — we'll message you when it's ready "
+        "for pickup.",
+    ("confirmed", "delivery"):
+        "We're preparing your order — we'll message you when it ships.",
+    ("confirmed", None):
+        "We're preparing your order — we'll message you with the "
+        "next step.",
+    ("preparing", "pickup"):
+        "Being prepared — we'll message you when it's ready for pickup.",
+    ("preparing", "delivery"):
+        "Being prepared — we'll message you when it ships.",
+    ("preparing", None):
+        "Being prepared — we'll message you with the next step.",
+    ("shipped", "pickup"):
+        "Ready for pickup. Tap “I've received it” once you've "
+        "collected it.",
+    ("shipped", "delivery"):
+        "On its way to you. Tap “I've received it” when it arrives.",
+    ("shipped", None):
+        "On its way. Tap “I've received it” when it arrives.",
+    ("delivered", None):
+        "Delivered — enjoy! You can rate the items or request a "
+        "return below.",
+    ("cancelled", None):
+        "This order was cancelled.",
+    ("refunded", None):
+        "This order was refunded to your balance.",
+}
 
 
 _bot_username = None
@@ -116,10 +152,24 @@ async def show_order_detail(target, oid: int, user: dict):
             texts.MSG_FULFILL_VALUE_LINE.format(name=n, qty=q,
                                                 code=f"<code>{_escape(v)}</code>")
             for n, q, v in dvals))
+    # Post-purchase plan Phase 2: delivery block = kind label, the
+    # address/phone on file, and the next-step line for this status.
+    kind = order["delivery_kind"] or None
+    d_lines = [{"pickup": "🤝 Pickup",
+                "delivery": "🚚 Delivery"}.get(kind, kind or "—")]
+    if order["address"]:
+        d_lines.append(f"📍 {h(order['address'])}")
+    if order["phone"]:
+        d_lines.append(f"📞 {h(order['phone'])}")
+    hint = _NEXT_STEP.get((order["status"], kind),
+                          _NEXT_STEP.get((order["status"], None)))
+    delivery_block = "\n".join(d_lines)
+    if hint:
+        delivery_block += f"\n\n{hint}"
     text = texts.MSG_ORDER_DETAIL.format(
         oid=oid, lines=lines, totals=totals_text(t), payment=pay_label,
-        delivery=order["delivery_kind"] or "\u2014",
-        roadmap=render_roadmap(order["status"])) + values_block
+        delivery=delivery_block,
+        roadmap=render_roadmap(order["status"], order)) + values_block
     markup = kb.order_detail_kb(oid)
     if order["status"] == "pending":
         markup.inline_keyboard.insert(

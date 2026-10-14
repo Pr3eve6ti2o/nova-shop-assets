@@ -1,6 +1,7 @@
 """Shared helpers for handlers: user registration, admin checks, totals, rendering."""
 import html
 import logging
+from datetime import datetime
 
 from aiogram import types
 from aiogram.dispatcher import FSMContext
@@ -136,16 +137,44 @@ def totals_text(t: dict) -> str:
         total=fmt_money(t["total"], config.CURRENCY))
 
 
-def render_roadmap(status: str) -> str:
+def _fmt_day(iso) -> str:
+    """'2026-10-14T07:57:13+00:00' -> '14 Oct' ('' when unusable)."""
+    if not iso:
+        return ""
+    try:
+        return datetime.fromisoformat(
+            str(iso).replace("Z", "+00:00")).strftime("%d %b")
+    except ValueError:
+        return ""
+
+
+def render_roadmap(status: str, order=None) -> str:
     if status == "cancelled":
         return texts.MSG_ROADMAP_CANCELLED
     flow = ["pending", "confirmed", "preparing", "shipped", "delivered"]
     idx = flow.index(status) if status in flow else 0
+    # Post-purchase plan Phase 2: date the steps that carry a real stamp
+    # (placed/shipped/delivered). Confirmed/preparing have no dedicated
+    # timestamp column, so they stay undated rather than guessing.
+    stamps = {}
+    if order is not None:
+        try:
+            stamps = {"pending": order["created_at"],
+                      "shipped": order["shipped_at"],
+                      "delivered": order["delivered_at"]}
+        except (KeyError, IndexError):
+            stamps = {}
     lines = []
     for i, st in enumerate(flow):
         label = texts.STATUS_LABEL[st]
-        lines.append(texts.MSG_ROADMAP_DONE.format(label=label) if i <= idx
-                     else texts.MSG_ROADMAP_TODO.format(label=label))
+        if i <= idx:
+            line = texts.MSG_ROADMAP_DONE.format(label=label)
+            day = _fmt_day(stamps.get(st))
+            if day:
+                line += f" · {day}"
+            lines.append(line)
+        else:
+            lines.append(texts.MSG_ROADMAP_TODO.format(label=label))
     return "\n".join(lines)
 
 
