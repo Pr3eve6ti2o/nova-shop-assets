@@ -65,6 +65,8 @@ a subscription plan, and get a working store powered by the Nova control plane.
 
 - Headless CMS for product catalogue management
 - The bot pushes orders to Payload via `payload_hooks.py`
+- Customers and Gift Cards collections mirror the bot for store credit: balances, credit/debit with a mandatory note, gift-card issue/revoke, manual orders and refund-to-credit — all executed by the bot through its internal API; Payload holds no money state
+- Buyer-info edits write back to the bot while an order is unshipped
 - Admin panel runs on `:3001` (never exposed publicly)
 
 ### 2.4 Mini App (`miniapp/`)
@@ -89,6 +91,9 @@ The bot supports multiple payment methods. **Checkout order:** Balance → Stars
 
 - Users top up their bot balance via crypto or CryptoBot
 - Fastest checkout; no external calls
+- Store credit (Medusa model): the balance is backed by credit lots with FIFO spends and optional expiry; every movement is a ledger row with actor, note and reference
+- Admins can credit/debit with a mandatory note (bot console or Payload panel); admin credits never earn the top-up bonus, debits fail closed
+- Gift cards redeem to balance; manual orders charge balance or are comped; refunds can return to credit
 
 ### 3.2 Telegram Stars (XTR)
 
@@ -171,6 +176,9 @@ When a tenant loses/regenerates their BotFather token:
 | `reconciliation_cursors` | Per-chain block-height cursors for watcher resume/replay |
 | `outbox_events` | Durable outbox for async delivery (e.g., to Payload) |
 | `tonconnect_intent_claims` | Per-intent TON claim codes (single-use `TC-` codes) |
+| `balance_transactions` | Store-credit ledger: amount, balance-after, actor, note, reference (provenance since m014) |
+| `credit_lots` / `credit_lot_spends` | Lot-backed balance: FIFO spends, optional expiry, restores |
+| `gift_cards` | `NOVA-…` codes: value/remaining, status, expiry, redeemer |
 | `rental_swap_applications` | Token-swap requests with `approved_by_1`/`approved_by_2` |
 
 ### Control plane (PostgreSQL)
@@ -219,6 +227,13 @@ messages, or the Mini App.
 
 The user's bar: as a consumer, they won't spend time on a bot with too many
 buttons. Cut clutter, reduce taps, no dead buttons.
+
+### 6.6 Payload never writes the bot database
+
+The panel's money screens are clients of the bot's localhost internal API
+(shared secret + idempotency keys). Sync flows bot → panel; actions flow
+panel → bot API → ledger. A refused action (for example a buyer edit after
+shipping) aborts the panel save, so the mirror cannot drift from the ledger.
 
 ---
 

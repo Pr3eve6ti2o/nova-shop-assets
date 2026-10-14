@@ -30,6 +30,8 @@ This is especially important because the current product model contains both dig
 - Direct self-custody crypto where permitted.
 - TON Connect where permitted.
 - Cash on delivery for eligible physical orders.
+- Account balance / store credit (internal ledger), including admin-issued credit and gift-card value.
+- Comp (merchant-issued manual orders settle entirely in the ledger).
 
 ## Canonical payment model
 
@@ -81,6 +83,7 @@ Fulfillment
 10. Manual confirmation is exceptional and audited.
 11. Fulfillment is idempotent.
 12. Payment observation is evidence to verify, not automatic authorization.
+13. Admin-issued credit never earns the top-up bonus, and debits fail closed against the current balance.
 
 ## Chain-native payment identity
 
@@ -102,6 +105,17 @@ Solana
 ~~~
 
 The exact uniqueness key belongs to the chain adapter.
+
+## Store credit and manual orders
+
+Store credit is the customer's balance, backed by credit lots (FIFO spends, optional expiry) and an append-only ledger whose rows carry actor, note and reference. It settles orders like any other rail:
+
+- payment_method `balance` charges the account at catalogue prices;
+- payment_method `comp` creates a merchant-issued free order (a `manual` provider payment row records the settlement);
+- refunds can return value to the account (refund-to-credit), partial or full, via the bot or the Payload panel;
+- gift cards redeem into the account as lots, so their value spends like any other credit.
+
+All fiat math is integer cents. The `pricing-engine/` package (Dinero.js + Decimal.js) mirrors these calculations for the Mini App under a parity contract with the bot's Python totals.
 
 ## Reconciliation
 

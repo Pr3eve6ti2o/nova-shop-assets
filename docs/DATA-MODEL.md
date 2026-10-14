@@ -13,6 +13,7 @@ Owns live transactional commerce state:
 - direct crypto deposits;
 - CryptoBot invoices;
 - balances and referrals;
+- the store-credit ledger (balance_transactions) with actor/note/reference provenance, credit lots and gift cards;
 - stock alerts;
 - support and audit records.
 
@@ -24,7 +25,8 @@ Owns editorial/admin state:
 - categories;
 - media;
 - human admin users;
-- mirrored order documents.
+- mirrored order documents;
+- mirrored customers and gift cards (read models — money state stays in the bot).
 
 ## Important distinction
 
@@ -72,9 +74,7 @@ The reverse seed_from_bot.py script is a bootstrap/migration utility, not the ro
 
 ## Migration discipline
 
-bot/database.py currently performs opportunistic ALTER TABLE statements and suppresses broad exceptions.
-
-Replace this with numbered migrations and explicit schema-version tracking.
+Migrations are numbered modules in `bot/migrations/`, discovered and applied by `bot/migrations/runner.py` inside `create_tables()`, and tracked in `schema_migrations`. The current schema version is 14. The newest, m014 (store credit), added the ledger provenance columns (actor_type, actor_id, note, reference, reference_id) to `balance_transactions`, the `gift_cards` table, and `orders.origin`.
 
 Payload itself has a formal migration workflow; production deployments should execute migrations deliberately.
 

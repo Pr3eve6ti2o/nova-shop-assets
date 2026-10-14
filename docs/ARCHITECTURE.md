@@ -28,6 +28,8 @@
              fulfillment
 ~~~
 
+Store-credit traffic adds one hop: the Payload panel calls the bot's internal API (aiohttp, served by the bot process on localhost) for customer accounts, gift cards, manual orders and refunds. For money, the panel is a client of the bot — never a writer.
+
 ## Architectural rules
 
 1. The client proposes; the server decides.
@@ -37,6 +39,7 @@
 5. Fulfillment is idempotent and retryable.
 6. Provider adapters do not own business truth.
 7. Generated Mini App artifacts are outputs, never independent sources.
+8. Payload never writes the bot database; panel money actions go through the bot internal API with idempotency keys.
 
 ## Current technology
 
@@ -48,6 +51,8 @@
 - TON Connect for blockchain payment interaction.
 - Trust Wallet Core for HD wallet derivation.
 - External chain, rate and payment providers through HTTP adapters.
+- Pricing: the shared `pricing-engine/` package (Dinero.js 2 + Decimal.js) serves the Mini App, parity-tested against the bot's Python totals, which remain authoritative.
+- Panel↔bot money actions: the bot's localhost internal API (shared secret, idempotency keys on mutations).
 
 ## Target bounded contexts
 

@@ -7,6 +7,7 @@ Nova Shop is a Telegram-native commerce platform composed of a Telegram Bot, Tel
 | Area | Document |
 |---|---|
 | System architecture | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| Product & architecture documentation | [NOVA-SHOP-PRODUCT.md](NOVA-SHOP-PRODUCT.md) |
 | Security and threat model | [SECURITY.md](SECURITY.md) |
 | Payment architecture | [PAYMENTS.md](PAYMENTS.md) |
 | Data ownership and synchronization | [DATA-MODEL.md](DATA-MODEL.md) |
@@ -22,6 +23,7 @@ Nova Shop is a Telegram-native commerce platform composed of a Telegram Bot, Tel
 
 - Payload is the catalog authoring source of truth.
 - Bot SQLite is the current transactional commerce store.
+- Panel money actions are executed by the bot through its internal API; the Payload Customers and Gift Cards collections are mirrors, not ledgers.
 - Payment observations and fulfillment state belong to the bot transactional domain.
 - Mini App catalog/policy JSON and the dist bundle are generated artifacts.
 - Wallet public derivation is an integration boundary, not business logic.

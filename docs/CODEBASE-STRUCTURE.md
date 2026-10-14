@@ -2,13 +2,16 @@
 
 ## Current structure
 
-The repository currently contains five runtime surfaces:
+The repository currently contains six runtime surfaces:
 
 - bot/ — Telegram runtime and most business logic;
 - miniapp/ — static storefront source plus generated bundle;
 - admin/ — Next.js + Payload CMS;
+- pricing-engine/ — shared money math (Dinero.js + Decimal.js), parity-tested against the bot;
 - tools/ — synchronization/export/build scripts;
 - tonconnect/, brand/, docs/ — integration, brand, and engineering assets.
+
+Newer additions follow the target split: `bot/internal_api.py` is a thin HTTP adapter over the database layer, and `bot/handlers/admin/store_credit.py` holds the Telegram store-credit workflows.
 
 This works, but several large modules mix responsibilities.
 

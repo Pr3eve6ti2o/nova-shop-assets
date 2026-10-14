@@ -59,8 +59,28 @@ The code contains several payment rails:
 | Direct blockchain payments | Self-custody observation for supported physical/permitted flows |
 | TON Connect | Wallet interaction + on-chain verification |
 | Cash on delivery | Physical-order flow |
+| Account balance (store credit) | Internal-ledger checkout, admin credit/debit, gift cards |
+| Comp / manual orders | Merchant-created orders charged to balance or comped, settled in the ledger |
 
 **Telegram payment compliance matters:** digital goods and services sold inside Telegram bots/Mini Apps must use Telegram Stars. Third-party/provider and crypto routes must not be exposed for those digital orders merely because the implementation supports them. See https://core.telegram.org/bots/payments-stars
+
+### Store credit and merchant credit tools
+
+Borrowed from Medusa's store-credit model and adapted to the bot ledger:
+
+- Every customer has a store-credit account: the existing balance, backed by credit lots (FIFO spends, optional expiry) and an append-only ledger whose rows carry actor, note and reference provenance.
+- Admins can credit or debit any customer with a mandatory note — from the Telegram admin console or the Payload Store Credit panel. Admin credits never earn the top-up bonus; debits fail closed against the current balance.
+- Gift cards (`NOVA-XXXX-XXXX-XXXX`) are issued by the bot, redeemed to balance by customers, and can be revoked; partial redemption is supported.
+- Manual orders let a merchant check a customer out without an external payment: charged to balance or comped, always priced from the catalogue.
+- Order refunds can be returned to store credit (partial or full) from the bot or the panel.
+
+### Pricing engine
+
+`pricing-engine/` is the shared money-calculation package (Node ≥ 20, ESM):
+
+- Dinero.js for fiat (integer minor units only) and Decimal.js for crypto quotes.
+- A parity contract (`pricing-engine/test-vectors.json`) runs the same vectors through the JavaScript engine and the bot's own checkout totals, so the two implementations cannot drift.
+- The Mini App bundles the engine for cart subtotals and TON conversions; the Python bot remains the runtime authority for totals.
 
 ### Crypto
 
@@ -84,11 +104,15 @@ Wallet generation belongs in the separate Bawa reference repository. Nova Shop s
 Payload CMS provides:
 
 - catalog/category/media administration;
-- order visibility;
+- order visibility, manual order creation and refund-to-credit actions;
+- a customer store-credit mirror with credit/debit actions and transaction history;
+- gift card issue/revoke;
 - staff/admin authentication;
 - service-to-service catalog/order synchronization.
 
 The current architecture intentionally treats Payload as the CMS/administrative surface and the bot database as the live transactional ledger.
+
+Payload never writes the bot database. Panel money actions call the bot's localhost internal API (shared secret + idempotency keys); buyer-info edits on unshipped orders are written back through the same API and refused once an order has shipped.
 
 ### SaaS
 
@@ -105,6 +129,7 @@ The repository also contains an optional multi-tenant layer for merchant lifecyc
 │   ├── app.py             # runtime entrypoint
 │   ├── config.py          # validated environment configuration
 │   ├── database.py        # current transactional repository + schema
+│   ├── internal_api.py    # localhost API the Payload panel uses for money actions
 │   ├── crypto_payments.py # current payment/chain integration hub
 │   ├── crypto_watcher.py  # background observation/finalization loop
 │   ├── webapp_auth.py     # Telegram Mini App initData validator
@@ -120,6 +145,7 @@ The repository also contains an optional multi-tenant layer for merchant lifecyc
 │   ├── src/collections/    # Payload data/admin model
 │   ├── scripts/            # CMS bootstrap utilities
 │   └── package-lock.json
+├── pricing-engine/         # shared money math (Dinero.js fiat + Decimal.js crypto)
 ├── tools/
 │   ├── build_miniapp_bundle.py
 │   ├── export_catalog.py
@@ -150,6 +176,8 @@ orders / payments / inventory / customer state
 ~~~
 
 Payload order documents are a mirror for administration. They are not the settlement ledger.
+
+Store credit follows the same rule in reverse: the panel's Customers and Gift Cards collections are read models mirrored from the bot, and every credit, debit, gift-card, manual-order and refund action is executed by the bot through its internal API — the panel holds no money state of its own.
 
 For growth and multi-process consistency, the preferred direction is shared Postgres plus durable event/outbox processing. Payload officially supports Postgres and migration workflows. https://payloadcms.com/docs/database/postgres
 
@@ -192,21 +220,28 @@ pip install -r requirements.txt
 python app.py
 ~~~
 
-Run the existing smoke suite:
+Run the unit suite (98 tests — money paths, pricing parity, the internal API contract, and smoke coverage):
 
 ~~~bash
 cd bot
-python tests/test_smoke.py
+python -m unittest discover -s tests -p "test_*.py"
 ~~~
 
 ### Admin
 
-Use npm because package-lock.json is tracked:
+Use npm because package-lock.json is tracked. Copy `admin/.env.example` to `.env` first — the build refuses to run without a `PAYLOAD_SECRET` of at least 32 characters. Set `NOVA_BOT_API_URL` / `NOVA_BOT_API_SECRET` to enable the panel's store-credit actions against the bot's internal API.
 
 ~~~bash
 cd admin
 npm ci
 npm run dev
+~~~
+
+### Pricing engine
+
+~~~bash
+cd pricing-engine
+npm test
 ~~~
 
 CI:
@@ -270,6 +305,7 @@ Before real-money deployment, complete:
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Product & architecture documentation](docs/NOVA-SHOP-PRODUCT.md)
 - [Payments](docs/PAYMENTS.md)
 - [Data model](docs/DATA-MODEL.md)
 - [Security](docs/SECURITY.md)

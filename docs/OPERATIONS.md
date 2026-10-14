@@ -6,6 +6,8 @@ Run the bot and admin as separate services.
 
 The bot currently owns Telegram updates, checkout, payment observation and fulfillment. The crypto watcher currently shares the bot process lifecycle; at scale it should become a separately leased worker so only one worker performs each sweep.
 
+The bot can also serve a localhost internal API for the Payload panel (store credit, gift cards, manual orders, refunds, buyer write-back). It is disabled by default: set `INTERNAL_API_PORT` and a ≥32-character `INTERNAL_API_SECRET` in the bot environment, and the matching `NOVA_BOT_API_URL` / `NOVA_BOT_API_SECRET` in the panel environment. The API refuses to start with a short secret (the bot itself is unaffected). Keep the port bound to localhost — the shared secret is its only credential.
+
 ## Telemetry
 
 Record:
@@ -19,6 +21,7 @@ Record:
 - fulfillment failures;
 - catalog sync failures;
 - admin authentication failures;
+- internal API authentication failures;
 - webhook failures.
 
 Never log bot tokens, provider tokens, API keys, mnemonics, private keys or recovery material.
