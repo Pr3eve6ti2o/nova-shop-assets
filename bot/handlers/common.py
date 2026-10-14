@@ -168,13 +168,15 @@ def render_roadmap(status: str, order=None, digital: bool = False) -> str:
                           "delivered": order["fulfilled_at"]}
             except (KeyError, IndexError):
                 stamps = {}
-        if status == "delivered" or (
-                status in ("confirmed", "processing") and fulfilled):
+        # Delivered means delivered, whatever label an admin put on a
+        # digital order afterwards (preparing/shipped are physical
+        # concepts; a fulfilled digital order must never regress).
+        if status == "delivered" or fulfilled:
             idx = 2
-        elif status in ("confirmed", "processing"):
-            idx = 1
-        else:
+        elif status == "pending":
             idx = 0
+        else:
+            idx = 1
     else:
         flow = ["pending", "confirmed", "preparing", "shipped", "delivered"]
         idx = flow.index(status) if status in flow else 0

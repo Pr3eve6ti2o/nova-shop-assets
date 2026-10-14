@@ -108,9 +108,16 @@ async def _settle_paid_order(*, oid, order, user, provider, charge_id, message,
          "delivery_fee": order["total_cents"] - order["subtotal_cents"]
                         + order["discount_cents"],
          "total": order["total_cents"]}
+    # Post-purchase two-path rule: a digital order's receipt must not
+    # show the physical roadmap (Preparing/Shipped theatre for a key
+    # printed in this very message). Refetch so fulfilled_at is fresh.
+    physical = await db.order_has_physical(oid)
+    fresh = await db.get_order(oid)
+    if fresh:
+        order = fresh
     await message.answer(
         texts.MSG_PAY_OK.format(oid=oid, fulfillment=values_block) + "\n\n" +
-        totals_text(t) + f"\n\n{render_roadmap('confirmed')}",
+        totals_text(t) + f"\n\n{render_roadmap('confirmed', order, digital=not physical)}",
         reply_markup=kb.order_success_kb(
             oid, bot_username=(await bot.get_me()).username),
         disable_web_page_preview=True)

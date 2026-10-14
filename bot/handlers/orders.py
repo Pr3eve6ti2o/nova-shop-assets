@@ -172,12 +172,15 @@ async def show_order_detail(target, oid: int, user: dict):
                               _NEXT_STEP.get((order["status"], None)))
     else:
         d_lines = ["⚡ Digital delivery"]
-        if order["status"] in ("confirmed", "processing") \
-                and order["fulfilled_at"]:
+        if order["status"] in ("cancelled", "refunded"):
+            hint = _NEXT_STEP.get((order["status"], None))
+        elif order["fulfilled_at"]:
             hint = ("✅ Delivered digitally — your keys are shown "
                     "on this page.")
+        elif order["status"] == "pending":
+            hint = _NEXT_STEP.get(("pending", None))
         else:
-            hint = _NEXT_STEP.get((order["status"], None))
+            hint = _NEXT_STEP.get(("confirmed", None))
     delivery_block = "\n".join(d_lines)
     if hint:
         delivery_block += f"\n\n{hint}"
@@ -201,7 +204,8 @@ async def show_order_detail(target, oid: int, user: dict):
                                      callback_data=f"rcv:{oid}")])
     if order["status"] == "delivered" or (
             not physical
-            and order["status"] in ("confirmed", "processing")):
+            and order["status"] not in ("pending", "cancelled",
+                                        "refunded")):
         markup.inline_keyboard.insert(
             1, [InlineKeyboardButton(texts.BTN_RATE_ITEMS,
                                      callback_data=f"or:{oid}")])
