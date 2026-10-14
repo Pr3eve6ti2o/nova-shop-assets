@@ -18,7 +18,13 @@ async def _order_is_paid(order) -> bool:
     """True when money is on record for this order (any rail)."""
     method = order["payment_method"] or ""
     oid = order["id"]
-    if method in ("stars", "card"):
+    if method in ("stars", "card", "balance", "comp"):
+        # balance/comp (store-credit programme): the money moved — or
+        # was waived — at placement, and both paths write a paid
+        # payments row (provider 'balance' / 'manual'). Without these
+        # methods here the gate reported every balance-paid order as
+        # unpaid and refused shipped/delivered forever (found
+        # 2026-10-14, post-purchase verification).
         async with db._db() as conn:
             async with conn.execute(
                     "SELECT id FROM payments WHERE order_id=? AND status='paid'"
