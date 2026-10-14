@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS orders(
   id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id),
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending','awaiting_payment','confirmed','processing',
-                      'shipped','delivered','cancelled','refunded')),
+                      'preparing','shipped','delivered','cancelled',
+                      'refunded','completed')),
   subtotal_cents INTEGER NOT NULL DEFAULT 0 CHECK (subtotal_cents >= 0),
   discount_cents INTEGER NOT NULL DEFAULT 0 CHECK (discount_cents >= 0),
   total_cents INTEGER NOT NULL DEFAULT 0 CHECK (total_cents >= 0),

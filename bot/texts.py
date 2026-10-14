@@ -134,6 +134,8 @@ BTN_STOP = "\u23f9\ufe0f Stop"
 
 # Payment method labels (shared by checkout, orders, receipts).
 PAY_METHOD_LABEL = {
+    "balance": "🏦 Balance",
+    "comp": "🎁 Comp",
     "card": "\U0001f4b3 Card",
     "stars": "\u2b50 Telegram Stars",
     "telegram": "\u2b50 Telegram Stars",  # m10: provider="telegram" fell through to raw text
