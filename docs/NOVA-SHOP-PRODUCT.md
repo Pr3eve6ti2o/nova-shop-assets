@@ -235,6 +235,29 @@ The panel's money screens are clients of the bot's localhost internal API
 panel → bot API → ledger. A refused action (for example a buyer edit after
 shipping) aborts the panel save, so the mirror cannot drift from the ledger.
 
+### 6.7 Two fulfilment paths (post-purchase, Medusa borrow)
+
+An order is classified by its items (`order_has_physical`): any
+non-digital item makes it physical; an all-digital order is digital.
+
+- **Physical:** the Medusa progression — confirmed → preparing →
+  shipped → delivered. Admins advance the first steps (the customer is
+  notified at each, with a button back to the order); the customer
+  completes delivery with "I've received it" (an atomic
+  shipped → delivered transition that stamps `delivered_at`). Ratings
+  and the customer return entry unlock from that handover. The order
+  page shows a dated timeline, the delivery/pickup block, and a
+  next-step line per status.
+- **Digital:** delivered at fulfilment — no preparing/shipped/receipt
+  steps anywhere, including the payment receipt. The page shows a
+  collapsed Placed → Confirmed → Delivered timeline dated from
+  `fulfilled_at`, keys on the page, and immediate rating.
+
+The checkout delivery-details step (address/phone collection) is
+intentionally disabled — physical orders run as pickup — so the
+delivery block renders whatever details are on file and the pickup
+guidance otherwise.
+
 ---
 
 ## 7. Rent flow (user journey)

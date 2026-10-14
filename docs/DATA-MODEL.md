@@ -74,7 +74,7 @@ The reverse seed_from_bot.py script is a bootstrap/migration utility, not the ro
 
 ## Migration discipline
 
-Migrations are numbered modules in `bot/migrations/`, discovered and applied by `bot/migrations/runner.py` inside `create_tables()`, and tracked in `schema_migrations`. The current schema version is 14. The newest, m014 (store credit), added the ledger provenance columns (actor_type, actor_id, note, reference, reference_id) to `balance_transactions`, the `gift_cards` table, and `orders.origin`.
+Migrations are numbered modules in `bot/migrations/`, discovered and applied by `bot/migrations/runner.py` inside `create_tables()`, and tracked in `schema_migrations`. The current schema version is 15. m014 (store credit) added the ledger provenance columns (actor_type, actor_id, note, reference, reference_id) to `balance_transactions`, the `gift_cards` table, and `orders.origin`. The newest, m015 (post-purchase), completes the `orders.status` vocabulary (`preparing`, `completed`): where a historical table still carries the old CHECK constraint it rebuilds the table in place — rows, columns and indexes preserved, foreign keys verified — and it skips databases whose tables predate the constraint entirely.
 
 Payload itself has a formal migration workflow; production deployments should execute migrations deliberately.
 

@@ -47,6 +47,15 @@ Telegram
 - Physical and digital product modeling.
 - Digital inventory/license-key delivery and physical stock fulfillment.
 
+### Post-purchase (order lifecycle)
+
+Borrowed from Medusa's fulfilment model, with two paths so each order type gets only the steps that make sense for it:
+
+- **Physical goods:** admin advances the order (confirmed → preparing → shipped), the customer is notified at every step with a button back to the order, and delivery completes when the customer taps "I've received it" — ratings and returns unlock from that real handover.
+- **Digital goods:** none of that. Keys are delivered at fulfilment, the order page shows a collapsed Placed → Confirmed → Delivered timeline, and rating is available immediately.
+- The order page itself answers "what happens now?": dated status timeline, the delivery/pickup details on file, and a plain next-step line per status. Payment methods render by name (balance and comp included).
+- The checkout delivery-details step (address/phone collection) is intentionally disabled: physical orders run as pickup.
+
 ### Payments
 
 The code contains several payment rails:
@@ -220,7 +229,7 @@ pip install -r requirements.txt
 python app.py
 ~~~
 
-Run the unit suite (98 tests — money paths, pricing parity, the internal API contract, and smoke coverage):
+Run the unit suite (103 tests — money paths, pricing parity, the internal API contract, the order lifecycle, and smoke coverage):
 
 ~~~bash
 cd bot
