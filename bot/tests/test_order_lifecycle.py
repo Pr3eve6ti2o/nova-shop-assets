@@ -176,6 +176,52 @@ class OrderLifecycle(unittest.TestCase):
                 os.unlink(path)
         self.run_async(go())
 
+    def test_m015_handles_table_level_check_and_no_check_shapes(self):
+        """Historical schemas: the CHECK may be a table-level clause, or
+        absent entirely (the oldest tables). m015 must widen the first
+        and leave the second untouched, preserving rows either way."""
+        import sqlite3
+        from migrations import m015_order_status_vocabulary as m015
+
+        async def run_shape(ddl, expect_rebuilt):
+            fd, path = tempfile.mkstemp(suffix=".db")
+            os.close(fd)
+            con = sqlite3.connect(path)
+            con.execute(ddl)
+            con.execute(
+                "INSERT INTO orders(id, user_id, status, total_cents)"
+                " VALUES (7, 1, 'confirmed', 500)")
+            con.commit()
+            con.close()
+            db = Database(path)
+            try:
+                await m015.up(db)
+                o = await db.get_order(7)
+                self.assertEqual(o["status"], "confirmed")
+                self.assertEqual(o["total_cents"], 500)
+                async with db._db() as conn:
+                    async with conn.execute(
+                            "SELECT sql FROM sqlite_master"
+                            " WHERE type='table' AND name='orders'"
+                            ) as cur:
+                        new_sql = (await cur.fetchone())["sql"]
+                if expect_rebuilt:
+                    self.assertIn("'preparing'", new_sql)
+                self.assertTrue(await db.set_order_status(7, "preparing"))
+            finally:
+                os.unlink(path)
+
+        cols = ("id INTEGER PRIMARY KEY, user_id INTEGER,"
+                " status TEXT NOT NULL DEFAULT 'pending',"
+                " total_cents INTEGER, created_at TEXT, updated_at TEXT,"
+                " claimed_at TEXT, shipped_at TEXT, delivered_at TEXT")
+        self.run_async(run_shape(
+            f"CREATE TABLE orders({cols},"
+            " CHECK (status IN ('pending','confirmed','shipped')))",
+            expect_rebuilt=True))
+        self.run_async(run_shape(
+            f"CREATE TABLE orders({cols})", expect_rebuilt=False))
+
     def test_payment_labels_cover_store_credit_methods(self):
         self.assertIn("balance", texts.PAY_METHOD_LABEL)
         self.assertIn("comp", texts.PAY_METHOD_LABEL)
