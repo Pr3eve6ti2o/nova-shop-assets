@@ -155,6 +155,19 @@ async def on_startup(dp_):
     logger.info("   Mini App: %s", config.MINIAPP_URL or "NO")
     logger.info("=" * 50)
 
+    # Audit 20261015 01-core: supervise background tasks — a crashed worker
+    # must be loud in the logs at crash time, not surface silently at
+    # shutdown (or never). No auto-restart: the loops are internally
+    # fault-tolerant; an unexpected exit is an operator event.
+    def _supervise(_task, _name):
+        def _done(_t):
+            if _t.cancelled():
+                return
+            _exc = _t.exception()
+            if _exc is not None:
+                logger.error("Background task %s crashed: %r", _name, _exc)
+        _task.add_done_callback(_done)
+
     # Background crypto deposit watcher (SPEC2 §4): 60s sweeps, never crashes.
     # P3.19: disabled when WATCHER_STANDALONE=1 (watcher runs as its own service).
     global _watcher_task, _outbox_task
@@ -162,6 +175,7 @@ async def on_startup(dp_):
         from crypto_watcher import crypto_watcher_loop
         # Opus P2: asyncio.get_event_loop() is deprecated — use get_running_loop.
         _watcher_task = asyncio.get_running_loop().create_task(crypto_watcher_loop())
+        _supervise(_watcher_task, "watcher")
     else:
         logger.info("In-process watcher disabled (WATCHER_STANDALONE=1)")
 
@@ -171,6 +185,7 @@ async def on_startup(dp_):
     from outbox_worker import outbox_worker_loop
     from loader import db as _db
     _outbox_task = asyncio.get_running_loop().create_task(outbox_worker_loop(_db))
+    _supervise(_outbox_task, "outbox")
 
     # Port Part 2: campaign engine (abandoned cart, back-in-stock,
     # post-purchase, onboarding). CAMPAIGNS_ENABLED=0 disables sends.
@@ -180,6 +195,7 @@ async def on_startup(dp_):
         from loader import bot as _bot
         _campaign_task = asyncio.get_running_loop().create_task(
             campaign_worker_loop(_db, _bot))
+        _supervise(_campaign_task, "campaign")
     else:
         logger.info("Campaign engine disabled (CAMPAIGNS_ENABLED=0)")
 
@@ -202,8 +218,16 @@ async def on_shutdown(dp_):
             _task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(_task), timeout=10)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except asyncio.CancelledError:
                 pass
+            except Exception as _e:
+                # Audit 20261015 01-core: a worker that crashed earlier (or
+                # raises a non-cancellation error while being cancelled)
+                # re-raises its own exception through shield/wait_for. It
+                # must not abort the rest of shutdown cleanup (internal
+                # API, storage, DB, bot session) — log it and continue.
+                logger.warning(
+                    "Shutdown: %s task ended with error: %r", _name, _e)
     _watcher_task = None
     _outbox_task = None
     _campaign_task = None
