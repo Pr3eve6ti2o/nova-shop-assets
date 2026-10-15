@@ -115,7 +115,8 @@ Payload CMS provides:
 
 - catalog/category/media administration;
 - order visibility, manual order creation and refund-to-credit actions;
-- a customer store-credit mirror with credit/debit actions and transaction history;
+- a customer store-credit mirror with credit/debit actions, set-balance-to-zero, and transaction history;
+- live inventory: the bot's real stock and unused-key counts on each product, with restocking (add/set for physical goods, pasted keys for digital) against the live numbers;
 - gift card issue/revoke;
 - staff/admin authentication;
 - service-to-service catalog/order synchronization.
