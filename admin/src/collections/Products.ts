@@ -1,6 +1,7 @@
 import type { CollectionConfig } from 'payload'
 import { isAdmin, isStaff } from '../access/roles'
 import { isAdminField, isStaffField } from '../access/roles'
+import { botFetch, newIdempotencyKey, readJsonBody, requireRole, withBotErrors } from '../lib/botApi'
 
 export const Products: CollectionConfig = {
   slug: 'products',
@@ -64,7 +65,8 @@ export const Products: CollectionConfig = {
       access: { update: isStaffField },
       defaultValue: -1,
       admin: {
-        description: '-1 = unlimited stock.',
+        description:
+          '-1 = unlimited stock. This value only seeds a NEW product when it first syncs to the bot — live stock is owned by the bot and is managed in the Live Inventory section below (catalogue sync no longer overwrites it).',
       },
     },
     {
@@ -116,5 +118,77 @@ export const Products: CollectionConfig = {
         description: 'Linked Telegram bot product id — managed by sync',
       },
     },
+    {
+      name: 'liveInventory',
+      type: 'ui',
+      admin: {
+        components: { Field: '/components/InventoryPanel' },
+      },
+    },
   ],
+  endpoints: [
+    {
+      path: '/:id/inventory',
+      method: 'get',
+      handler: async (req) => {
+        const denied = requireRole(req, ['admin', 'staff'])
+        if (denied) return denied
+        return withBotErrors(async () => {
+          const botId = await linkedBotId(req)
+          if (botId === null) {
+            return Response.json(
+              { error: 'This product is not linked to a bot product yet — run the catalogue sync first.' },
+              { status: 409 })
+          }
+          const inventory = await botFetch(`/internal/products/${botId}`)
+          return Response.json({ inventory })
+        })
+      },
+    },
+    {
+      path: '/:id/restock',
+      method: 'post',
+      handler: async (req) => {
+        const denied = requireRole(req, ['admin', 'staff'])
+        if (denied) return denied
+        return withBotErrors(async () => {
+          const botId = await linkedBotId(req)
+          if (botId === null) {
+            return Response.json(
+              { error: 'This product is not linked to a bot product yet — run the catalogue sync first.' },
+              { status: 409 })
+          }
+          const body = await readJsonBody(req)
+          const note = String(body?.note || '').trim()
+          if (!note) {
+            return Response.json({ error: 'A note is required' }, { status: 400 })
+          }
+          // Shape is validated again by the bot's internal API; here we
+          // only forward the fields for this product's kind.
+          const result = await botFetch(`/internal/products/${botId}/restock`, {
+            method: 'POST',
+            body: {
+              mode: body?.mode,
+              qty: body?.qty,
+              values: body?.values,
+              note,
+              actor: req.user?.email || `payload-user-${req.user?.id}`,
+            },
+            idempotencyKey: newIdempotencyKey(),
+          })
+          const inventory = await botFetch(`/internal/products/${botId}`)
+          return Response.json({ ok: true, result, inventory })
+        })
+      },
+    },
+  ],
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function linkedBotId(req: any): Promise<number | null> {
+  const doc = await req.payload.findByID({
+    collection: 'products', id: req.routeParams?.id as string, overrideAccess: true,
+  })
+  const botId = Number(doc?.botId)
+  return Number.isInteger(botId) && botId > 0 ? botId : null
 }

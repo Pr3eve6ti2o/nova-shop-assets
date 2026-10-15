@@ -1411,6 +1411,24 @@ class Database:
                 return await cur.fetchall()
 
     # ------------------------------------------------- product values ---
+    async def adjust_stock(self, product_id: int, delta: int) -> int:
+        """Atomically adjust finite physical stock by delta (admin
+        restock, 2026-10-16 programme). Single conditional statement:
+        a concurrent checkout decrement cannot be clobbered by a
+        read-modify-write, and unlimited stock (-1) is never touched.
+        Returns affected rows: 1 on success, 0 when the product is
+        missing or its stock is unlimited."""
+        async with self._claim_lock:
+            async with self._db() as db:
+                cur = await db.execute(
+                    "UPDATE products SET stock = stock + ?"
+                    " WHERE id=? AND stock >= 0",
+                    (delta, product_id),
+                )
+                n = cur.rowcount
+                await db.commit()
+                return n
+
     async def add_product_values(self, product_id: int, values):
         async with self._db() as db:
             await db.executemany(

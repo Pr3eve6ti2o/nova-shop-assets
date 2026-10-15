@@ -30,6 +30,7 @@ export default function StoreCreditPanel() {
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
+  const [zeroArmed, setZeroArmed] = useState(false)
 
   const load = useCallback(async () => {
     if (!id) return
@@ -77,6 +78,44 @@ export default function StoreCreditPanel() {
       setMsg(`${kind === 'credit' ? 'Credited' : 'Debited'} ${fmt(cents)}.`)
       setAmount('')
       setNote('')
+      setZeroArmed(false)
+      void load()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Set balance to zero (2026-10-16): two-step — the first click arms
+  // the button with the exact amount, the second confirms. Uses the
+  // same mandatory note as credit/debit; the bot applies it as a full
+  // debit on the ledger.
+  const zero = async () => {
+    if (!data?.account?.balance_cents) return
+    if (!zeroArmed) {
+      if (!note.trim()) {
+        setMsg('A note is required — it goes on the ledger.')
+        return
+      }
+      setZeroArmed(true)
+      return
+    }
+    setBusy(true)
+    setMsg('')
+    try {
+      const res = await fetch(`/api/customers/${id}/zero`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note: note.trim() }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setMsg(json?.error || 'Zeroing failed')
+        return
+      }
+      setMsg(`Balance set to zero (removed ${fmt(-(json.result?.applied_cents || 0))}).`)
+      setAmount('')
+      setNote('')
+      setZeroArmed(false)
       void load()
     } finally {
       setBusy(false)
@@ -121,6 +160,17 @@ export default function StoreCreditPanel() {
               title={data.account.balance_cents ? '' : 'Nothing to debit'}
             >
               Debit
+            </button>
+            <button
+              type="button"
+              disabled={busy || !data.account.balance_cents}
+              onClick={zero}
+              title={data.account.balance_cents ? 'Remove the entire balance' : 'Nothing to zero'}
+              style={zeroArmed ? { background: 'var(--theme-error-500)', color: '#fff' } : undefined}
+            >
+              {zeroArmed
+                ? `Confirm zeroing ${fmt(data.account.balance_cents)}?`
+                : 'Set balance to zero'}
             </button>
           </div>
           {msg && <p>{msg}</p>}

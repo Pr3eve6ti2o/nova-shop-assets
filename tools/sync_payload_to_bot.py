@@ -3,8 +3,11 @@
 
 Payload is the source of truth for catalog content. This script:
   - for each Payload product WITH botId: UPDATE the bot's products row
-    (name, description, price_cents, old_price_cents, kind, stock, category,
-    is_active=1 when status=published else is_active=0)
+    (name, description, price_cents, old_price_cents, kind, category,
+    is_active=1 when status=published else is_active=0). Stock is NOT
+    updated for existing products — live stock is bot-owned (seeded from
+    Payload only at insert; restock via the bot console or the panel's
+    Live Inventory section). 2026-10-16, decision D1.
   - for each Payload product WITHOUT botId: INSERT a new bot row
     (is_active=1 when published; drafts are skipped), then PATCH the
     Payload product with the new bot id (write-back)
@@ -147,32 +150,30 @@ def main() -> int:
                     cat_id = ensure_bot_category(con, cat_name, cat_emoji,
                                                  args.dry_run)
                     if not args.dry_run:
+                        # Stock is deliberately NOT synced on update
+                        # (2026-10-16, decision D1): live stock is owned
+                        # by the bot — sales decrement it and restocks
+                        # happen in the bot console or the panel's Live
+                        # Inventory section. The old absolute overwrite
+                        # raced live sales and could resurrect sold
+                        # units from a stale panel number. Payload's
+                        # stock field now only seeds NEW products
+                        # (insert path below). Back-in-stock alerts are
+                        # the campaign worker's job — it watches the
+                        # bot's live stock, whichever surface restocked.
                         con.execute(
                             "UPDATE products SET name=?, description=?,"
                             " price_cents=?, old_price_cents=?, kind=?,"
-                            " stock=?, category_id=COALESCE(?, category_id),"
+                            " category_id=COALESCE(?, category_id),"
                             " rating_sum=COALESCE(?, rating_sum),"
                             " rating_count=COALESCE(?, rating_count),"
                             " is_active=? WHERE id=?",
                             (p.get("name"), p.get("description") or "",
                              p.get("priceCents"), p.get("oldPriceCents"),
                              p.get("kind") or "physical",
-                             p.get("stock") if p.get("stock") is not None else -1,
                              cat_id if cat_id != -1 else None,
                              p.get("ratingSum"), p.get("ratingCount"),
                              new_active, bot_id))
-                    # Restock detection: was 0, now >0 → queue stock alert notifications
-                    old_stock = row["stock"] if "stock" in row.keys() else 0
-                    new_stock = p.get("stock") if p.get("stock") is not None else -1
-                    if old_stock == 0 and new_stock != 0 and new_stock != -1:
-                        alert_users = con.execute(
-                            "SELECT user_id FROM stock_alerts WHERE product_id=?",
-                            (bot_id,)).fetchall()
-                        if alert_users:
-                            print(f"  🔔 RESTOCK: product {bot_id} ({p.get('name')}) — "
-                                  f"{len(alert_users)} user(s) waiting for stock alert")
-                            # The bot picks these up via the stock_alerts table;
-                            # run tools/notify_restock.py to send the DMs.
                     if row["is_active"] != new_active:
                         stats["deactivated" if not published else "updated"] += 1
                     else:

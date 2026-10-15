@@ -602,6 +602,8 @@ def admin_user_kb(user):
         kb.row(credit_btn,
                InlineKeyboardButton(texts.BTN_DEBIT,
                                     callback_data=cb("ad:udb", tg_id)))
+        kb.row(InlineKeyboardButton(texts.BTN_ZERO_BALANCE,
+                                     callback_data=cb("ad:uzero", tg_id)))
     else:
         kb.row(credit_btn)
     kb.row(InlineKeyboardButton(texts.BTN_CREATE_ORDER,

@@ -38,10 +38,12 @@ class StoreCreditKeyboards(unittest.TestCase):
         cbs = _callbacks(kb.admin_user_kb(broke))
         self.assertIn("ad:ucr:555", cbs)
         self.assertNotIn("ad:udb:555", cbs)  # Medusa: debit off at zero
+        self.assertNotIn("ad:uzero:555", cbs)  # nothing to zero either
         self.assertIn("ad:uord:555", cbs)
         funded = {"tg_id": 555, "is_blocked": 0, "balance_cents": 1200}
         cbs = _callbacks(kb.admin_user_kb(funded))
         self.assertIn("ad:udb:555", cbs)
+        self.assertIn("ad:uzero:555", cbs)
 
     def test_balance_kb_has_giftcard_redeem(self):
         self.assertIn("bal:gift", _callbacks(kb.balance_kb()))

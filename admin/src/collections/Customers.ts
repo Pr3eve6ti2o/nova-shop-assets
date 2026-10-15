@@ -109,6 +109,15 @@ export const Customers: CollectionConfig = {
         return adjustHandler(req, 'debit')
       },
     },
+    {
+      path: '/:id/zero',
+      method: 'post',
+      handler: async (req) => {
+        const denied = requireRole(req, ['admin'])
+        if (denied) return denied
+        return zeroHandler(req)
+      },
+    },
   ],
   fields: [
     { name: 'tgUserId', type: 'text', unique: true, index: true, admin: { readOnly: true } },
@@ -126,6 +135,42 @@ export const Customers: CollectionConfig = {
       },
     },
   ],
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function zeroHandler(req: any): Promise<Response> {
+  return withBotErrors(async () => {
+    const body = await readJsonBody(req)
+    const note = String(body?.note || '').trim()
+    if (!note) {
+      return Response.json({ error: 'A note is required' }, { status: 400 })
+    }
+    const doc = await req.payload.findByID({
+      collection: 'customers', id: req.routeParams?.id as string, overrideAccess: true,
+    })
+    const result = await botFetch(`/internal/customers/${doc.tgUserId}/zero`, {
+      method: 'POST',
+      body: {
+        note,
+        actor: req.user?.email || `payload-user-${req.user?.id}`,
+      },
+      idempotencyKey: newIdempotencyKey(),
+    })
+    // Refresh the snapshot fields from the bot's account view.
+    const account = await botFetch(`/internal/customers/${doc.tgUserId}`)
+    await req.payload.update({
+      collection: 'customers',
+      id: doc.id,
+      data: {
+        balanceCents: account.balance_cents,
+        totalCreditsCents: account.total_credits_cents,
+        totalDebitsCents: account.total_debits_cents,
+        txCount: account.transactions,
+      },
+      overrideAccess: true,
+    })
+    return Response.json({ ok: true, result, account })
+  })
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

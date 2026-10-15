@@ -181,6 +181,7 @@ BTN_MAINT_OFF = "\U0001f527 Maintenance: OFF"
 # Medusa borrow (2026-10-14): admin credit/debit, gift cards, manual orders.
 BTN_CREDIT = "➕ Credit"
 BTN_DEBIT = "➖ Debit"
+BTN_ZERO_BALANCE = "🧹 Set balance to zero"
 BTN_CREATE_ORDER = "🧾 Create order"
 BTN_ADM_GIFTCARDS = "🎁 Gift cards"
 BTN_GIFTCARD_NEW = "➕ New gift card"
@@ -198,6 +199,11 @@ MSG_CREDIT_ASK_AMOUNT = (
 )
 MSG_CREDIT_ASK_NOTE = (
     "✏️ <b>Reason</b>\n\n"
+    "Send a short note for the ledger (required, up to 200 characters):"
+)
+MSG_ZERO_ASK_NOTE = (
+    "🧹 <b>Set balance to zero</b>\n\n"
+    "Customer: {name}\nCurrent balance: {balance}\n\n"
     "Send a short note for the ledger (required, up to 200 characters):"
 )
 MSG_CREDIT_CONFIRM = (

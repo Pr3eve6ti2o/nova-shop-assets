@@ -207,6 +207,159 @@ async def debit(request: web.Request) -> web.Response:
     return await _adjust(request, -1)
 
 
+async def zero_balance(request: web.Request) -> web.Response:
+    """Set a customer's balance to zero (2026-10-16 programme): a full
+    debit of the current balance through adjust_balance, so the ledger
+    carries actor/note and lot consumption stays FIFO. Unlike _adjust
+    there is no amount cap — zeroing must work for any balance. Fails
+    closed: 409 when the balance is already zero or moved under us."""
+    replay, err = await _idem_replay(request)
+    if err:
+        return err
+    if replay:
+        return replay
+    user, err = await _get_user_or_404(request)
+    if err:
+        return err
+    body = await _body(request)
+    note = str(body.get("note") or "").strip()
+    if not 1 <= len(note) <= 500:
+        return _err(400, "note_required",
+                    "a note of 1..500 characters is required")
+    db = request.app["db"]
+    stats = await db.account_stats(user["id"])
+    amount = int(stats["balance_cents"])
+    if amount <= 0:
+        return _err(409, "already_zero", "the balance is already zero")
+    new_bal = await db.adjust_balance(
+        user["id"], -amount, tx_type="admin_debit",
+        actor_type="payload", actor_id=_actor(body), note=note,
+        reference="payload")
+    if new_bal is None:
+        return _err(409, "insufficient_balance",
+                    "the balance changed during the operation")
+    await db.audit(0, "api_zero_balance",
+                   f"tg={user['tg_id']} amount={amount} "
+                   f"actor={_actor(body)}")
+    payload = {"tg_id": int(user["tg_id"]), "balance_cents": new_bal,
+               "applied_cents": -amount}
+    await _idem_save(request, payload)
+    return web.json_response(payload)
+
+
+# ------------------------------------------------------------- inventory
+# Restocking (2026-10-16 programme, Medusa inventory pattern): the
+# panel adjusts the bot's LIVE stock — never its own catalogue copy.
+# Physical stock moves atomically (db.adjust_stock) or by absolute set;
+# digital stock is the unused-key pool (db.add_product_values).
+
+async def _get_product_or_404(request: web.Request):
+    db = request.app["db"]
+    try:
+        pid = int(request.match_info["product_id"])
+    except (KeyError, ValueError):
+        return None, _err(400, "bad_product_id",
+                          "product id must be an integer")
+    product = await db.get_product(pid)
+    if not product:
+        return None, _err(404, "product_not_found", "no such product")
+    return product, None
+
+
+async def _product_view(db, p) -> dict:
+    return {
+        "id": int(p["id"]), "name": p["name"], "kind": p["kind"],
+        "is_active": bool(p["is_active"]),
+        "is_unlimited": bool(p["is_unlimited"]),
+        "stock": int(p["stock"]),
+        "unused_values": await db.unused_values_count(int(p["id"])),
+    }
+
+
+async def list_products(request: web.Request) -> web.Response:
+    try:
+        limit = min(max(int(request.query.get("limit", 100)), 1), 500)
+        offset = max(int(request.query.get("offset", 0)), 0)
+    except ValueError:
+        return _err(400, "bad_pagination", "limit/offset must be integers")
+    db = request.app["db"]
+    rows = await db.list_all_products(limit=limit, offset=offset)
+    return web.json_response({"products": [
+        await _product_view(db, p) for p in rows]})
+
+
+async def get_product(request: web.Request) -> web.Response:
+    product, err = await _get_product_or_404(request)
+    if err:
+        return err
+    return web.json_response(
+        await _product_view(request.app["db"], product))
+
+
+async def restock(request: web.Request) -> web.Response:
+    replay, err = await _idem_replay(request)
+    if err:
+        return err
+    if replay:
+        return replay
+    product, err = await _get_product_or_404(request)
+    if err:
+        return err
+    body = await _body(request)
+    note = str(body.get("note") or "").strip()
+    if not 1 <= len(note) <= 500:
+        return _err(400, "note_required",
+                    "a note of 1..500 characters is required")
+    db = request.app["db"]
+    pid = int(product["id"])
+    actor = _actor(body)
+    if product["kind"] == "digital":
+        values = body.get("values")
+        if not isinstance(values, list) or not values:
+            return _err(400, "bad_values",
+                        "digital restock needs a non-empty values list")
+        if len(values) > 1000:
+            return _err(400, "bad_values", "at most 1000 values per call")
+        cleaned = [str(v).strip() for v in values]
+        if any(not v for v in cleaned) \
+                or len(cleaned) != len(set(cleaned)):
+            return _err(400, "bad_values",
+                        "values must be non-blank and unique in the batch")
+        before = await db.unused_values_count(pid)
+        await db.add_product_values(pid, cleaned)
+        after = await db.unused_values_count(pid)
+        added = after - before
+        await db.audit(0, "api_restock_values",
+                       f"product={pid} added={added} actor={actor} "
+                       f"note={note[:120]}")
+        payload = {"product_id": pid, "kind": "digital",
+                   "added": added, "unused_values": after}
+    else:
+        mode = body.get("mode")
+        qty = body.get("qty")
+        if mode not in ("add", "set") or not isinstance(qty, int) \
+                or isinstance(qty, bool) or qty < 0 \
+                or (mode == "add" and qty == 0):
+            return _err(400, "bad_qty",
+                        "mode 'add' needs qty > 0; mode 'set' needs "
+                        "qty >= 0")
+        if mode == "add":
+            if not await db.adjust_stock(pid, qty):
+                return _err(409, "unlimited_stock",
+                            "stock is unlimited (-1); use mode 'set' to "
+                            "give the product a finite stock")
+        else:
+            await db.update_product(pid, stock=qty)
+        fresh = await db.get_product(pid)
+        await db.audit(0, "api_restock_stock",
+                       f"product={pid} mode={mode} qty={qty} "
+                       f"actor={actor} note={note[:120]}")
+        payload = {"product_id": pid, "kind": "physical",
+                   "mode": mode, "stock": int(fresh["stock"])}
+    await _idem_save(request, payload)
+    return web.json_response(payload)
+
+
 async def giftcard_create(request: web.Request) -> web.Response:
     replay, err = await _idem_replay(request)
     if err:
@@ -385,6 +538,10 @@ def create_app(db, secret: str) -> web.Application:
     r.add_get("/internal/customers/{tg_id}/transactions", list_transactions)
     r.add_post("/internal/customers/{tg_id}/credit", credit)
     r.add_post("/internal/customers/{tg_id}/debit", debit)
+    r.add_post("/internal/customers/{tg_id}/zero", zero_balance)
+    r.add_get("/internal/products", list_products)
+    r.add_get("/internal/products/{product_id}", get_product)
+    r.add_post("/internal/products/{product_id}/restock", restock)
     r.add_post("/internal/gift-cards", giftcard_create)
     r.add_post("/internal/gift-cards/{card_id}/revoke", giftcard_revoke)
     r.add_post("/internal/orders/manual", manual_order)

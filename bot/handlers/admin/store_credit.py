@@ -40,7 +40,8 @@ def _money(cents: int) -> str:
 # ------------------------------------------------------------ credit/debit
 @dp.callback_query_handler(
     lambda q: q.data and (q.data.startswith("ad:ucr:")
-                          or q.data.startswith("ad:udb:")),
+                          or q.data.startswith("ad:udb:")
+                          or q.data.startswith("ad:uzero:")),
     is_admin=config.PERM_USERS, state="*")
 async def cb_credit_start(query: types.CallbackQuery, state: FSMContext):
     try:
@@ -50,13 +51,27 @@ async def cb_credit_start(query: types.CallbackQuery, state: FSMContext):
     user = await db.get_user_by_tg(tg_id)
     if not user:
         return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
-    kind = "credit" if query.data.startswith("ad:ucr:") else "debit"
-    if kind == "debit" and int(user["balance_cents"]) <= 0:
+    if query.data.startswith("ad:ucr:"):
+        kind = "credit"
+    elif query.data.startswith("ad:uzero:"):
+        kind = "zero"
+    else:
+        kind = "debit"
+    if kind in ("debit", "zero") and int(user["balance_cents"]) <= 0:
         return await query.answer("Nothing to debit — balance is zero.",
                                   show_alert=True)
     await query.answer()
     await state.finish()
     await state.update_data(credit_tg=tg_id, credit_kind=kind)
+    if kind == "zero":
+        # Set-to-zero (2026-10-16 programme): no amount step — the
+        # amount is the whole balance, read fresh at confirm time.
+        await AdminCreditFlow.note.set()
+        return await query.message.answer(
+            texts.MSG_ZERO_ASK_NOTE.format(
+                name=html.escape(user["name"] or "?"),
+                balance=_money(user["balance_cents"])),
+            reply_markup=kb.force_reply())
     await AdminCreditFlow.amount.set()
     verb = "Credit" if kind == "credit" else "Debit"
     await query.message.answer(
@@ -99,15 +114,21 @@ async def msg_credit_note(message: types.Message, state: FSMContext):
     if not user:
         await state.finish()
         return await message.answer(texts.ERR_NOT_FOUND)
-    cents = int(data["credit_cents"])
-    delta = cents if data["credit_kind"] == "credit" else -cents
+    if data["credit_kind"] == "zero":
+        cents = int(user["balance_cents"])
+        verb, new_balance = "Set balance to zero", _money(0)
+    else:
+        cents = int(data["credit_cents"])
+        delta = cents if data["credit_kind"] == "credit" else -cents
+        verb = "Credit" if delta > 0 else "Debit"
+        new_balance = _money(int(user["balance_cents"]) + delta)
     await state.update_data(credit_note=note)
     await AdminCreditFlow.confirm.set()
     await message.answer(
         texts.MSG_CREDIT_CONFIRM.format(
-            verb="Credit" if delta > 0 else "Debit",
+            verb=verb,
             name=html.escape(user["name"] or "?"), amount=_money(cents),
-            new_balance=_money(int(user["balance_cents"]) + delta),
+            new_balance=new_balance,
             note=html.escape(note)),
         reply_markup=kb.admin_credit_confirm_kb())
 
@@ -121,7 +142,17 @@ async def cb_credit_confirm(query: types.CallbackQuery, state: FSMContext):
     if not user:
         await state.finish()
         return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
-    cents = int(data["credit_cents"])
+    if data["credit_kind"] == "zero":
+        # Re-read at confirm time: zero means the whole CURRENT
+        # balance, whatever it is now; adjust_balance fails closed
+        # if it moved again underneath us.
+        cents = int(user["balance_cents"])
+        if cents <= 0:
+            await state.finish()
+            return await query.answer("Balance is already zero.",
+                                      show_alert=True)
+    else:
+        cents = int(data["credit_cents"])
     delta = cents if data["credit_kind"] == "credit" else -cents
     new_bal = await db.adjust_balance(
         user["id"], delta,
