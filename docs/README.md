@@ -16,8 +16,9 @@ Nova Shop is a Telegram-native commerce platform composed of a Telegram Bot, Tel
 | Release checklist | [RELEASE.md](RELEASE.md) |
 | Deployment | [DEPLOYMENT.md](DEPLOYMENT.md) |
 | Product specification | [SPEC.md](SPEC.md), [SPEC2.md](SPEC2.md) |
-| Previous audit | [AUDIT-2026-09-30.md](AUDIT-2026-09-30.md) |
-| Current deep audit | [AUDIT-2026-10-05.md](AUDIT-2026-10-05.md) |
+| Earlier audit | [AUDIT-2026-09-30.md](AUDIT-2026-09-30.md) |
+| Previous deep audit | [AUDIT-2026-10-05.md](AUDIT-2026-10-05.md) |
+| Current deep audit | [AUDIT-2026-10-15.md](AUDIT-2026-10-15.md) |
 
 ## Source-of-truth rules
 

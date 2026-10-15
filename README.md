@@ -98,6 +98,7 @@ Current code supports Bitcoin, EVM stablecoin rails, TRON, TON, and additional B
 The crypto layer uses:
 
 - public-only HD-wallet derivation;
+- derivation counters scoped per xpub — chains sharing one xpub share one counter, so a deposit address is never issued twice (migration m016);
 - persistent Wallet Core daemon;
 - integer atomic-unit accounting;
 - underpayment/top-up handling;
@@ -321,6 +322,7 @@ Before real-money deployment, complete:
 - [Codebase structure](docs/CODEBASE-STRUCTURE.md)
 - [Operations](docs/OPERATIONS.md)
 - [Release checklist](docs/RELEASE.md)
+- [Deep audit — 2026-10-15](docs/AUDIT-2026-10-15.md)
 - [Deep audit — 2026-10-05](docs/AUDIT-2026-10-05.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Product specifications](docs/SPEC.md) / [SPEC2.md](docs/SPEC2.md)
