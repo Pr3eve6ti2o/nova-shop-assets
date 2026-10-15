@@ -49,7 +49,12 @@ async def render_cart(target, user_id: int, state: FSMContext, dropped: list = N
         toast = texts.MSG_CART_DROPPED.format(
             names=", ".join(html.escape(n) for n in dropped))
         if isinstance(target, types.CallbackQuery):
-            await target.answer(toast, show_alert=True)
+            # Audit 20261015 02-shop: most callers (cb_cart, cb_cart_qty,
+            # cb_cart_remove, cb_clear_yes, cb_promo_remove) already
+            # answered this query — a callback answer here was a second
+            # answer, which Telegram rejects, so the drop notice never
+            # displayed and the handler raised. Send it as a message.
+            await target.message.answer(toast)
         else:
             await target.answer(toast)
 
@@ -65,6 +70,11 @@ async def nav_cart(message: types.Message, state: FSMContext):
         await message.delete()
     except TelegramAPIError:
         pass
+    # Audit 20261015 02-shop: finish any in-progress flow (e.g.
+    # CartPromo.waiting_code) — without this the user's next text was
+    # still captured as a promo code after viewing the cart. Matches
+    # nav_shop and cb_cart.
+    await state.finish()
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
     await render_cart(message, user["id"], state)
 
@@ -75,6 +85,7 @@ async def cmd_cart(message: types.Message, state: FSMContext):
     if message.chat.type != "private":
         await message.answer("Your cart is private — please open me in a private chat.")
         return
+    await state.finish()
     user, _ = await get_or_register(message.from_user.id, message.from_user.full_name)
     await render_cart(message, user["id"], state)
 

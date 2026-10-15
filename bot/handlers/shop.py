@@ -46,7 +46,9 @@ async def cb_shop(query: types.CallbackQuery, state: FSMContext):
 # -------------------------------------------------------- product list ---
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("cat:"), state="*")
 async def cb_category(query: types.CallbackQuery):
-    await query.answer()
+    # Audit 20261015 02-shop: answer exactly once per path. The old entry
+    # answer made every error alert below a second answer — Telegram
+    # rejects those, so the alerts never displayed and each bad tap raised.
     try:
         _, cid_s, page_s = query.data.split(":")
         cid, page = int(cid_s), int(page_s)
@@ -58,6 +60,7 @@ async def cb_category(query: types.CallbackQuery):
     if not cat:
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
         return
+    await query.answer()
     total = await db.count_active_products(cid)
     page, _ = paginate(total, page, PER_PAGE)
     items = await db.list_products(cid, PER_PAGE, page * PER_PAGE)
@@ -118,7 +121,13 @@ async def show_product_detail(target, pid: int, user, qty: int = 1):
     if isinstance(target, types.CallbackQuery):
         msg = target.message
         if p["photo_file_id"]:
-            media = types.InputMediaPhoto(p["photo_file_id"], caption=caption)
+            # Audit 20261015 02-shop: captions are HTML (see
+            # texts.MSG_PRODUCT_CAPTION) — InputMedia does not inherit the
+            # bot's default parse mode, so set it explicitly or the caption
+            # renders as literal tags after a photo-to-photo navigation.
+            media = types.InputMediaPhoto(
+                p["photo_file_id"], caption=caption,
+                parse_mode=types.ParseMode.HTML)
             try:
                 if msg.photo:
                     await msg.edit_media(media, reply_markup=markup)
@@ -135,6 +144,10 @@ async def show_product_detail(target, pid: int, user, qty: int = 1):
                                      caption=caption, reply_markup=markup)
         else:
             await edit_text_safe(target, caption, markup)
+        # Audit 20261015 02-shop: cb_product no longer pre-answers, so the
+        # success path answers here, exactly once (the not-found path above
+        # already answered and returned).
+        await target.answer()
     else:
         if p["photo_file_id"]:
             await target.answer_photo(p["photo_file_id"], caption=caption,
@@ -146,7 +159,9 @@ async def show_product_detail(target, pid: int, user, qty: int = 1):
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("p:"), state="*")
 async def cb_product(query: types.CallbackQuery, state: FSMContext):
-    await query.answer()
+    # No entry answer (audit 20261015 02-shop): show_product_detail answers
+    # exactly once on every path — the alert on not-found, a plain answer
+    # on success. Pre-answering here made the alert a rejected 2nd answer.
     try:
         pid = int(query.data.split(":")[1])
     except (ValueError, IndexError):
@@ -163,6 +178,11 @@ async def cb_stepper(query: types.CallbackQuery, state: FSMContext):
         _, pid_s, delta_s = query.data.split(":")
         pid = int(pid_s)
     except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
+    # Audit 20261015 02-shop: any unrecognised delta used to fall through
+    # to -1, silently decrementing on malformed input. Reject it instead.
+    if delta_s not in ("+1", "-1"):
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
         return
     delta = 1 if delta_s == "+1" else -1
