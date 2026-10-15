@@ -304,7 +304,11 @@ async def _process_deposit(dep, now):
                                            txid=best["txid"])
         return
 
-    needed = cp.CHAINS[chain]["confirmations"]
+    # Audit 20261015 04-crypto: read chain metadata via active_chains()
+    # (the single source of truth). Indexing cp.CHAINS directly KeyErrors
+    # on testnet chains (teth/tusdc_base live in TESTNET_CHAINS), which
+    # wedged those deposits into a sweep-error retry loop.
+    needed = cp.active_chains()[chain]["confirmations"]
     # Conservative: every *material* payment must be confirmed. Sub-dust
     # matches (e.g. a 1-satoshi 0-conf grief tx) are ignored so an attacker
     # can't drag the confirmation floor to 0 and block finalization.
@@ -350,7 +354,7 @@ async def _process_deposit(dep, now):
             external_id=best["txid"],
             user_id=dep["topup_user_id"],
             amount_cents=int(dep["expected_usd_cents"]),
-            currency=cp.CHAINS[chain]["symbol"])
+            currency=cp.active_chains()[chain]["symbol"])
         if ok:
             await db.update_crypto_deposit(dep["id"], status="paid")
             u = await db.get_user(dep["topup_user_id"])
@@ -371,7 +375,7 @@ async def _process_deposit(dep, now):
     ok = await finalize_crypto_order(
         dep["order_id"], provider=f"direct_{chain}", external_id=best["txid"],
         amount_cents=order["total_cents"] if order else 0,
-        currency=cp.CHAINS[chain]["symbol"])
+        currency=cp.active_chains()[chain]["symbol"])
     if ok:
         await db.update_crypto_deposit(dep["id"], status="paid")
         logger.info("deposit %s paid via %s (%d txs, ref %s)",

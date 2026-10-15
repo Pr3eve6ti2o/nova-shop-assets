@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import subprocess
 import time
 
@@ -176,7 +177,10 @@ def chain_configured(chain: str) -> bool:
     if chain not in _active:
         return False
     env_key = _active[chain]["xpub_env"]
-    return bool(getattr(config, env_key, None))
+    val = getattr(config, env_key, None)
+    # Audit 20261015 04-crypto: a whitespace-only secret is not configured —
+    # derivation strips it and then fails AFTER an index has been allocated.
+    return bool(val and str(val).strip())
 
 
 def enabled_chains() -> list:
@@ -232,6 +236,12 @@ class _DerivationEngine:
             cwd=os.path.dirname(_WALLET_CORE_DAEMON),
             text=False,
             bufsize=0,
+            # Audit 20261015 04-crypto: the daemon needs no bot secrets —
+            # spawn it with a minimal environment instead of inheriting
+            # BOT_TOKEN / xpubs / API keys. Its protocol is stdin-only
+            # and it reads no environment variables.
+            env={"PATH": os.environ.get("PATH", ""),
+                 "HOME": os.environ.get("HOME", "")},
         )
         try:
             line = self._readline(proc.stdout, self._READY_TIMEOUT)
@@ -271,17 +281,33 @@ class _DerivationEngine:
                     _json.JSONDecodeError, RuntimeError) as e:
                 last_err = str(e)
             # Transport failure: drop the dead daemon so the next attempt
-            # (or next call) spawns a fresh one.
-            try:
-                if self._proc is not None:
-                    self._proc.kill()
-            except Exception:
-                pass
-            self._proc = None
+            # (or next call) spawns a fresh one. Audit 20261015 04-crypto:
+            # teardown happens INSIDE the lock — the old code killed the
+            # daemon after releasing it, so a timed-out call could kill the
+            # daemon mid-request for the next caller, or leave its late
+            # response queued for that caller to consume as its own
+            # deposit address.
+            with self._lock:
+                try:
+                    if self._proc is not None:
+                        self._proc.kill()
+                        self._proc.wait(timeout=5)
+                except Exception:
+                    pass
+                self._proc = None
         raise ValueError(f"wallet-core derive failed for {chain}: {last_err}")
 
 
 _ENGINE = _DerivationEngine()
+
+# Audit 20261015 04-crypto: shape every derived address must match before
+# it is shown to a customer as a deposit address.
+_ADDRESS_SHAPE = {
+    "eth": re.compile(r"^0x[0-9a-fA-F]{40}$"),
+    "trx": re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$"),
+    "btc": re.compile(r"^((bc1|tb1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{39,59}"
+                      r"|[13][1-9A-HJ-NP-Za-km-z]{25,34})$"),
+}
 
 
 def derive_address(chain: str, xpub: str, index: int) -> str:
@@ -305,6 +331,12 @@ def derive_address(chain: str, xpub: str, index: int) -> str:
         raise ValueError(f"unsupported chain: {chain}")
     if not xpub or not xpub.strip():
         raise ValueError(f"missing xpub for {chain}")
+    # Audit 20261015 04-crypto: refuse private extended keys outright. The
+    # custody model is xpub-only (the seed never touches the server); a
+    # pasted xprv/yprv/zprv would silently void it.
+    if xpub.strip().startswith(("xprv", "yprv", "zprv",
+                                 "tprv", "uprv", "vprv")):
+        raise ValueError(f"refusing private extended key for {chain}")
     if not isinstance(index, int) or index < 0 or index > 2147483647:
         # C1: 2^31-1 is the BIP32 non-hardened max. Index 0 is cryptographically
         # valid (test vectors use it); the bot reserves it via next_xpub_index
@@ -312,7 +344,14 @@ def derive_address(chain: str, xpub: str, index: int) -> str:
         raise ValueError(f"bad derivation index: {index}")
     # H1: the xpub travels inside the daemon request body (stdin pipe),
     # never in argv (/proc cmdline is world-readable).
-    return _ENGINE.derive(daemon_chain, xpub, index)
+    address = _ENGINE.derive(daemon_chain, xpub, index)
+    # Audit 20261015 04-crypto: never hand a customer an address we have
+    # not shape-checked — a malformed daemon response would otherwise be
+    # displayed as a deposit address, and funds sent to it are lost.
+    if not _ADDRESS_SHAPE[daemon_chain].match(address or ""):
+        raise ValueError(
+            f"daemon returned a malformed {daemon_chain} address")
+    return address
 
 
 async def next_deposit_address(db, chain: str):
@@ -323,7 +362,14 @@ async def next_deposit_address(db, chain: str):
     if chain == "ton":
         return config.TON_DEPOSIT_ADDRESS, 0, None  # memo set per order
     xpub = getattr(config, active_chains()[chain]["xpub_env"])
-    index = await db.next_xpub_index(chain)
+    # Audit 20261015 04-crypto (P0): the derivation index is scoped to the
+    # DERIVATION DOMAIN (the xpub), not the chain name. Every EVM chain
+    # shares XPUB_ETH and derives through daemon_chain "eth", so per-chain
+    # counters handed the SAME address to the first order on each chain —
+    # two live orders sharing one deposit address, with deposits matched
+    # by address. Migration m016 seeds the scoped counters from the
+    # legacy per-chain ones so no already-issued index is reused.
+    index = await db.next_xpub_index(active_chains()[chain]["xpub_env"])
     address = await asyncio.to_thread(derive_address, chain, xpub, index)
     return address, index, None
 

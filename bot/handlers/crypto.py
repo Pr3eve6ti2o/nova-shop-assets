@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 # Manual "Check My Deposit" rate limit: 1 per 30s per user.
 _last_deposit_check: dict = {}
+# Chain-disable confirmations armed by a first click (admin_id, chain) ->
+# timestamp; a second click within 60s actually disables (04-crypto fix).
+_chain_disable_arm: dict = {}
 _order_locks: dict = {}
 
 
@@ -968,20 +971,35 @@ async def cb_crypto_confirm(query: types.CallbackQuery):
             f"CRITICAL: manual crypto confirm deposit {dep_id} order {dep['order_id']} missing")
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
         return
-    # P0-1: Compare actual received amount against order total.
+    # P0-1 (repaired, Audit 20261015 04-crypto): gate on the ACTUAL
+    # received amount. The old code compared dep["amount_cents"] — a
+    # column crypto_deposits does not have — so received_cents was always
+    # 0 and EVERY manual confirm was blocked as "underpaid"; the
+    # expected-amount column would only have compared the order against
+    # itself anyway. Compare observed vs expected crypto units with the
+    # same tolerance the watcher settles on.
     try:
-        received_cents = int(dep.get("amount_cents") or 0)
+        seen_units = int(dep["seen_amount_crypto"] or 0)
     except (TypeError, ValueError):
-        received_cents = 0
+        seen_units = 0
+    try:
+        expected_units = int(dep["expected_crypto"] or 0)
+    except (TypeError, ValueError):
+        expected_units = 0
     total_cents = int(order.get("total_cents") or 0)
-    if received_cents < total_cents:
+    if not cp.meets_tolerance(seen_units, expected_units):
         logger.warning(
-            "Manual crypto confirm blocked: deposit %s received %s < order total %s",
-            dep_id, received_cents, total_cents)
+            "Manual crypto confirm blocked: deposit %s seen %s < expected %s",
+            dep_id, seen_units, expected_units)
         await db.audit(query.from_user.id, "crypto_manual_confirm_blocked",
-                       f"deposit={dep_id} received={received_cents} total={total_cents}")
+                       f"deposit={dep_id} seen={seen_units} expected={expected_units}")
+        try:
+            seen_disp = cp.format_crypto(seen_units, dep["chain"])
+            exp_disp = cp.format_crypto(expected_units, dep["chain"])
+        except Exception:
+            seen_disp, exp_disp = str(seen_units), str(expected_units)
         await query.answer(
-            f"⚠️ Underpaid: received {received_cents} < {total_cents}. Cannot confirm.",
+            f"⚠️ Underpaid: received {seen_disp} of {exp_disp}. Cannot confirm.",
             show_alert=True)
         return
     # P0-4: Guard chain lookup BEFORE claim — do not KeyError after consuming.
@@ -997,19 +1015,42 @@ async def cb_crypto_confirm(query: types.CallbackQuery):
     claimed = await db.claim_crypto_deposit(dep_id, stable_key,
                                             dep["seen_amount_crypto"] or "0", 999)
     if claimed:
-        await db.update_crypto_deposit(dep_id, status="paid")
-        await finalize_crypto_order(
-            dep["order_id"], provider=f"direct_{dep['chain']}",
-            external_id=stable_key,
-            amount_cents=received_cents,
-            currency=currency)
-        # P1-4: Audit failure must not break the callback contract.
+        # Audit 20261015 04-crypto: finalize BEFORE marking paid, and
+        # honour the result. The old code marked the deposit paid first
+        # and ignored finalize's return value — a failed finalize still
+        # showed "confirmed", marked the money paid, and stranded the
+        # order: the paid guard blocks a re-confirm and the watcher only
+        # sweeps non-paid deposits. On failure the deposit returns to the
+        # retryable 'underpaid' bucket the claim accepts.
         try:
-            await db.audit(query.from_user.id, "crypto_manual_confirm",
-                           f"deposit={dep_id} received={received_cents} total={total_cents}")
+            ok = await finalize_crypto_order(
+                dep["order_id"], provider=f"direct_{dep['chain']}",
+                external_id=stable_key,
+                amount_cents=total_cents,
+                currency=currency)
         except Exception as e:
-            logger.warning("audit failed for manual confirm %s: %s", dep_id, e)
-        await query.answer(texts.TOAST_CRYPTO_CONFIRMED)
+            logger.error("manual confirm finalize raised for deposit %s: %s",
+                         dep_id, e)
+            ok = False
+        if not ok:
+            await db.update_crypto_deposit(dep_id, status="underpaid")
+            await db.audit(query.from_user.id, "crypto_manual_confirm_failed",
+                           f"deposit={dep_id}")
+            await notify_admins(
+                f"⚠️ Manual crypto confirm for deposit {dep_id} claimed "
+                f"but finalize FAILED — deposit left retryable (underpaid).")
+            await query.answer(
+                "⚠️ Finalize failed — the deposit was left retryable, "
+                "not marked paid.", show_alert=True)
+        else:
+            await db.update_crypto_deposit(dep_id, status="paid")
+            # P1-4: Audit failure must not break the callback contract.
+            try:
+                await db.audit(query.from_user.id, "crypto_manual_confirm",
+                               f"deposit={dep_id} seen={seen_units} expected={expected_units}")
+            except Exception as e:
+                logger.warning("audit failed for manual confirm %s: %s", dep_id, e)
+            await query.answer(texts.TOAST_CRYPTO_CONFIRMED)
     else:
         # Lost the race (worker or another admin claimed it first) — do NOT
         # show the confirmed toast.
@@ -1040,6 +1081,21 @@ async def cb_crypto_reject(query: types.CallbackQuery):
     order = await db.get_order(dep["order_id"])
     if order and order["status"] in ("paid", "processing", "delivered", "completed", "refunded", "cancelled"):
         await query.answer(texts.TOAST_CRYPTO_ALREADY, show_alert=True)
+        return
+    # Audit 20261015 04-crypto: never reject a deposit with funds observed
+    # on-chain from this button. The old code cancelled the order and told
+    # the customer it "expired" while the money sat in the merchant
+    # wallet, with no refund path. Money-bearing deposits are confirmed,
+    # or handled via manual review instead (the watcher's H10 rule).
+    try:
+        seen_units = int(dep["seen_amount_crypto"] or 0)
+    except (TypeError, ValueError):
+        seen_units = 0
+    if seen_units > 0:
+        await query.answer(
+            "⚠️ Funds were received on this deposit — it cannot be "
+            "rejected here. Confirm it, or handle the refund via manual "
+            "review.", show_alert=True)
         return
     # P0-3: Atomic status transition — only cancel if still in a cancellable
     # state. Prevents double-reject and admin-vs-worker races.
@@ -1081,16 +1137,25 @@ async def cb_crypto_chain_toggle(query: types.CallbackQuery):
         if cur:  # currently enabled, about to disable
             open_deps = await db.count_open_crypto_deposits(chain)
             if open_deps > 0:
-                logger.warning(
-                    "Disabling chain %s with %d open deposits", chain, open_deps)
-                await db.audit(query.from_user.id, "crypto_chain_toggle_warn",
-                               f"{chain} has {open_deps} open deposits")
-                await query.answer(
-                    f"⚠️ {open_deps} open deposits on {chain}. Disable anyway? Click again to confirm.",
-                    show_alert=True)
-                # Require second click: store pending disable in a simple way
-                # by not toggling yet. Admin clicks again to force.
-                return
+                # Audit 20261015 04-crypto: the second click must actually
+                # force the disable. The old code stored nothing, so every
+                # click re-warned forever and the chain could NEVER be
+                # disabled while deposits were open, despite the alert
+                # promising "click again to confirm". Arm the confirmation
+                # per admin+chain for 60 seconds.
+                arm_key = (query.from_user.id, chain)
+                if time.time() - _chain_disable_arm.get(arm_key, 0) <= 60:
+                    _chain_disable_arm.pop(arm_key, None)
+                else:
+                    _chain_disable_arm[arm_key] = time.time()
+                    logger.warning(
+                        "Disabling chain %s with %d open deposits", chain, open_deps)
+                    await db.audit(query.from_user.id, "crypto_chain_toggle_warn",
+                                   f"{chain} has {open_deps} open deposits")
+                    await query.answer(
+                        f"⚠️ {open_deps} open deposits on {chain}. Disable anyway? Click again to confirm.",
+                        show_alert=True)
+                    return
         await db.set_crypto_chain_enabled(chain, not cur)
         await db.audit(query.from_user.id, "crypto_chain_toggle",
                        f"{chain} -> {not cur}")

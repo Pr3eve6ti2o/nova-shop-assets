@@ -3526,14 +3526,19 @@ class Database:
             await db.commit()
 
     # ---------------------------------------------------------- crypto ---
-    async def next_xpub_index(self, chain: str) -> int:
-        """Atomically fetch-and-increment the per-chain derivation index.
+    async def next_xpub_index(self, scope: str) -> int:
+        """Atomically fetch-and-increment a derivation index counter.
+
+        `scope` is the derivation domain — the xpub's config name (e.g.
+        XPUB_ETH) — NOT a chain name: chains that share one xpub derive
+        identical addresses, so they must share one counter or the same
+        address is issued to two orders (Audit 20261015 04-crypto).
 
         Index 0 is reserved; counting starts at 1. Single-statement
         UPSERT...RETURNING so concurrent checkouts can't get the same index
         (which would reuse a deposit address across two orders).
         """
-        key = f"xpub_index_{chain}"
+        key = f"xpub_index_{scope}"
         async with self._db() as db:
             async with db.execute(
                 # M1: validate the stored value is digits-only; a corrupted
