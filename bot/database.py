@@ -1100,10 +1100,20 @@ class Database:
                         (lot["id"], amt))
                     if cur2.rowcount == 0:
                         continue
-                    await db.execute(
+                    cur3 = await db.execute(
                         "UPDATE users SET balance_cents = balance_cents - ?"
                         " WHERE id=? AND balance_cents >= ?",
                         (amt, lot["user_id"], amt))
+                    if cur3.rowcount == 0:
+                        # Audit 20261015 08-db (P0-1): the guarded debit
+                        # did not happen — the balance backing this lot
+                        # was already spent (deduct_balance consumes only
+                        # non-expired lots, so an expired lot can outlive
+                        # its backing) or is NULL. The lot stays zeroed,
+                        # but the amount must NOT be counted as
+                        # forfeited: the old code added it unconditionally
+                        # and reported money it never actually took.
+                        continue
                     total += amt
                 await db.commit()
         return total
