@@ -195,22 +195,45 @@ async def msg_return_deny_note(message: types.Message, state: FSMContext):
     except ValueError as e:
         return await message.answer(f"⚠️ {e}")
     r = await db.get_return(rid)
-    await message.answer(f"⛔ Return #{rid} denied; the customer was notified.")
+    # Audit 20261015 06-admin: notify BEFORE confirming to the admin —
+    # the old order claimed "the customer was notified" before the send
+    # was even attempted (and send failures are swallowed by design).
     await _notify_customer(
         r, f"↩️ <b>Return decision</b>\n\nOrder #{r['order_id']} — we're "
         f"unable to accept this return.\n\n{r['admin_note']}")
+    await message.answer(f"⛔ Return #{rid} denied; the customer was notified.")
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ad:rtn:done:"),
                            is_admin=config.PERM_ORDERS, state="*")
 async def cb_return_mark_refunded(query: types.CallbackQuery):
-    rid = int(query.data.split(":")[3])
+    try:
+        rid = int(query.data.split(":")[3])
+    except (IndexError, ValueError):
+        return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
     r = await db.get_return(rid)
     if not r:
         return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
     order = await db.get_order(r["order_id"])
-    total = int(order["total_cents"]) if order else 0
-    if not await db.mark_return_refunded(rid, total):
+    if not order:
+        # Audit 20261015 06-admin (P0-1): never close a return against a
+        # missing order — the refund amount would be fiction, and the
+        # DB's over-total refusal surfaced as a silent handler crash.
+        return await query.answer(
+            "⚠️ The order for this return no longer exists — cannot "
+            "mark refunded.", show_alert=True)
+    # P0-2: the refundable amount is what was PAID minus what was
+    # already refunded (the refunds ledger is the source of truth), not
+    # the raw order total — the old code recorded and announced the full
+    # total even after a partial refund.
+    already = sum(int(x["amount_cents"])
+                  for x in await db.refunds_for_order(r["order_id"]))
+    total = max(0, int(order["total_cents"]) - already)
+    try:
+        marked = await db.mark_return_refunded(rid, total)
+    except ValueError as e:
+        return await query.answer(f"⚠️ {e}", show_alert=True)
+    if not marked:
         return await query.answer("⚠️ Not in a refundable state.",
                                   show_alert=True)
     await query.answer("Marked refunded 💸")

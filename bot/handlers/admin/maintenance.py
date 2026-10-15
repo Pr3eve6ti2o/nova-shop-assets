@@ -19,7 +19,14 @@ async def cb_maint_home(query: types.CallbackQuery):
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("mnt:"),
                            is_admin=config.PERM_MAINTENANCE, state="*")
 async def cb_maint_toggle(query: types.CallbackQuery):
-    turn_on = query.data.split(":")[1] == "1"
+    # Audit 20261015 06-admin: strict parse — any value other than
+    # exactly "1"/"0" used to mean OFF, so a malformed or replayed
+    # callback could silently flip the global kill-switch off.
+    parts = query.data.split(":")
+    if len(parts) != 2 or parts[1] not in ("1", "0"):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
+    turn_on = parts[1] == "1"
     await db.kv_set("maintenance_mode", "1" if turn_on else "0")
     await db.audit(query.from_user.id, "maintenance",
                    "on" if turn_on else "off")

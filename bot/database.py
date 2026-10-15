@@ -3183,10 +3183,12 @@ class Database:
             await self.add_balance(user_id, credit, tx_type="refund",
                                    order_id=order_id)
         async with self._db() as db:
+            # Record what was actually credited (net of prior refunds),
+            # not the raw order total (Audit 20261015 06-admin).
             await db.execute(
                 "UPDATE returns SET status='refunded', refund_cents=?"
                 " WHERE id=? AND status='approved'",
-                (total, return_id))
+                (credit, return_id))
             await db.commit()
         if order and order["status"] != "refunded":
             await self.set_order_status(order_id, "refunded")

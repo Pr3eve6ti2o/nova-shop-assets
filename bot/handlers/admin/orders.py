@@ -1,4 +1,5 @@
 """Admin orders: filter by status, detail, status transitions with user notify."""
+import logging
 from html import escape as _escape
 
 from aiogram import types
@@ -8,8 +9,13 @@ import keyboards as kb
 import texts
 from loader import bot, db, dp
 from utils import fmt_money, paginate
-from ..common import edit_text_safe, render_lines, totals_text, fulfill_order, maybe_credit_referral
+from ..common import edit_text_safe, render_lines, totals_text, fulfill_order, maybe_credit_referral, notify_admins
 from . import IsAdmin
+
+# Audit 20261015 06-admin: this module used logger.warning on the
+# stale-claim retry path without ever defining a logger — that recovery
+# path crashed with NameError exactly when an admin needed it.
+logger = logging.getLogger(__name__)
 
 PER_PAGE = 8
 
@@ -94,8 +100,14 @@ async def cb_orders_list(query: types.CallbackQuery):
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ad:o:"),
                            is_admin=config.PERM_ORDERS, state="*")
 async def cb_order_detail(query: types.CallbackQuery):
-    await query.answer()
-    oid = int(query.data.split(":")[2])
+    # No entry answer (Audit 20261015 06-admin): the not-found branch
+    # answers with an alert, and a callback query can only be answered
+    # once — the alert was being rejected by Telegram.
+    try:
+        oid = int(query.data.split(":")[2])
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     order = await db.get_order(oid)
     if not order:
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
@@ -127,8 +139,12 @@ async def cb_order_detail(query: types.CallbackQuery):
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ad:os:"),
                            is_admin=config.PERM_ORDERS, state="*")
 async def cb_order_set_status(query: types.CallbackQuery):
-    _, _, oid_s, status = query.data.split(":")
-    oid = int(oid_s)
+    try:
+        _, _, oid_s, status = query.data.split(":")
+        oid = int(oid_s)
+    except (ValueError, IndexError):
+        await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
+        return
     if status not in texts.ORDER_STATUSES:
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
         return
@@ -164,19 +180,57 @@ async def cb_order_set_status(query: types.CallbackQuery):
                 await query.answer("Another admin is fulfilling this order.",
                                    show_alert=True)
                 return
+            # Audit 20261015 06-admin (F1): the stale check above is only
+            # a read — two admins clicking together both passed it and
+            # both fulfilled (double keys / stock / referral credit).
+            # Steal the claim atomically; only the winner may fulfill.
+            # The crypto watcher already uses this same CAS.
+            if not await db.steal_stale_order_claim(oid, minutes=5):
+                await query.answer("Another admin is fulfilling this order.",
+                                   show_alert=True)
+                return
             logger.warning("admin confirm retrying fulfillment of stuck "
                            "processing order %s", oid)
-        ok, note = await fulfill_order(oid)
+        try:
+            ok, note = await fulfill_order(oid)
+        except Exception:
+            # F9: an exception here used to kill the handler silently —
+            # no answer for the admin, claim left held.
+            logger.exception("fulfill_order raised for order %s", oid)
+            await query.answer(
+                "⚠️ Fulfilment error — the order stays in processing "
+                "and can be retried.", show_alert=True)
+            return
+        # Telegram rejects callback answers over 200 chars (F10).
+        note = (note or "")[:180]
         if not ok:
             await query.answer(f"\u26a0\ufe0f {note}", show_alert=True)
             return
         await maybe_credit_referral(await db.get_order(oid))
-    await db.set_order_status(oid, status)
     if status == "cancelled" and order["status"] != "cancelled":
         # Opus P0: only release promo on the actual transition INTO
         # cancelled — repeated cancels were releasing it multiple times,
         # making the promo infinitely reusable.
-        await db.release_order_promo(oid)  # M2: don't burn promo on cancel
+        # Audit 20261015 06-admin (F12): win that transition ATOMICALLY
+        # (compare-and-set on the status read above) — two concurrent
+        # cancels both passed the old snapshot check and both released
+        # the promo. If the CAS loses, the other transition stands and
+        # nothing is released here.
+        if await db.set_order_status(oid, "cancelled",
+                                      only_if_status=order["status"]):
+            await db.release_order_promo(oid)  # M2: don't burn promo on cancel
+            if await _order_is_paid(order):
+                # F4: cancelling a PAID order strands the customer's
+                # money unless a refund follows — make it unmissable in
+                # the audit log and the admin chat.
+                await db.audit(query.from_user.id, "order_cancel_paid",
+                               f"order={oid} refund_owed")
+                await notify_admins(
+                    f"⚠️ Paid order #{oid} was cancelled by an admin — "
+                    f"a refund is owed to the customer (handle it via "
+                    f"returns / store credit).")
+    else:
+        await db.set_order_status(oid, status)
     await db.audit(query.from_user.id, "order_status", f"order={oid} status={status}")
     user = await db.get_user(order["user_id"])
     if user:
