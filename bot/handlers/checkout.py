@@ -933,14 +933,16 @@ async def cb_change_payment(query: types.CallbackQuery, state: FSMContext):
     await db.audit(user["id"], "order_cancel_payment_change",
                    f"order={oid} method={order['payment_method']}")
     restored = 0
-    digital_only = True
+    skipped = []
     for it in await db.get_order_items(oid):
         p = await db.get_product(it["product_id"])
-        if not p or not p["is_active"]:
-            digital_only = False
+        # Audit 20261015 03-checkout: re-validate availability (active AND
+        # stock at the historical quantity), not just is_active — the old
+        # loop restored out-of-stock items and put the payment screen on
+        # top of a cart the normal flow would have rejected.
+        if not await product_available(p, it["qty"]):
+            skipped.append(it["name"])
             continue
-        if p["kind"] != "digital":
-            digital_only = False
         await db.cart_add(user["id"], it["product_id"], it["qty"])
         restored += 1
     await query.answer()
@@ -948,12 +950,27 @@ async def cb_change_payment(query: types.CallbackQuery, state: FSMContext):
         await state.finish()
         from .cart import render_cart
         await render_cart(query, user["id"], state)
+        if skipped:
+            await query.message.answer(texts.MSG_CART_DROPPED.format(
+                names=", ".join(html.escape(n) for n in skipped)))
         return
-    # Re-enter checkout at the payment step with the order's details.
+    # Re-enter checkout at the payment step.
     # NOTE: a consumed promo stays consumed (one use per user); the new order
     # is placed at full price.
+    # Audit 20261015 03-checkout: mirror start_checkout's state hygiene. The
+    # old code resurrected the cancelled order's delivery_kind / phone /
+    # address and derived details_skipped from the item mix — with an old
+    # delivery order that re-enabled the switched-off details/COD path —
+    # and it left the cancelled order's payment keys (order_id, invoice_id,
+    # pending_crypto_order_id, amounts) sitting in state. Reset them
+    # exactly the way start_checkout does.
     await state.update_data(
-        delivery_kind=order["delivery_kind"], phone=order["phone"],
-        address=order["address"], payment_method=None, promo_code=None,
-        details_skipped=digital_only)
+        order_id=None, amount=None, invoice_id=None, pay_amount=None,
+        pending_crypto_order_id=None,
+        delivery_kind="pickup", phone=None, address=None,
+        payment_method=None, promo_code=None,
+        details_skipped=True)
     await render_payment(query, state, user["id"])
+    if skipped:
+        await query.message.answer(texts.MSG_CART_DROPPED.format(
+            names=", ".join(html.escape(n) for n in skipped)))
