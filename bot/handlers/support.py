@@ -267,12 +267,21 @@ async def cb_support_reply(query: types.CallbackQuery, state: FSMContext):
     if not allowed:
         await query.answer(texts.MSG_ADMIN_DENIED, show_alert=True)
         return
-    target = int(query.data.split(":")[1])
+    try:
+        target = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        return await query.answer(texts.ERR_GENERIC, show_alert=True)
     await query.answer()
     await AdminReplyFlow.waiting_text.set()
-    await state.update_data(reply_to=target)
-    await query.message.answer(texts.MSG_SUPPORT_REPLY_ASK.format(tg_id=target),
-                               reply_markup=kb.force_reply())
+    # Audit 20261015 07-users (P1-1): start a FRESH reply context. The old
+    # update_data merge left a reply_ticket from an earlier inbox flow in
+    # state, so this reply was also filed into that (possibly another
+    # customer's) ticket thread.
+    await state.set_data({"reply_to": target, "reply_ticket": None})
+    sent = await query.message.answer(
+        texts.MSG_SUPPORT_REPLY_ASK.format(tg_id=target),
+        reply_markup=kb.force_reply())
+    await state.update_data(reply_prompt=sent.message_id)
 
 
 @dp.message_handler(state=AdminReplyFlow.waiting_text)
@@ -287,7 +296,22 @@ async def admin_reply_text(message: types.Message, state: FSMContext):
     data = await state.get_data()
     target = data.get("reply_to")
     reply_ticket = data.get("reply_ticket")
+    # Audit 20261015 07-users (P1-B): if the admin replied to a SPECIFIC
+    # prompt message and it is not the active prompt, they are answering
+    # a stale prompt from another conversation — never deliver that text
+    # to the current target.
+    prompt_id = data.get("reply_prompt")
+    if prompt_id and message.reply_to_message is not None \
+            and message.reply_to_message.message_id != prompt_id:
+        return await message.answer(
+            "⚠️ That reply prompt belongs to an earlier conversation — "
+            "your text was not sent. Please use the latest reply prompt.")
     text = (message.text or "").strip()
+    if not text:
+        # Was a silent no-op: the flow disarmed and the admin believed
+        # the reply had gone out.
+        return await message.answer(
+            "⚠️ Please type the reply as a text message — nothing was sent.")
     if len(text) > 2000:
         return await message.answer(
             "⚠️ That reply is too long (max 2,000 characters). "
@@ -295,7 +319,8 @@ async def admin_reply_text(message: types.Message, state: FSMContext):
     await state.finish()
     if target and text:
         try:
-            await bot.send_message(target, texts.MSG_SUPPORT_FROM_ADMIN.format(text=text))
+            await bot.send_message(
+                target, texts.MSG_SUPPORT_FROM_ADMIN.format(text=h(text)))
             # Port 3.1: store the reply in the thread so both sides keep
             # the full conversation. Explicit ticket (inbox) wins; else
             # the customer's most recent open ticket.
@@ -375,7 +400,10 @@ async def cb_inbox_view(query: types.CallbackQuery, state: FSMContext):
     if not await _support_admin(query.from_user.id):
         return await query.answer(texts.MSG_ADMIN_DENIED, show_alert=True)
     await state.finish()
-    tid = int(query.data.split(":")[1])
+    try:
+        tid = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        return await query.answer(texts.ERR_GENERIC, show_alert=True)
     t = await db.ticket_get(tid)
     if not t:
         return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
@@ -384,13 +412,17 @@ async def cb_inbox_view(query: types.CallbackQuery, state: FSMContext):
     thread = await db.ticket_messages(tid, limit=15)
     lines = [f"🎫 <b>Ticket #{tid}</b> — {t['status']}"
              + (f" · order #{t['order_id']}" if t["order_id"] else ""),
-             f"Customer: {customer['name'] if customer else '?'}"
+             f"Customer: {h(customer['name']) if customer else '?'}"
              f" (<code>{customer['tg_id'] if customer else '?'}</code>)",
              ""]
     for m in thread:
         who = "🧑 Customer" if m["sender"] == "user" else "🛟 Support"
         when = (m["created_at"] or "")[:16].replace("T", " ")
-        lines.append(f"<b>{who}</b> · {when}\n{m['body']}")
+        # Audit 20261015 07-users (P1-A): the ticket body is raw customer
+        # input rendered into the ADMIN's chat with HTML parse mode —
+        # unescaped it forged support messages or broke the whole view.
+        # The customer-side view already escapes with h(); this one didn't.
+        lines.append(f"<b>{who}</b> · {when}\n{h(m['body'])}")
     markup = types.InlineKeyboardMarkup(row_width=2)
     if t["status"] == "open":
         markup.add(InlineKeyboardButton(
@@ -406,7 +438,10 @@ async def cb_inbox_view(query: types.CallbackQuery, state: FSMContext):
 async def cb_inbox_reply(query: types.CallbackQuery, state: FSMContext):
     if not await _support_admin(query.from_user.id):
         return await query.answer(texts.MSG_ADMIN_DENIED, show_alert=True)
-    tid = int(query.data.split(":")[1])
+    try:
+        tid = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        return await query.answer(texts.ERR_GENERIC, show_alert=True)
     t = await db.ticket_get(tid)
     if not t or t["status"] != "open":
         return await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
@@ -416,17 +451,27 @@ async def cb_inbox_reply(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
     await AdminReplyFlow.waiting_text.set()
     await state.update_data(reply_to=customer["tg_id"], reply_ticket=tid)
-    await query.message.answer(
+    sent = await query.message.answer(
         texts.MSG_SUPPORT_REPLY_ASK.format(tg_id=customer["tg_id"]),
         reply_markup=kb.force_reply())
+    await state.update_data(reply_prompt=sent.message_id)
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("supx:"),
                            state="*")
-async def cb_inbox_close(query: types.CallbackQuery):
+async def cb_inbox_close(query: types.CallbackQuery, state: FSMContext):
     if not await _support_admin(query.from_user.id):
         return await query.answer(texts.MSG_ADMIN_DENIED, show_alert=True)
-    tid = int(query.data.split(":")[1])
+    # Audit 20261015 07-users (P1-C): closing the ticket must disarm a
+    # live reply flow — the old handler never touched the state, so the
+    # admin's next ordinary message was delivered to the customer as a
+    # support reply for a ticket that was already closed.
+    if await state.get_state() == AdminReplyFlow.waiting_text.state:
+        await state.finish()
+    try:
+        tid = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        return await query.answer(texts.ERR_GENERIC, show_alert=True)
     if await db.ticket_close(tid):
         await query.answer("Ticket closed ✅")
     else:

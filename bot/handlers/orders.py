@@ -118,7 +118,7 @@ async def show_order_detail(target, oid: int, user: dict):
             await target.answer(texts.ERR_NOT_FOUND, show_alert=True)
         else:
             await target.answer(texts.ERR_NOT_FOUND)
-        return
+        return True  # answered (callback) — caller must not answer again
     # H4: never render delivered keys outside a private chat (group deep links).
     if isinstance(target, types.Message) and target.chat.type != "private":
         username = await _bot_username()
@@ -226,18 +226,22 @@ async def show_order_detail(target, oid: int, user: dict):
     else:
         await target.answer(text, reply_markup=markup,
                             disable_web_page_preview=True)
+    return False
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("o:"), state="*")
 async def cb_order_detail(query: types.CallbackQuery):
-    await query.answer()
+    # Audit 20261015 07-users: no entry answer — show_order_detail
+    # answers the not-found alert itself, and a callback query can only
+    # be answered once (both alerts used to be rejected by Telegram).
     try:
         oid = int(query.data.split(":")[1])
     except (ValueError, IndexError):
         await query.answer(texts.ERR_NOT_FOUND, show_alert=True)
         return
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
-    await show_order_detail(query, oid, user)
+    if not await show_order_detail(query, oid, user):
+        await query.answer()
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("or:"), state="*")
@@ -327,7 +331,9 @@ async def cb_buy_again(query: types.CallbackQuery, state: FSMContext):
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("oc:"), state="*")
 async def cb_order_cancel_ask(query: types.CallbackQuery):
     """Ask for confirmation before the user cancels their own pending order."""
-    await query.answer()
+    # Audit 20261015 07-users: no entry answer — every error branch below
+    # answers with an alert, and a callback query can only be answered
+    # once (all three alerts used to be dead code).
     try:
         oid = int(query.data.split(":")[1])
     except (ValueError, IndexError):
@@ -348,6 +354,7 @@ async def cb_order_cancel_ask(query: types.CallbackQuery):
                                    callback_data=f"o:{oid}"))
     await edit_text_safe(query, texts.MSG_ORDER_CANCEL_ASK.format(oid=oid),
                          markup)
+    await query.answer()
 
 
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("ocx:"), state="*")

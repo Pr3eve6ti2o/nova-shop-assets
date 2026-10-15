@@ -75,28 +75,32 @@ async def cb_profile(query: types.CallbackQuery, state: FSMContext):
         await state.finish()
     except Exception:
         pass
-    await query.answer()
     # Fail closed: refuse if there's no message context (e.g. inline mode).
+    # Audit 20261015 07-users: the guard runs BEFORE the plain answer —
+    # a callback query can only be answered once, so the privacy alert
+    # used to be rejected by Telegram.
     chat_type = query.message.chat.type if query.message else None
     if chat_type != "private":
         await query.answer(
             "Your profile is private — please open me in a private chat.",
             show_alert=True)
         return
+    await query.answer()
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     await render_profile(query, user)
 
 
 @dp.callback_query_handler(text="wl", state="*")
 async def cb_wishlist(query: types.CallbackQuery):
-    await query.answer()
     # Wishlist contents are personal; don't render them in groups.
+    # Guard before the plain answer (single-answer rule, 07-users).
     chat_type = query.message.chat.type if query.message else None
     if chat_type != "private":
         await query.answer(
             "Your wishlist is private — please open me in a private chat.",
             show_alert=True)
         return
+    await query.answer()
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     items = await db.wishlist_list(user["id"])
     if not items:
@@ -114,16 +118,17 @@ async def cb_purchases(query: types.CallbackQuery, state: FSMContext):
         await state.finish()
     except Exception:
         pass
-    await query.answer()
     # Never render delivered keys outside a private chat: in a group,
     # anyone present could read and steal the user's license keys.
     # Fail closed: if there's no message context (e.g. inline), refuse.
+    # Guard before the plain answer (single-answer rule, 07-users).
     chat_type = query.message.chat.type if query.message else None
     if chat_type != "private":
         await query.answer(
             "Your purchases contain secret keys — please open me in a private chat to view them.",
             show_alert=True)
         return
+    await query.answer()
     user, _ = await get_or_register(query.from_user.id, query.from_user.full_name)
     # P0-1: Paginate instead of hard-capping at 50 orders.
     try:
@@ -173,7 +178,20 @@ async def cb_purchases(query: types.CallbackQuery, state: FSMContext):
             text += f"\n\n(Page {page + 1} \u2014 more orders available)"
         elif page > 0:
             text += f"\n(Page {page + 1})"
-        await edit_text_safe(query, text, kb.profile_kb())
+        # Audit 20261015 07-users: the pager existed in the handler but
+        # no button could ever reach page 2+ — customers with more than
+        # one page of orders had no way to reach their older keys.
+        markup = kb.profile_kb()
+        if has_more or page > 0:
+            nav = []
+            if page > 0:
+                nav.append(types.InlineKeyboardButton(
+                    "⬅️ Newer", callback_data=f"pur:{page - 1}"))
+            if has_more:
+                nav.append(types.InlineKeyboardButton(
+                    "Older ➡️", callback_data=f"pur:{page + 1}"))
+            markup.row(*nav)
+        await edit_text_safe(query, text, markup)
 
 
 @dp.callback_query_handler(text="ref", state="*")
@@ -228,5 +246,8 @@ async def cb_redeem(query: types.CallbackQuery, state: FSMContext):
         return
     await query.answer()
     await CartPromo.waiting_code.set()
-    await state.update_data(promo_origin="redeem")
+    # Audit 20261015 07-users: replace the FSM data instead of merging —
+    # leftover keys from an abandoned checkout/cart flow used to bleed
+    # into the redeem flow.
+    await state.set_data({"promo_origin": "redeem"})
     await query.message.answer(texts.MSG_REDEEM_ASK, reply_markup=kb.force_reply())
