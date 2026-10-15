@@ -1,7 +1,13 @@
 """SaaS tenant management - multi-tenant bot platform.
 
-Pricing: $4.99/month, $49.99/year
-Architecture: Shared DB with tenant_id, encrypted bot tokens
+Pricing (standing plan, one plan two cycles): $8.99/month, $89.99/year.
+Architecture: Shared DB with tenant_id, encrypted bot tokens.
+
+NOTE (Audit 20261015 05-rent): this module is a scaffold — nothing in the
+bot imports it yet. Live rental billing runs through the control plane
+(/api/internal/plans), which is the pricing authority; the constants
+below mirror the standing plan so a future wiring can never mint the
+old $4.99/$49.99 table by accident.
 """
 import hashlib
 import secrets
@@ -12,8 +18,8 @@ from typing import Optional
 PLAN_MONTHLY = "monthly"
 PLAN_YEARLY = "yearly"
 PRICES = {
-    PLAN_MONTHLY: 499,   # $4.99 in cents
-    PLAN_YEARLY: 4999,   # $49.99 in cents
+    PLAN_MONTHLY: 899,   # $8.99 in cents
+    PLAN_YEARLY: 8999,   # $89.99 in cents
 }
 
 # Tenant statuses

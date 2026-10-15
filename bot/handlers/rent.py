@@ -63,7 +63,10 @@ async def _get_plans():
     # Plans and prices come from the control plane (/api/internal/plans).
     # Never hardcode prices here (audit 26).
     order = {"RENTAL_MONTHLY": 0, "RENTAL_YEARLY": 1}
-    rental = [p for p in plans if p.get("name") in order]
+    # Require the fields the renderers dereference — a malformed plan row
+    # otherwise crashes _plans_text/_price outside any try (05-rent).
+    rental = [p for p in plans if p.get("name") in order
+              and p.get("id") is not None and p.get("priceCents") is not None]
     rental.sort(key=lambda p: order.get(p.get("name"), 99))
     return rental
 
@@ -111,7 +114,11 @@ def _per(p):
 
 
 def _price(p):
-    return f"${p['priceCents'] / 100:g}"
+    # Integer minor-unit math only (Audit 20261015 05-rent): the old
+    # float `:g` format dropped trailing zeros ($8.90 -> "$8.9") and
+    # could round large prices.
+    cents = int(p["priceCents"])
+    return f"${cents // 100}.{cents % 100:02d}"
 
 
 def _trial(p):
@@ -288,12 +295,23 @@ async def cb_rent_select(query: types.CallbackQuery):
         await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE)
         return
 
+    trial = _trial(plan)
+    if trial:
+        # Trials are first-time-only (standing plan). The local history
+        # flag knows whether this user has ever subscribed — don't
+        # advertise a trial they will not get (Audit 20261015 05-rent).
+        try:
+            u = await db.get_user_by_tg(query.from_user.id)
+            if u and u["has_rental_history"]:
+                trial = ""
+        except Exception:
+            pass
     text = texts.MSG_RENT_DETAIL.format(
         name=_plan_label(plan),
         price=_price(plan),
         per=_per(plan),
         period=_period(plan),
-        trial=_trial(plan),
+        trial=trial,
     )
     await edit_text_safe(query, text, reply_markup=kb.rent_method_kb(selected_id))
 
@@ -321,7 +339,13 @@ async def cb_rent_method(query: types.CallbackQuery):
         await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE, reply_markup=kb.rent_back_kb())
         return
 
-    method_label = {"balance": "Balance", "cryptobot": "CryptoBot", "crypto": "Crypto payments"}.get(provider, provider)
+    # Audit 20261015 05-rent: never echo an unvalidated provider into the
+    # (HTML) confirm text or onward into the confirm button / billing API.
+    if provider not in _RENT_PROVIDERS:
+        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE, reply_markup=kb.rent_back_kb())
+        return
+
+    method_label = {"balance": "Balance", "cryptobot": "CryptoBot", "crypto": "Crypto payments"}[provider]
     text = texts.MSG_RENT_CONFIRM.format(
         name=_plan_label(plan),
         price=_price(plan),
@@ -331,12 +355,61 @@ async def cb_rent_method(query: types.CallbackQuery):
     await edit_text_safe(query, text, reply_markup=kb.rent_confirm_kb(plan_id, provider))
 
 
+# Audit 20261015 05-rent: one subscription attempt at a time per user.
+_rent_locks: dict = {}
+
+
+def _rent_lock(tg_id: int) -> asyncio.Lock:
+    lock = _rent_locks.get(tg_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _rent_locks[tg_id] = lock
+    return lock
+
+
+# Providers the method keyboard can emit (keyboards.rent_method_kb).
+_RENT_PROVIDERS = ("balance", "cryptobot", "crypto")
+
+
 @dp.callback_query_handler(lambda q: q.data and q.data.startswith("rent:confirm:"), state="*")
 async def cb_rent_confirm(query: types.CallbackQuery):
-    await query.answer()
     parts = query.data.split(":")
     plan_id = parts[2] if len(parts) > 2 else ""
     provider = parts[3] if len(parts) > 3 else "balance"
+
+    # A double-tap (or a retry while the control plane is slow) must not
+    # POST /api/subscriptions twice. The control plane still owes true
+    # idempotency keys; this closes the client-side race.
+    lock = _rent_lock(query.from_user.id)
+    if lock.locked():
+        await query.answer("⏳ Already processing your rental…", show_alert=True)
+        return
+    await query.answer()
+    async with lock:
+        await _rent_confirm_inner(query, plan_id, provider)
+
+
+async def _rent_confirm_inner(query: types.CallbackQuery, plan_id, provider):
+    # Audit 20261015 05-rent: validate provider AND plan before any money
+    # call. The provider used to flow unvalidated from callback data into
+    # the confirm text (raw echo into an HTML message) and on to the
+    # billing API; the plan_id was never re-checked here at all.
+    if provider not in _RENT_PROVIDERS:
+        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE, reply_markup=kb.rent_back_kb())
+        return
+    try:
+        plans = await _get_plans()
+    except RuntimeError:
+        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE, reply_markup=kb.rent_back_kb())
+        return
+    plan = None
+    for p in plans:
+        if str(p.get("id")) == str(plan_id):
+            plan = p
+            break
+    if plan is None:
+        await edit_text_safe(query, texts.MSG_RENT_UNAVAILABLE, reply_markup=kb.rent_back_kb())
+        return
 
     try:
         user_id = await _get_user_id(query.from_user.id, query.from_user.username, query.from_user.first_name)
@@ -392,17 +465,13 @@ async def cb_rent_confirm(query: types.CallbackQuery):
         await edit_text_safe(query, text, reply_markup=_rent_success_kb())
         return
 
-    if provider == "balance":
-        amount = ""
-        try:
-            plans = await _get_plans()
-            for p in plans:
-                if str(p.get("id")) == str(plan_id):
-                    amount = _price(p)
-                    break
-        except RuntimeError:
-            amount = ""
-        text = texts.MSG_RENT_CHARGED.format(amount=amount)
+    if provider == "balance" and status == "ACTIVE":
+        # Audit 20261015 05-rent: only an ACTIVE subscription may be
+        # reported as charged. The old code showed "Charged" for ANY
+        # non-trial balance response (pending / past-due / malformed),
+        # confirming a settlement that may never have happened. Other
+        # statuses fall through to the invoice path below.
+        text = texts.MSG_RENT_CHARGED.format(amount=_price(plan))
         await edit_text_safe(query, text, reply_markup=_rent_success_kb())
         return
 
@@ -441,8 +510,17 @@ async def _my_rental_text(tg_id: int):
     if not subs:
         return texts.MSG_RENT_NONE, kb.rent_back_kb()
 
-    sub = subs[0]
-    until = sub.get("trialEndsAt") or sub.get("currentPeriodEnd")
+    # Audit 20261015 05-rent: show the actionable subscription, not
+    # whatever the API happens to list first; and the "until" date is the
+    # trial end only while actually trialing — the old precedence showed
+    # a long-past trialEndsAt as the renewal date of an active sub.
+    sub = next((s for s in subs
+                if s.get("status") in ("TRIALING", "ACTIVE", "PAST_DUE")),
+               subs[0])
+    if sub.get("status") == "TRIALING":
+        until = sub.get("trialEndsAt") or sub.get("currentPeriodEnd")
+    else:
+        until = sub.get("currentPeriodEnd") or sub.get("trialEndsAt")
     text = texts.MSG_RENT_MINE.format(
         plan=_plan_label(sub.get("planName")),
         status=sub.get("status"),

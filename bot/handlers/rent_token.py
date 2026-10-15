@@ -140,7 +140,9 @@ def _managed_available() -> bool:
 
 def _managed_newbot_url() -> str:
     manager = getattr(config, "MANAGER_BOT_USERNAME", "")
-    return f"https://t.me/newbot/{manager}"
+    # Audit 20261015 05-rent: t.me/newbot/<name> is not a valid bot link —
+    # the express-setup link must open the manager bot itself.
+    return f"https://t.me/{manager}"
 
 
 def _cancel_kb() -> InlineKeyboardMarkup:
