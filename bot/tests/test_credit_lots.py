@@ -107,6 +107,39 @@ class CreditLots(unittest.TestCase):
             self.assertEqual(await db.get_balance(uid), 600)
         self.run_async(go())
 
+    def test_expired_lot_unspendable_before_sweep(self):
+        async def go():
+            db, uid = await _fixture()
+            await db.add_balance(uid, 1000, tx_type="refund")
+            await db.add_balance(uid, 500, tx_type="refund",
+                                 expires_days=365)
+            async with db._db() as c:
+                await c.execute(
+                    "UPDATE credit_lots SET expires_at='2000-01-01T00:00:00'"
+                    " WHERE amount_cents=500")
+                await c.commit()
+            # No sweep has run: the plain balance still reads 1500, but
+            # the expired 500 must not be spendable.
+            self.assertEqual(await db.get_balance(uid), 1500)
+            out = await db.deduct_balance(
+                uid, 1001, order_id=await _order(db, uid))
+            self.assertIsNone(out)
+            self.assertEqual(await db.get_balance(uid), 1500)
+            # The unexpired 1000 is fully spendable.
+            new_bal = await db.deduct_balance(
+                uid, 1000, order_id=await _order(db, uid))
+            self.assertEqual(new_bal, 500)
+            # Admin debits (adjust_balance -> deduct_balance) are
+            # capped the same way and fail closed.
+            out = await db.adjust_balance(
+                uid, -1, tx_type="admin_debit", actor_type="admin")
+            self.assertIsNone(out)
+            # After the sweep forfeits the dead lot, the books agree.
+            self.assertEqual(await db.credit_sweep_expired(), 500)
+            self.assertEqual(await db.get_balance(uid), 0)
+            self.assertTrue(await _invariant(db, uid))
+        self.run_async(go())
+
     def test_topup_bonus_lands_in_the_lot(self):
         async def go():
             db, uid = await _fixture()

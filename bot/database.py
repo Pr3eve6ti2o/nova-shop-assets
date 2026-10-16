@@ -667,11 +667,25 @@ class Database:
             raise ValueError("amount_cents must be positive")
         async with self._claim_lock:
             async with self._db() as db:
-                # Atomic: only deduct if sufficient balance (prevents race)
+                # Expired lots are unspendable from the moment they
+                # expire, not from the next sweep: cap the debit at the
+                # spendable balance (plain balance minus the remainders
+                # of lots already expired). Computed inside the claim
+                # lock and enforced by the same conditional UPDATE, so
+                # the guard stays atomic.
+                async with db.execute(
+                        "SELECT COALESCE(SUM(remaining_cents), 0) s"
+                        " FROM credit_lots WHERE user_id=?"
+                        " AND remaining_cents > 0"
+                        " AND expires_at IS NOT NULL AND expires_at <= ?",
+                        (user_id, utcnow_iso())) as curE:
+                    expired_backing = int((await curE.fetchone())["s"])
+                # Atomic: only deduct if sufficient spendable balance
+                # (prevents race)
                 cur = await db.execute(
                     "UPDATE users SET balance_cents = balance_cents - ? "
-                    "WHERE id=? AND balance_cents >= ?",
-                    (amount_cents, user_id, amount_cents))
+                    "WHERE id=? AND balance_cents - ? >= ?",
+                    (amount_cents, user_id, expired_backing, amount_cents))
                 if cur.rowcount == 0:
                     return None
                 async with db.execute(
